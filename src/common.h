@@ -75,7 +75,6 @@ constexpr UINT_PTR kTimerFullscreen = 2;
 constexpr UINT_PTR kTimerShowPopup = 3;
 constexpr UINT_PTR kTimerAfterAutoHide = 4;  // 关掉自动隐藏以后收拾窗口和桌面图标
 constexpr UINT_PTR kTimerRetryOff = 5;       // 没能关掉自动隐藏，过一会儿再试
-constexpr UINT_PTR kTimerTray = 6;           // 点托盘图标的分步操作
 
 // 主窗口消息
 constexpr UINT WM_APP_TRAY = WM_APP + 1;       // 托盘图标的鼠标事件
@@ -123,7 +122,6 @@ bool Hook_Install();
 void Hook_Uninstall();
 void Hook_Configure(bool enabled, int thresholdMs);
 void SendStartMenu();
-void SendWinCombo(WORD vk);  // 模拟 Win+vk，钩子不拦
 
 // ---------------- 窗口列表 ----------------
 struct WindowEntry {
@@ -247,18 +245,6 @@ std::wstring LogFile();
 void WaitForVBlank();  // 等到下一次屏幕刷新，让动画按显示器的节奏走
 bool CaptureScreen(const RECT& area, std::vector<DWORD>& pixels);  // 截屏，BGRA，不透明
 void SetWindowRectAsync(HWND hwnd, const RECT& rect);  // 挪别的程序的窗口：异步、不激活、不改层次
-
-// ---------------- 系统托盘（tray.cpp）----------------
-struct TrayApp {
-    std::wstring name, exe;
-    std::shared_ptr<Gdiplus::Bitmap> icon;
-    bool promoted = false;  // 用户设成在任务栏上一直显示
-};
-std::vector<TrayApp> Tray_Load(int iconPx);       // 现在正在运行、有托盘图标的程序
-void Tray_Click(const TrayApp& app, bool right);  // 去真任务栏上点它的图标
-void Tray_ShowHidden();     // 展开“显示隐藏的图标”
-void Tray_QuickSettings();  // Win+A
-void Tray_Notifications();  // Win+N
 
 // System.AppUserModel.ID，自己定义一份，免得依赖 propkey.h 的链接方式
 constexpr PROPERTYKEY kPkeyAppUserModelId = {

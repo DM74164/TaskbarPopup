@@ -53,7 +53,6 @@ struct Tile {
 struct Layout {
     float margin, pad, tile, gap, titleH, sep, clockW, emptyW, radius, rowGap, sliderH, minPanelW;
     float panelW, panelH, itemsX, itemsW, tilesX, clockX, tileY, sliderY;
-    float trayX, trayW, cell;  // 托盘：两行小格子，最后一列是“隐藏的图标”和快速设置
 };
 
 // 调节条：0 是音量，1 是亮度
@@ -65,10 +64,6 @@ struct Slider {
 
 // 鼠标下的调节条部件
 enum Control { kNone, kVolumeIcon, kVolumeTrack, kBrightIcon, kBrightTrack };
-
-// 托盘格子：0 ~ s_trayShown-1 是托盘图标，接着是快速设置、隐藏的图标；时钟单独一个编号
-constexpr int kMaxTrayApps = 8;
-constexpr int kTrayClock = 1000;
 
 int SliderOf(int control) { return control == kVolumeIcon || control == kVolumeTrack ? 0 : 1; }
 
@@ -104,9 +99,6 @@ int s_brightness = -1;  // 0~100；-1 = 这块屏不支持；-2 = 还在读
 std::vector<std::pair<HMONITOR, int>> s_knownBrightness;  // 读到过的亮度，下次弹出时先显示它
 bool s_brightnessEdited = false;  // 这次弹出后调过亮度：之后才到的查询结果是旧值，不用
 int s_hoverControl = kNone;
-std::vector<TrayApp> s_tray;
-int s_trayShown = 0;   // 迷你任务栏上放得下的托盘图标个数，其余的在“隐藏的图标”里
-int s_hoverTray = -1;  // 鼠标下的托盘格子或时钟
 int s_drag = kNone;  // 正在拖的槽
 int s_wheelRest = 0;  // 触控板、高精度滚轮一次只给零点几格，攒够一格再动
 
@@ -143,11 +135,8 @@ void ComputeLayout() {
     L.rowGap = Px(2);
     L.sliderH = Px(34);
     L.minPanelW = Px(380);  // 两根调节条要有地方拖
-    L.cell = Px(24);
-    s_trayShown = std::min(static_cast<int>(s_tray.size()), kMaxTrayApps);
-    L.trayW = ((s_trayShown + 1) / 2 + 1) * L.cell;
 
-    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 3 * L.sep + L.trayW + L.clockW;
+    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + L.clockW;
     float avail = (s_bounds.right - s_bounds.left) * 0.85f - fixed;
     int maxFit = std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap)));
     int n = static_cast<int>(s_items.size());
@@ -155,14 +144,13 @@ void ComputeLayout() {
 
     // 格子少的时候面板按最小宽度来，格子在中间那段里居中
     float tilesW = n == 0 ? L.emptyW : s_visible * (L.tile + L.gap) - L.gap;
-    float others = 2 * L.pad + L.tile + 3 * L.sep + L.trayW + L.clockW;
+    float others = 2 * L.pad + L.tile + 2 * L.sep + L.clockW;
     L.itemsW = std::max(tilesW, L.minPanelW - others);
     L.panelW = others + L.itemsW;
     L.panelH = 2 * L.pad + L.titleH + L.tile + L.rowGap + L.sliderH;
     L.itemsX = L.margin + L.pad + L.tile + L.sep;
     L.tilesX = L.itemsX + (L.itemsW - tilesW) / 2;
-    L.trayX = L.itemsX + L.itemsW + L.sep;
-    L.clockX = L.trayX + L.trayW + L.sep;
+    L.clockX = L.itemsX + L.itemsW + L.sep;
     L.tileY = L.margin + L.pad + L.titleH;
     L.sliderY = L.tileY + L.tile + L.rowGap;
 
@@ -219,36 +207,6 @@ int ControlAt(int x, int y) {
         if (track.Contains(fx, fy)) return i == 0 ? kVolumeTrack : kBrightTrack;
     }
     return kNone;
-}
-
-int TrayQuickSettings() { return s_trayShown; }
-int TrayChevron() { return s_trayShown + 1; }
-
-RectF TrayCellRect(int i) {
-    const Layout& L = s_L;
-    int lastCol = (s_trayShown + 1) / 2;
-    int col = i < s_trayShown ? i / 2 : lastCol;
-    int row = i < s_trayShown ? i % 2 : (i == TrayChevron() ? 0 : 1);
-    float top = L.tileY + (L.tile - 2 * L.cell) / 2;
-    return RectF(L.trayX + col * L.cell, top + row * L.cell, L.cell, L.cell);
-}
-
-RectF ClockRect() { return RectF(s_L.clockX, s_L.tileY, s_L.clockW, s_L.tile); }
-
-int TrayAt(int x, int y) {
-    REAL fx = static_cast<REAL>(x), fy = static_cast<REAL>(y);
-    for (int i = 0; i <= TrayChevron(); ++i)
-        if (TrayCellRect(i).Contains(fx, fy)) return i;
-    if (ClockRect().Contains(fx, fy)) return kTrayClock;
-    return -1;
-}
-
-std::wstring TrayTitle(int i) {
-    if (i == kTrayClock) return L"通知和日历";
-    if (i == TrayQuickSettings()) return L"快速设置（网络、音量、电池）";
-    if (i == TrayChevron()) return L"显示隐藏的图标";
-    if (i >= 0 && i < s_trayShown) return s_tray[i].name;
-    return L"";
 }
 
 void EnsureVisible(int index) {
@@ -495,38 +453,6 @@ void DrawSlider(Graphics& g, int which) {
     g.FillEllipse(&dot, x - core, sl.cy - core, 2 * core, 2 * core);
 }
 
-// 托盘图标，最后一列画“隐藏的图标”的尖角和快速设置的无线信号
-void DrawTray(Graphics& g) {
-    const Palette& pal = Colors();
-    if (s_hoverTray >= 0 && s_hoverTray <= TrayChevron()) {
-        RectF r = TrayCellRect(s_hoverTray);
-        r.Inflate(-Px(1), -Px(1));
-        FillRound(g, r, Px(6), pal.pillTop);
-    }
-    float icon = Px(16);
-    for (int i = 0; i < s_trayShown; ++i) {
-        if (!s_tray[i].icon) continue;
-        RectF r = TrayCellRect(i);
-        g.DrawImage(s_tray[i].icon.get(), RectF(r.X + (r.Width - icon) / 2, r.Y + (r.Height - icon) / 2, icon, icon));
-    }
-    Pen pen(pal.text, Px(1.5f));
-    pen.SetStartCap(LineCapRound);
-    pen.SetEndCap(LineCapRound);
-    pen.SetLineJoin(LineJoinRound);
-
-    RectF c = TrayCellRect(TrayChevron());
-    float cx = c.X + c.Width / 2, cy = c.Y + c.Height / 2;
-    PointF chevron[3] = {PointF(cx - Px(4), cy + Px(2)), PointF(cx, cy - Px(2)), PointF(cx + Px(4), cy + Px(2))};
-    g.DrawLines(&pen, chevron, 3);
-
-    RectF q = TrayCellRect(TrayQuickSettings());
-    cx = q.X + q.Width / 2;
-    float base = q.Y + q.Height / 2 + Px(5);
-    for (float radius : {Px(3.5f), Px(7)}) g.DrawArc(&pen, cx - radius, base - radius, 2 * radius, 2 * radius, 225.0f, 90.0f);
-    SolidBrush dot(pal.text);
-    g.FillEllipse(&dot, cx - Px(1.3f), base - Px(1.3f), Px(2.6f), Px(2.6f));
-}
-
 void DrawContent(Graphics& g) {
     const Layout& L = s_L;
     const Palette& pal = Colors();
@@ -545,7 +471,6 @@ void DrawContent(Graphics& g) {
     int shown = s_hover >= 0 ? s_hover : s_sel;
     if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
-    else if (s_hoverTray >= 0) title = TrayTitle(s_hoverTray);
     else if (shown == 0) title = L"开始";
     else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
     if (!title.empty()) {
@@ -577,9 +502,7 @@ void DrawContent(Graphics& g) {
     Pen sepPen(pal.separator, 1.0f);
     float y1 = L.tileY + Px(10), y2 = L.tileY + L.tile - Px(10);
     g.DrawLine(&sepPen, L.itemsX - L.sep / 2, y1, L.itemsX - L.sep / 2, y2);
-    g.DrawLine(&sepPen, L.trayX - L.sep / 2, y1, L.trayX - L.sep / 2, y2);
     g.DrawLine(&sepPen, L.clockX - L.sep / 2, y1, L.clockX - L.sep / 2, y2);
-    DrawTray(g);
 
     if (s_items.empty())
         DrawLabel(g, L"没有打开的窗口", titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
@@ -588,12 +511,7 @@ void DrawContent(Graphics& g) {
     GetLocalTime(&st);
     wchar_t clock[64];
     swprintf(clock, 64, L"%02d:%02d\n%d/%d/%d", st.wHour, st.wMinute, st.wYear, st.wMonth, st.wDay);
-    if (s_hoverTray == kTrayClock) {
-        RectF r = ClockRect();
-        r.Inflate(-Px(2), -Px(2));
-        FillRound(g, r, Px(10), pal.pillTop);
-    }
-    DrawLabel(g, clock, smallFont, ClockRect(), center, pal.text);
+    DrawLabel(g, clock, smallFont, RectF(L.clockX, L.tileY, L.clockW, L.tile), center, pal.text);
 
     DrawSlider(g, 0);
     DrawSlider(g, 1);
@@ -738,7 +656,6 @@ void MoveSelection(int delta) {
     s_sel = ((s_sel + delta) % count + count) % count;
     s_hover = -1;
     s_hoverControl = kNone;  // 鼠标停在调节条上时，标题也要换成选中的窗口
-    s_hoverTray = -1;
     EnsureVisible(s_sel);
     Redraw();
 }
@@ -845,22 +762,6 @@ void ShowItemMenu(int idx, POINT at) {
     }
 }
 
-// 点托盘格子或时钟：先收起迷你任务栏，再去点系统任务栏上的对应按钮 / 按系统快捷键
-void ActivateTray(int i, bool right) {
-    if (i < 0) return;
-    if (i < s_trayShown) {
-        TrayApp app = s_tray[i];
-        HideNow();
-        Tray_Click(app, right);
-        return;
-    }
-    if (right) return;
-    HideNow();
-    if (i == kTrayClock) Tray_Notifications();
-    else if (i == TrayQuickSettings()) Tray_QuickSettings();
-    else if (i == TrayChevron()) Tray_ShowHidden();
-}
-
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_ACTIVATE:
@@ -897,11 +798,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
-            int tray = hit < 0 && control == kNone ? TrayAt(x, y) : -1;
-            if (hit != s_hover || control != s_hoverControl || tray != s_hoverTray) {
+            if (hit != s_hover || control != s_hoverControl) {
                 s_hover = hit;
                 s_hoverControl = control;
-                s_hoverTray = tray;
                 if (hit >= 0) s_sel = hit;
                 Redraw();
             }
@@ -913,7 +812,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MOUSELEAVE:
             s_hover = -1;
             s_hoverControl = kNone;
-            s_hoverTray = -1;
             Redraw();
             return 0;
 
@@ -944,7 +842,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             int hit = HitTest(x, y);
             if (hit >= 0) ActivateIndex(hit, (wParam & MK_SHIFT) != 0);
-            else ActivateTray(TrayAt(x, y), false);
             return 0;
         }
 
@@ -961,9 +858,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_RBUTTONUP: {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            int hit = HitTest(pt.x, pt.y);
-            if (hit >= 0) ShowItemMenu(hit, pt);
-            else ActivateTray(TrayAt(pt.x, pt.y), true);
+            ShowItemMenu(HitTest(pt.x, pt.y), pt);
             return 0;
         }
 
@@ -1072,7 +967,6 @@ void Popup_Init() {
 
 void Popup_Destroy() {
     s_items.clear();
-    s_tray.clear();
     Pinned_ClearCache();
     s_fontFamily.reset();
     ReleaseCanvas();
@@ -1107,8 +1001,6 @@ void Popup_Show() {
     s_wheelRest = 0;
 
     s_items = BuildTiles(EnumerateWindows(s_prevForeground));
-    s_tray = Tray_Load(static_cast<int>(std::lround(Px(16))));
-    s_hoverTray = -1;
     ComputeLayout();
     UpdatePlacement();
 
