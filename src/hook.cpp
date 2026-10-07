@@ -178,10 +178,4 @@ void Hook_Configure(bool enabled, int thresholdMs) {
 
 void SendStartMenu() { SendWinTap(VK_LWIN); }
 
-void SendWinCombo(WORD vk) {
-    INPUT in[4] = {KeyInput(VK_LWIN, 0, false, true), KeyInput(vk, 0, false, false),
-                   KeyInput(vk, 0, true, false), KeyInput(VK_LWIN, 0, true, true)};
-    SendInput(4, in, sizeof(INPUT));
-}
-
 }  // namespace app

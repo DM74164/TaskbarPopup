@@ -18,7 +18,6 @@ add_executable(TaskbarPopup WIN32
     src/pinned.cpp
     src/util.cpp
     src/elevation.cpp
-    src/tray.cpp
     src/app.rc
 )
 
