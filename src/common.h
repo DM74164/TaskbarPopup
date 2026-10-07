@@ -42,6 +42,7 @@ struct Settings {
     int longPressMs = 1000;
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
     bool debugLog = false;       // 诊断日志
+    bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
 };
 
 constexpr int kMinLongPressMs = 200;
@@ -145,6 +146,20 @@ struct PinnedApp {
 std::vector<PinnedApp> LoadPinnedApps(int iconPx);
 bool PinMatchesWindow(const PinnedApp& pin, const WindowEntry& window);
 void LaunchApp(const std::wstring& target);
+
+// ---------------- 以管理员身份运行（elevation.cpp） ----------------
+constexpr wchar_t kRestartArg[] = L"--restart";  // 重新启动的新实例：等旧实例退出后再运行
+bool IsElevated();
+bool RunsAboveUs(HWND hwnd);  // 窗口所在进程的权限比本程序高（本程序的键盘钩子收不到它里面的按键）
+void Elevation_Init();        // 前台换成权限更高的程序时提示一次
+void Elevation_Shutdown();
+bool RelaunchElevated();      // 弹 UAC，以管理员身份启动一个新实例（带 kRestartArg）
+bool RelaunchUnelevated();    // 通过资源管理器以普通权限启动一个新实例
+void LaunchAsUser(const std::wstring& target);  // 本程序是管理员时也以普通权限启动
+bool AdminTask_Exists();      // 以管理员身份开机自启的计划任务
+bool AdminTask_Set(bool enabled);
+bool AdminTask_Run();
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* text);
 void Pinned_ClearCache();
 
 // ---------------- 迷你任务栏 ----------------
