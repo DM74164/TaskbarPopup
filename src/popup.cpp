@@ -990,6 +990,9 @@ void Popup_Show() {
     Render(SlideDistance(), 0);
     ShowWindow(s_hwnd, SW_SHOW);
     ForceForeground(s_hwnd);
+    if (GetForegroundWindow() != s_hwnd)
+        Log(L"迷你任务栏没拿到前台，前台是 %ls %ls", GetClassNameStr(GetForegroundWindow()).c_str(),
+            GetProcessPath(GetForegroundWindow()).c_str());
     SetFocus(s_hwnd);
     RequestFrame();
     SetTimer(s_hwnd, kTimerClock, 1000, nullptr);

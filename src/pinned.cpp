@@ -309,13 +309,7 @@ bool PinMatchesWindow(const PinnedApp& pin, const WindowEntry& window) {
     return !pin.exePath.empty() && pin.exePath == window.exePath;
 }
 
-void LaunchApp(const std::wstring& target) {
-    AllowSetForegroundWindow(ASFW_ANY);  // 让新启动的程序能拿到前台
-    SHELLEXECUTEINFOW sei = {sizeof(sei)};
-    sei.lpFile = target.c_str();
-    sei.nShow = SW_SHOWNORMAL;
-    ShellExecuteExW(&sei);
-}
+void LaunchApp(const std::wstring& target) { LaunchAsUser(target); }
 
 void Pinned_ClearCache() {
     s_cache = Cache();

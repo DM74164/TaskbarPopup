@@ -19,7 +19,7 @@ constexpr wchar_t kMainClass[] = L"TaskbarPopupMain";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"TaskbarPopup";
 
-enum MenuId { ID_SHOW = 100, ID_SETTINGS, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG, ID_EXIT };
+enum MenuId { ID_SHOW = 100, ID_SETTINGS, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG, ID_RUNASADMIN, ID_EXIT };
 
 NOTIFYICONDATAW s_nid = {};
 HICON s_trayIcon = nullptr;
@@ -63,6 +63,27 @@ void ShowPopupDeferred() {
     SetTimer(g_mainWnd, kTimerShowPopup, 150, nullptr);
 }
 
+// 切换“以管理员身份运行”：以新的权限重新启动本程序，旧实例退出（退出时照常还原任务栏）
+void ToggleRunAsAdmin() {
+    bool autoStart = IsAutoStartEnabled();  // 按切换前的方式查
+    bool on = !g_settings.runAsAdmin;
+    g_settings.runAsAdmin = on;
+    SaveSettings();
+    if (on == IsElevated()) {
+        SetAutoStart(autoStart);  // 开机自启换成对应的方式
+        return;
+    }
+    bool started = on ? RelaunchElevated() : RelaunchUnelevated();
+    if (!started) {
+        // 在 UAC 里点了“否”之类：保持原样
+        g_settings.runAsAdmin = !on;
+        SaveSettings();
+        return;
+    }
+    if (!on) SetAutoStart(autoStart);  // 现在还是管理员，趁机删掉计划任务、换回普通的开机自启
+    DestroyWindow(g_mainWnd);
+}
+
 void HandleCommand(UINT id) {
     switch (id) {
         case ID_SHOW:
@@ -83,6 +104,9 @@ void HandleCommand(UINT id) {
             break;
         case ID_AUTOSTART:
             SetAutoStart(!IsAutoStartEnabled());
+            break;
+        case ID_RUNASADMIN:
+            ToggleRunAsAdmin();
             break;
         case ID_DEBUGLOG:
             g_settings.debugLog = !g_settings.debugLog;
@@ -116,6 +140,7 @@ void ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING | check(g_settings.autoHideOnFullscreen), ID_AUTOHIDE, L"窗口最大化或全屏时隐藏任务栏");
     AppendMenuW(menu, MF_STRING | check(g_settings.longPressPopup), ID_LONGPRESS, longPressText);
     AppendMenuW(menu, MF_STRING | check(IsAutoStartEnabled()), ID_AUTOSTART, L"开机自动启动");
+    AppendMenuW(menu, MF_STRING | check(g_settings.runAsAdmin), ID_RUNASADMIN, L"以管理员身份运行（游戏里也能长按 Win）");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | check(g_settings.debugLog), ID_DEBUGLOG, L"记录诊断日志");
     if (g_settings.debugLog || GetFileAttributesW(LogFile().c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -146,6 +171,7 @@ void Shutdown() {
 LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_APP_LONGPRESS:
+            Log(L"长按 Win");
             Popup_Toggle();
             return 0;
 
@@ -204,6 +230,15 @@ LONG WINAPI OnCrash(EXCEPTION_POINTERS*) {
 
 }  // namespace
 
+void ShowTrayBalloon(const wchar_t* title, const wchar_t* text) {
+    NOTIFYICONDATAW nid = s_nid;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    lstrcpynW(nid.szInfoTitle, title, ARRAYSIZE(nid.szInfoTitle));
+    lstrcpynW(nid.szInfo, text, ARRAYSIZE(nid.szInfo));
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
 std::wstring SettingsDir() {
     wchar_t buf[MAX_PATH] = {};
     GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
@@ -220,6 +255,7 @@ void LoadSettings() {
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
+    g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -230,6 +266,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"LongPressMs", std::to_wstring(g_settings.longPressMs).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
 }
 
 bool GetRestoreAutoHideFlag() {
@@ -241,19 +278,27 @@ void SetRestoreAutoHideFlag(bool value) {
     WritePrivateProfileStringW(L"State", L"RestoreAutoHide", value ? L"1" : L"0", SettingsFile().c_str());
 }
 
-bool IsAutoStartEnabled() {
+namespace {
+bool RunKeyExists() {
     HKEY key;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
     bool exists = RegQueryValueExW(key, kRunValue, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
     RegCloseKey(key);
     return exists;
 }
+}  // namespace
+
+// 开机自启有两种：普通权限写注册表的 Run；以管理员身份运行时用最高权限的计划任务（开机不弹 UAC）
+bool IsAutoStartEnabled() { return RunKeyExists() || (g_settings.runAsAdmin && AdminTask_Exists()); }
 
 void SetAutoStart(bool enabled) {
+    // 管理员才能建、删最高权限的计划任务
+    bool useTask = enabled && g_settings.runAsAdmin && IsElevated() && AdminTask_Set(true);
+    if (IsElevated() && !useTask) AdminTask_Set(false);
     HKEY key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
         return;
-    if (enabled) {
+    if (enabled && !useTask) {
         wchar_t path[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, path, MAX_PATH);
         std::wstring value = L"\"" + std::wstring(path) + L"\"";
@@ -275,8 +320,19 @@ void ApplySettings() {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     using namespace app;
 
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\TaskbarPopup.SingleInstance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    // 切换权限时新实例带 kRestartArg 启动，等旧实例收拾完、退出后再运行。
+    // 管理员实例建的互斥量普通权限打不开（ERROR_ACCESS_DENIED），也算已经在运行
+    bool restart = wcsstr(GetCommandLineW(), kRestartArg) != nullptr;
+    HANDLE mutex = nullptr;
+    for (int i = 0;; ++i) {
+        mutex = CreateMutexW(nullptr, TRUE, L"Local\\TaskbarPopup.SingleInstance");
+        DWORD err = GetLastError();
+        if (mutex && err != ERROR_ALREADY_EXISTS) break;
+        if (mutex) CloseHandle(mutex);
+        mutex = nullptr;
+        if (!restart || i >= 100) return 0;
+        Sleep(100);
+    }
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);  // 清单里也声明了，这里兜底
     g_instance = instance;
@@ -295,7 +351,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         std::abort();
     });
     LoadSettings();
+    if (g_settings.runAsAdmin && !IsElevated()) {
+        // 设置了以管理员身份运行却是普通权限启动的（比如双击 exe）：交给计划任务（不弹 UAC）或者弹 UAC 重新启动
+        CloseHandle(mutex);
+        mutex = nullptr;
+        if (AdminTask_Run() || RelaunchElevated()) return 0;
+        mutex = CreateMutexW(nullptr, TRUE, L"Local\\TaskbarPopup.SingleInstance");
+        if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    }
     Log(L"---- 启动 ----");
+    if (IsElevated()) Log(L"以管理员身份运行");
     Taskbar_RestoreAll();  // 上次异常退出可能把任务栏留在隐藏状态、自动隐藏还开着
 
     s_trayIcon = CreateAppIcon();
@@ -309,6 +374,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                 instance, nullptr);
     SendMessageW(g_mainWnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(s_trayIcon));
     s_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    // 以管理员身份运行时，资源管理器（普通权限）发来的消息默认会被拦下
+    ChangeWindowMessageFilterEx(g_mainWnd, s_msgTaskbarCreated, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(g_mainWnd, WM_APP_TRAY, MSGFLT_ALLOW, nullptr);
+    // 刚切换成以管理员身份运行：原来写在 Run 里的开机自启换成计划任务
+    if (g_settings.runAsAdmin && IsElevated() && RunKeyExists()) SetAutoStart(true);
+    Elevation_Init();
 
     Popup_Init();
     ApplySettings();
@@ -325,6 +396,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    Elevation_Shutdown();
     Popup_Destroy();
     Volume_Release();
     Windows_ClearCache();
