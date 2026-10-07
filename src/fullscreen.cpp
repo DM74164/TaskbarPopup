@@ -852,6 +852,13 @@ void EvaluateNow(bool enforce) {
 
     HMONITOR target = fg ? GetTargetMonitor(fg) : nullptr;
     HWND window = target ? fg : nullptr;
+    // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
+    // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏
+    if (!target && fg && s_targetWindow && fg != s_targetWindow && IsWindow(s_targetWindow) &&
+        GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
+        target = s_targetMonitor;
+        window = s_targetWindow;
+    }
     bool changed = target != s_targetMonitor || window != s_targetWindow;
     if (!enforce && !changed) return;
     if (changed) {
