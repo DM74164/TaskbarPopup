@@ -43,7 +43,12 @@ struct Settings {
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
+    std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
 };
+
+std::wstring NormalizeExeName(const std::wstring& text);  // 路径或名字 → 小写文件名，没写扩展名的补上 .exe
+bool IsExcludedExe(const std::wstring& exeName);           // exeName 已经是 NormalizeExeName 的结果
+void SetExcluded(const std::wstring& exeName, bool excluded);  // 改排除名单、保存并重新判断要不要藏任务栏
 
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
@@ -162,6 +167,24 @@ bool AdminTask_Run();
 void ShowTrayBalloon(const wchar_t* title, const wchar_t* text);
 void Pinned_ClearCache();
 
+// ---------------- 所有应用：打字筛选时搜索用（apps.cpp）----------------
+constexpr UINT WM_APP_APPS = WM_APP + 31;  // 后台读完了，发给 Apps_Refresh 的 notify
+struct InstalledApp {
+    std::wstring name;
+    std::wstring launch;  // shell:AppsFolder\<ID>
+    std::wstring search;  // 小写的名字 + 换行 + ID
+};
+void Apps_Refresh(HWND notify);  // 没读过或者读过超过 5 分钟就在后台重新读
+std::vector<InstalledApp> Apps_Match(const std::wstring& filter, size_t max);  // filter 要小写，按匹配程度排序
+void Apps_Stop();                // 退出前等后台线程结束
+std::shared_ptr<Gdiplus::Bitmap> ShellItemIcon(const std::wstring& parsingName, int iconPx);  // pinned.cpp，带缓存
+
+// ---------------- 窗口缩略图（thumbnail.cpp）----------------
+// 在 (centerX, bottomY) 上方居中显示 source 的实时缩略图，不超出 bounds；DWM 不给缩略图时返回 false
+bool Thumb_Show(HWND source, int centerX, int bottomY, const RECT& bounds, float scale, bool light);
+void Thumb_Hide();
+void Thumb_Destroy();
+
 // ---------------- 迷你任务栏 ----------------
 void Popup_Init();
 void Popup_Destroy();
@@ -231,6 +254,7 @@ std::wstring GetClassNameStr(HWND hwnd);
 std::wstring GetWindowTitle(HWND hwnd);
 std::wstring GetProcessPath(HWND hwnd);
 HWND AppWindowTarget(HWND hwnd);  // UWP 应用返回承载它的 CoreWindow，其余原样返回
+std::wstring WindowExeName(HWND hwnd);  // 窗口所属程序的小写文件名（UWP 应用取应用自己的进程）
 std::wstring GetWindowAumid(HWND hwnd);
 bool IsCloaked(HWND hwnd);
 bool IsOwnProcess(HWND hwnd);

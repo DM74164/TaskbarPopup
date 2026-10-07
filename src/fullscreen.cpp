@@ -789,6 +789,21 @@ bool IsTransient(HWND hwnd) {
     return IsOwnProcess(hwnd) || InList(GetClassNameStr(hwnd), kTransientClasses);
 }
 
+// 窗口属于排除名单里的程序（最大化时不隐藏任务栏）。按进程记住上一次的结果，不用每次都查程序路径
+bool IsExcluded(HWND hwnd) {
+    if (g_settings.excludeApps.empty()) return false;
+    static DWORD lastPid = 0;
+    static std::wstring lastExe;
+    HWND app = AppWindowTarget(hwnd);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(app, &pid);
+    if (pid != lastPid) {
+        lastPid = pid;
+        lastExe = WindowExeName(app);
+    }
+    return IsExcludedExe(lastExe);
+}
+
 // 窗口最大化或铺满整个显示器时返回该显示器，否则返回 nullptr
 HMONITOR GetTargetMonitor(HWND hwnd) {
     if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd) || IsCloaked(hwnd)) return nullptr;
@@ -796,6 +811,7 @@ HMONITOR GetTargetMonitor(HWND hwnd) {
     if (InList(GetClassNameStr(hwnd), kDesktopClasses)) return nullptr;
     if (hwnd == s_minimizing && GetTickCount() - s_minimizingTick < 1000) return nullptr;
     if (Refuses(hwnd)) return nullptr;
+    if (IsExcluded(hwnd)) return nullptr;
 
     HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
     if (!mon) return nullptr;
@@ -853,8 +869,10 @@ void EvaluateNow(bool enforce) {
     HMONITOR target = fg ? GetTargetMonitor(fg) : nullptr;
     HWND window = target ? fg : nullptr;
     // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
-    // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏
-    if (!target && fg && s_targetWindow && fg != s_targetWindow && IsWindow(s_targetWindow) &&
+    // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏。
+    // 前台是排除名单里的程序、而且它自己最大化着时除外：用户要的是它在前台时看得到任务栏
+    bool excludedOnTop = fg && IsZoomed(fg) && IsExcluded(fg);
+    if (!target && fg && !excludedOnTop && s_targetWindow && fg != s_targetWindow && IsWindow(s_targetWindow) &&
         GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
         target = s_targetMonitor;
         window = s_targetWindow;

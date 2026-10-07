@@ -256,6 +256,17 @@ void LoadSettings() {
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
+    std::vector<wchar_t> buf(32768);
+    GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+    g_settings.excludeApps.clear();
+    std::wstring list = buf.data();
+    for (size_t start = 0; start <= list.size();) {
+        size_t end = list.find(L';', start);
+        if (end == std::wstring::npos) end = list.size();
+        std::wstring name = NormalizeExeName(list.substr(start, end - start));
+        if (!name.empty() && !IsExcludedExe(name)) g_settings.excludeApps.push_back(name);
+        start = end + 1;
+    }
 }
 
 void SaveSettings() {
@@ -267,6 +278,9 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
+    std::wstring exclude;
+    for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;
+    WritePrivateProfileStringW(L"General", L"ExcludeApps", exclude.c_str(), f.c_str());
 }
 
 bool GetRestoreAutoHideFlag() {
@@ -398,6 +412,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     Elevation_Shutdown();
     Popup_Destroy();
+    Apps_Stop();
     Volume_Release();
     Windows_ClearCache();
     if (s_trayIcon) DestroyIcon(s_trayIcon);

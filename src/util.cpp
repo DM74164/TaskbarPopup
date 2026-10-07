@@ -48,6 +48,35 @@ HWND AppWindowTarget(HWND hwnd) {
     return hwnd;
 }
 
+std::wstring WindowExeName(HWND hwnd) { return NormalizeExeName(GetProcessPath(AppWindowTarget(hwnd))); }
+
+std::wstring NormalizeExeName(const std::wstring& text) {
+    size_t b = text.find_first_not_of(L" \t\"");
+    size_t e = text.find_last_not_of(L" \t\"");
+    if (b == std::wstring::npos) return {};
+    std::wstring s = text.substr(b, e - b + 1);
+    size_t slash = s.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) s = s.substr(slash + 1);
+    if (s.empty()) return {};
+    if (s.find(L'.') == std::wstring::npos) s += L".exe";
+    return ToLower(s);
+}
+
+bool IsExcludedExe(const std::wstring& exeName) {
+    return !exeName.empty() &&
+           std::find(g_settings.excludeApps.begin(), g_settings.excludeApps.end(), exeName) != g_settings.excludeApps.end();
+}
+
+void SetExcluded(const std::wstring& exeName, bool excluded) {
+    if (exeName.empty() || IsExcludedExe(exeName) == excluded) return;
+    auto& list = g_settings.excludeApps;
+    if (excluded) list.push_back(exeName);
+    else list.erase(std::remove(list.begin(), list.end(), exeName), list.end());
+    SaveSettings();
+    Log(L"%ls %ls排除名单", exeName.c_str(), excluded ? L"加入" : L"移出");
+    ApplySettings();
+}
+
 std::wstring GetWindowAumid(HWND hwnd) {
     std::wstring id;
     IPropertyStore* store = nullptr;
