@@ -311,6 +311,16 @@ bool PinMatchesWindow(const PinnedApp& pin, const WindowEntry& window) {
 
 void LaunchApp(const std::wstring& target) { LaunchAsUser(target); }
 
+std::shared_ptr<Gdiplus::Bitmap> ShellItemIcon(const std::wstring& parsingName, int iconPx) {
+    // 打字筛选时每打一个字都要取一遍，取过的（包括没取到的）直接用缓存，不再创建外壳对象
+    auto cached = s_iconCache.find(ToLower(parsingName) + L"|" + std::to_wstring(iconPx));
+    if (cached != s_iconCache.end()) return cached->second;
+    std::wstring name;
+    std::shared_ptr<Gdiplus::Bitmap> icon;
+    DescribeItem(parsingName, iconPx, name, icon);
+    return icon;
+}
+
 void Pinned_ClearCache() {
     s_cache = Cache();
     s_iconCache.clear();

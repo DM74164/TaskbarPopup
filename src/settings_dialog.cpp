@@ -1,4 +1,4 @@
-// 设置窗口：开关两个功能、自定义长按时长、开机自启动。
+// 设置窗口：开关两个功能、自定义长按时长、开机自启动、最大化时不隐藏任务栏的程序。
 #include "common.h"
 
 namespace app {
@@ -17,6 +17,9 @@ enum {
     IDC_MS_HINT,
     IDC_PINNED,
     IDC_AUTOSTART,
+    IDC_EXCLUDE_LABEL,
+    IDC_EXCLUDE,
+    IDC_EXCLUDE_HINT,
 };
 
 HWND s_dlg = nullptr;
@@ -66,8 +69,17 @@ void CreateControls() {
     AddControl(L"STATIC", hint, SS_LEFT, 36, 100, 280, 20, IDC_MS_HINT);
     AddControl(L"BUTTON", L"显示固定在任务栏的应用", BS_AUTOCHECKBOX | WS_TABSTOP, 34, 124, 300, 22, IDC_PINNED);
     AddControl(L"BUTTON", L"开机自动启动", BS_AUTOCHECKBOX | WS_TABSTOP, 16, 156, 300, 22, IDC_AUTOSTART);
-    AddControl(L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, 160, 198, 84, 28, IDOK);
-    AddControl(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, 252, 198, 84, 28, IDCANCEL);
+    AddControl(L"STATIC", L"最大化时不隐藏任务栏的程序（每行一个，如 notepad.exe）：", SS_LEFT, 16, 190, 330, 20,
+               IDC_EXCLUDE_LABEL);
+    std::wstring exclude;
+    for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L"\r\n") + name;
+    AddControl(L"EDIT", exclude.c_str(),
+               ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP, 16, 212, 320, 76, IDC_EXCLUDE,
+               WS_EX_CLIENTEDGE);
+    AddControl(L"STATIC", L"也可以在迷你任务栏里右键运行中的程序来添加或去掉", SS_LEFT, 16, 292, 330, 20,
+               IDC_EXCLUDE_HINT);
+    AddControl(L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, 160, 322, 84, 28, IDOK);
+    AddControl(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, 252, 322, 84, 28, IDCANCEL);
 
     CheckDlgButton(s_dlg, IDC_AUTOHIDE, g_settings.autoHideOnFullscreen ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_LONGPRESS, g_settings.longPressPopup ? BST_CHECKED : BST_UNCHECKED);
@@ -76,7 +88,7 @@ void CreateControls() {
     UpdateEnabled();
 
     // 按 DPI 调整窗口大小，并居中到鼠标所在的显示器
-    RECT rc = {0, 0, S(352), S(242)};
+    RECT rc = {0, 0, S(352), S(366)};
     AdjustWindowRectExForDpi(&rc, kStyle, FALSE, kExStyle, s_dpi);
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
     POINT pt;
@@ -103,6 +115,17 @@ bool Apply() {
     g_settings.longPressPopup = IsDlgButtonChecked(s_dlg, IDC_LONGPRESS) == BST_CHECKED;
     g_settings.longPressMs = static_cast<int>(ms);
     g_settings.showPinnedApps = IsDlgButtonChecked(s_dlg, IDC_PINNED) == BST_CHECKED;
+    std::wstring text(GetWindowTextLengthW(GetDlgItem(s_dlg, IDC_EXCLUDE)) + 1, L'\0');
+    text.resize(GetDlgItemTextW(s_dlg, IDC_EXCLUDE, text.data(), static_cast<int>(text.size())));
+    std::vector<std::wstring> exclude;
+    for (size_t start = 0; start <= text.size();) {
+        size_t end = text.find_first_of(L"\r\n;", start);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring name = NormalizeExeName(text.substr(start, end - start));
+        if (!name.empty() && std::find(exclude.begin(), exclude.end(), name) == exclude.end()) exclude.push_back(name);
+        start = end + 1;
+    }
+    g_settings.excludeApps = exclude;
     SaveSettings();
     SetAutoStart(IsDlgButtonChecked(s_dlg, IDC_AUTOSTART) == BST_CHECKED);
     ApplySettings();

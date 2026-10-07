@@ -1,7 +1,8 @@
 // 迷你任务栏：液态玻璃质感的分层窗口，从屏幕底部中央弹上来。
 // 先按任务栏上的顺序列出固定的应用（已经打开的换成它的窗口），再列出其余打开的窗口。
 // 单击切换窗口（再点当前窗口则最小化）或启动应用，Shift+单击再开一个，中键关闭窗口，
-// 方向键 + 回车选择，Esc 或点到别处收起。
+// 方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
+// 鼠标停在窗口图标上时在上方显示它的实时缩略图。
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音。
 #include "common.h"
 
@@ -15,6 +16,10 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"TaskbarPopupMini";
 constexpr UINT_PTR kTimerClock = 2;
+constexpr UINT_PTR kTimerThumb = 3;  // 缩略图延迟出现 / 消失
+constexpr UINT kThumbShowMs = 400;
+constexpr UINT kThumbHideMs = 120;   // 鼠标在两个图标之间的缝里时别闪
+constexpr size_t kMaxAppMatches = 12;
 constexpr UINT WM_APP_FRAME = WM_APP + 20;  // 动画的下一帧
 constexpr double kShowMs = 320.0 * TP_ANIM_SCALE;
 constexpr double kHideMs = 170.0 * TP_ANIM_SCALE;
@@ -47,6 +52,7 @@ struct Tile {
     std::wstring launch;
     std::wstring pinName;
     std::shared_ptr<Bitmap> pinIcon;
+    std::wstring search;  // 打字筛选时比较的小写文字：标题、应用名、程序文件名
 };
 
 // 以下尺寸都是物理像素，按目标显示器的缩放比例计算
@@ -68,7 +74,15 @@ enum Control { kNone, kVolumeIcon, kVolumeTrack, kBrightIcon, kBrightTrack };
 int SliderOf(int control) { return control == kVolumeIcon || control == kVolumeTrack ? 0 : 1; }
 
 HWND s_hwnd = nullptr;
-std::vector<Tile> s_items;
+std::vector<Tile> s_items;     // 现在显示的格子（打字筛选后的）
+std::vector<Tile> s_allItems;  // 弹出时列出的全部格子
+std::wstring s_filter;         // 打的字
+float s_lockedItemsW = 0;      // 筛选期间格子区宽度不变（面板不跟着变窄变宽）；0 = 没锁
+bool s_keyNav = false;         // 最近是用键盘选的（选中项也显示缩略图）
+bool s_menuOpen = false;
+HWND s_thumbWant = nullptr;    // 想显示缩略图的窗口
+HWND s_thumbShown = nullptr;   // 正显示着缩略图的窗口
+int s_thumbIdx = -1;
 HWND s_prevForeground = nullptr;
 RECT s_bounds = {};  // 弹窗摆放的范围：任务栏露着时是工作区，藏起来时是整块屏幕
 float s_scale = 1.0f;
@@ -143,9 +157,13 @@ void ComputeLayout() {
     s_visible = std::min(n, maxFit);
 
     // 格子少的时候面板按最小宽度来，格子在中间那段里居中
-    float tilesW = n == 0 ? L.emptyW : s_visible * (L.tile + L.gap) - L.gap;
     float others = 2 * L.pad + L.tile + 2 * L.sep + L.clockW;
-    L.itemsW = std::max(tilesW, L.minPanelW - others);
+    if (s_lockedItemsW > 0) {
+        int fit = std::max(1, static_cast<int>((s_lockedItemsW + L.gap) / (L.tile + L.gap)));
+        s_visible = std::min(n, fit);
+    }
+    float tilesW = n == 0 ? L.emptyW : s_visible * (L.tile + L.gap) - L.gap;
+    L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : std::max(tilesW, L.minPanelW - others);
     L.panelW = others + L.itemsW;
     L.panelH = 2 * L.pad + L.titleH + L.tile + L.rowGap + L.sliderH;
     L.itemsX = L.margin + L.pad + L.tile + L.sep;
@@ -473,12 +491,34 @@ void DrawContent(Graphics& g) {
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
     else if (shown == 0) title = L"开始";
     else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
-    if (!title.empty()) {
-        StringFormat oneLine(StringFormatFlagsNoWrap);
-        oneLine.SetAlignment(StringAlignmentCenter);
-        oneLine.SetLineAlignment(StringAlignmentCenter);
-        oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
-        RectF titleRect(L.margin + L.pad + Px(10), L.margin + L.pad, L.panelW - 2 * L.pad - Px(20), L.titleH);
+    StringFormat oneLine(StringFormatFlagsNoWrap);
+    oneLine.SetAlignment(StringAlignmentCenter);
+    oneLine.SetLineAlignment(StringAlignmentCenter);
+    oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
+    RectF titleRect(L.margin + L.pad + Px(10), L.margin + L.pad, L.panelW - 2 * L.pad - Px(20), L.titleH);
+    if (!s_filter.empty()) {
+        // 打字筛选：左边一个搜索框显示打的字，右边是选中项的名字
+        StringFormat left(StringFormatFlagsNoWrap);
+        left.SetLineAlignment(StringAlignmentCenter);
+        RectF measured;
+        g.MeasureString(s_filter.c_str(), -1, &titleFont, PointF(0, 0), &left, &measured);
+        float boxW = std::min(titleRect.Width * 0.5f, measured.Width + Px(30));
+        RectF box(titleRect.X - Px(6), titleRect.Y + Px(2), boxW, titleRect.Height - Px(4));
+        FillRound(g, box, box.Height / 2, pal.pillTop);
+        Pen pen(pal.text, Px(1.3f));
+        float r = Px(3.5f), cx = box.X + Px(10), cy = box.Y + box.Height / 2 - Px(0.5f), d = r * 0.7f;
+        g.DrawEllipse(&pen, cx - r, cy - r, 2 * r, 2 * r);
+        g.DrawLine(&pen, cx + d, cy + d, cx + d + Px(2.5f), cy + d + Px(2.5f));
+        // 打得太长时显示后面的部分
+        RectF textRect(box.X + Px(18), box.Y, box.Width - Px(22), box.Height);
+        left.SetAlignment(measured.Width > textRect.Width ? StringAlignmentFar : StringAlignmentNear);
+        DrawLabel(g, s_filter.c_str(), titleFont, textRect, left, pal.text);
+        float restX = box.X + box.Width + Px(6);
+        if (!title.empty() && (s_hover >= 0 || s_sel > 0))
+            DrawLabel(g, title.c_str(), titleFont,
+                      RectF(restX, titleRect.Y, titleRect.X + titleRect.Width - restX, titleRect.Height), oneLine,
+                      pal.text);
+    } else if (!title.empty()) {
         DrawLabel(g, title.c_str(), titleFont, titleRect, oneLine, pal.text);
     }
 
@@ -505,7 +545,7 @@ void DrawContent(Graphics& g) {
     g.DrawLine(&sepPen, L.clockX - L.sep / 2, y1, L.clockX - L.sep / 2, y2);
 
     if (s_items.empty())
-        DrawLabel(g, L"没有打开的窗口", titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
+        DrawLabel(g, s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用", titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -553,6 +593,55 @@ bool EnsureCanvas() {
 
 // 先画玻璃（静止时用缓存），再用 GDI+ 画上面的内容，最后用 UpdateLayeredWindow 带逐像素透明度贴到屏幕。
 // slide：面板往下挪的距离（弹出 / 收起动画），按整像素挪，玻璃和上面的内容才能严丝合缝
+// ---- 缩略图 ----
+
+void HideThumb() {
+    KillTimer(s_hwnd, kTimerThumb);
+    Thumb_Hide();
+    s_thumbWant = s_thumbShown = nullptr;
+    s_thumbIdx = -1;
+}
+
+// 鼠标所指的格子（用键盘选时是选中的格子）是打开的窗口时显示它的缩略图；弹出、收起动画期间和右键菜单开着时不显示
+int ThumbIndex() {
+    if (!s_open || s_anim != Anim::None || s_drag != kNone || s_menuOpen) return -1;
+    int idx = s_hover >= 0 ? s_hover : s_keyNav ? s_sel : -1;
+    if (idx <= 0 || idx > ItemCount() || !IsTileVisible(idx) || !IsWindow(s_items[idx - 1].hwnd)) return -1;
+    return idx;
+}
+
+void ShowThumbNow() {
+    KillTimer(s_hwnd, kTimerThumb);
+    int idx = ThumbIndex();
+    if (idx < 0) {
+        HideThumb();
+        return;
+    }
+    RectF r = TileRect(idx);
+    int centerX = s_pos.x + static_cast<int>(r.X + r.Width / 2);
+    int bottomY = s_pos.y + static_cast<int>(s_L.margin - Px(8));
+    HWND h = s_items[idx - 1].hwnd;
+    s_thumbShown = Thumb_Show(h, centerX, bottomY, s_bounds, s_scale, s_glass.Light()) ? h : nullptr;
+    s_thumbWant = h;
+    s_thumbIdx = idx;
+}
+
+// 每次重画后调用：想显示的缩略图变了就安排出现、切换或消失
+void SyncThumb() {
+    if (!s_open) {
+        if (s_thumbWant || s_thumbShown) HideThumb();
+        return;
+    }
+    int idx = ThumbIndex();
+    HWND want = idx > 0 ? s_items[idx - 1].hwnd : nullptr;
+    if (want == s_thumbWant && idx == s_thumbIdx) return;
+    s_thumbWant = want;
+    s_thumbIdx = idx;
+    if (want && s_thumbShown) ShowThumbNow();  // 已经在显示：直接换成这个窗口
+    else if (want || s_thumbShown) SetTimer(s_hwnd, kTimerThumb, want ? kThumbShowMs : kThumbHideMs, nullptr);
+    else KillTimer(s_hwnd, kTimerThumb);
+}
+
 void Render(float slide, BYTE alpha) {
     if (!s_hwnd || s_width <= 0 || s_height <= 0 || !EnsureCanvas()) return;
 
@@ -584,6 +673,7 @@ void Render(float slide, BYTE alpha) {
     POINT src = {0, 0};
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
     UpdateLayeredWindow(s_hwnd, nullptr, &s_pos, &size, s_canvasDC, &src, 0, &blend, ULW_ALPHA);
+    SyncThumb();
 }
 
 void RequestFrame() {
@@ -600,6 +690,7 @@ double EaseOutBack(double t) {
 }
 
 void HideNow() {
+    HideThumb();
     s_open = false;
     s_anim = Anim::None;
     s_drag = kNone;
@@ -656,6 +747,49 @@ void MoveSelection(int delta) {
     s_sel = ((s_sel + delta) % count + count) % count;
     s_hover = -1;
     s_hoverControl = kNone;  // 鼠标停在调节条上时，标题也要换成选中的窗口
+    s_keyNav = true;
+    EnsureVisible(s_sel);
+    Redraw();
+}
+
+// 默认选中当前窗口，没有的话选第一个打开的窗口，再没有就选第一个格子
+int DefaultSelection() {
+    for (int i = 0; i < ItemCount(); ++i)
+        if (s_items[i].active) return i + 1;
+    for (int i = 0; i < ItemCount(); ++i)
+        if (s_items[i].hwnd) return i + 1;
+    return s_items.empty() ? 0 : 1;
+}
+
+// 打了字：只留下标题、应用名或程序名里有这些字的格子，后面再补上开始菜单里匹配的应用。
+// 面板宽度保持不变（玻璃背景是弹出时按这个大小截的），放不下就左右滚动
+void ApplyFilter() {
+    if (s_lockedItemsW <= 0) s_lockedItemsW = s_L.itemsW;
+    std::wstring f = ToLower(s_filter);
+    if (f.empty()) {
+        s_items = s_allItems;
+    } else {
+        s_items.clear();
+        for (const Tile& t : s_allItems)
+            if (t.search.find(f) != std::wstring::npos) s_items.push_back(t);
+        int iconPx = static_cast<int>(std::lround(Px(32)));
+        for (const InstalledApp& a : Apps_Match(f, kMaxAppMatches)) {
+            std::wstring name = ToLower(a.name);
+            bool shown = std::any_of(s_items.begin(), s_items.end(), [&](const Tile& t) {
+                return t.launch == a.launch || ToLower(t.pinName) == name || ToLower(t.title) == name;
+            });
+            if (shown) continue;
+            auto icon = ShellItemIcon(a.launch, iconPx);
+            s_items.push_back({a.name, icon, nullptr, false, a.launch, a.name, icon, a.search});
+        }
+    }
+    ComputeLayout();
+    s_first = 0;
+    s_hover = -1;
+    s_hoverControl = kNone;
+    s_pillIndex = -1;
+    s_sel = f.empty() ? DefaultSelection() : (s_items.empty() ? -1 : 1);  // 没有匹配的就什么都不选
+    s_keyNav = !f.empty();
     EnsureVisible(s_sel);
     Redraw();
 }
@@ -701,22 +835,33 @@ void CloseItem(int idx) {
         Launch(item.launch);  // 没运行的固定应用：中键和任务栏一样是启动
         return;
     }
-    PostMessageW(item.hwnd, WM_CLOSE, 0, 0);
+    HWND h = item.hwnd;
+    std::wstring launch = item.launch;
+    PostMessageW(h, WM_CLOSE, 0, 0);
 
-    // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉
-    bool lastOfPin = !item.launch.empty() &&
-                     std::none_of(s_items.begin(), s_items.end(), [&](const Tile& t) {
-                         return &t != &item && t.hwnd && t.launch == item.launch;
+    // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉。
+    // 按全部格子判断，筛选后显示的格子和全部格子一起改
+    bool lastOfPin = !launch.empty() && std::none_of(s_allItems.begin(), s_allItems.end(), [&](const Tile& t) {
+                         return t.hwnd && t.hwnd != h && t.launch == launch;
                      });
+    auto closeIn = [&](std::vector<Tile>& list) {
+        auto it = std::find_if(list.begin(), list.end(), [&](const Tile& t) { return t.hwnd == h; });
+        if (it == list.end()) return;
+        if (!lastOfPin) {
+            list.erase(it);
+            return;
+        }
+        it->hwnd = nullptr;
+        it->active = false;
+        it->title = it->pinName;
+        it->icon = it->pinIcon ? it->pinIcon : it->icon;
+    };
+    closeIn(s_allItems);
+    closeIn(s_items);
     if (lastOfPin) {
-        item.hwnd = nullptr;
-        item.active = false;
-        item.title = item.pinName;
-        item.icon = item.pinIcon ? item.pinIcon : item.icon;
         Redraw();
         return;
     }
-    s_items.erase(s_items.begin() + (idx - 1));
     ComputeLayout();
     UpdatePlacement();  // 面板变窄了，重新居中（玻璃背景也跟着重算）
     s_first = std::max(0, std::min(s_first, ItemCount() - s_visible));
@@ -726,10 +871,12 @@ void CloseItem(int idx) {
     Redraw();
 }
 
-// 右键运行中的格子：小菜单，关闭这个窗口；同一个程序开着好几个窗口时还能一次全关
+// 右键运行中的格子：小菜单，关闭这个窗口；同一个程序开着好几个窗口时还能一次全关；
+// 把这个程序加进 / 移出“最大化时不隐藏任务栏”的名单
 void ShowItemMenu(int idx, POINT at) {
     if (idx <= 0 || idx > ItemCount() || !s_items[idx - 1].hwnd) return;
     std::wstring exe = GetProcessPath(s_items[idx - 1].hwnd);
+    std::wstring exeName = WindowExeName(s_items[idx - 1].hwnd);
     std::vector<HWND> same;
     for (const Tile& t : s_items)
         if (t.hwnd && !exe.empty() && GetProcessPath(t.hwnd) == exe) same.push_back(t.hwnd);
@@ -741,13 +888,24 @@ void ShowItemMenu(int idx, POINT at) {
         swprintf(text, 64, L"关闭全部 %d 个窗口", static_cast<int>(same.size()));
         AppendMenuW(menu, MF_STRING, 2, text);
     }
+    if (!exeName.empty()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (IsExcludedExe(exeName) ? MF_CHECKED : 0), 3, L"最大化时不隐藏任务栏");
+    }
     SetMenuDefaultItem(menu, 1, FALSE);
     s_sel = idx;
+    s_menuOpen = true;  // 缩略图会挡住菜单
+    HideThumb();
     Redraw();
     ClientToScreen(s_hwnd, &at);
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, at.x, at.y, 0,
                               s_hwnd, nullptr);
     DestroyMenu(menu);
+    s_menuOpen = false;
+    if (cmd == 3) {
+        SetExcluded(exeName, !IsExcludedExe(exeName));
+        return;
+    }
     if (!s_open) return;
     if (cmd == 1) {
         CloseItem(idx);
@@ -777,7 +935,14 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == kTimerClock) {
                 if (s_drag != kVolumeTrack) RefreshVolume();  // 别处改了音量（键盘上的音量键）也跟着变
                 Redraw();
+            } else if (wParam == kTimerThumb) {
+                if (s_thumbWant) ShowThumbNow();
+                else HideThumb();
             }
+            return 0;
+
+        case WM_APP_APPS:
+            if (s_open && !s_filter.empty()) ApplyFilter();  // 应用列表刚读完：把匹配的应用补上
             return 0;
 
         case WM_APP_BRIGHTNESS:
@@ -796,6 +961,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetSliderFromX(SliderOf(s_drag), x);
                 return 0;
             }
+            s_keyNav = false;
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
             if (hit != s_hover || control != s_hoverControl) {
@@ -886,18 +1052,46 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_TAB: MoveSelection((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1); break;
                 case VK_HOME: MoveSelection(-s_sel); break;
                 case VK_END: MoveSelection(ItemCount() - s_sel); break;
+                case VK_SPACE:
+                    if (!s_filter.empty()) break;  // 打字筛选时空格是要打的字，交给 WM_CHAR
+                    [[fallthrough]];
                 case VK_RETURN:
-                case VK_SPACE: ActivateIndex(s_sel, (GetKeyState(VK_SHIFT) & 0x8000) != 0); break;
+                    if (!s_filter.empty() && s_items.empty()) break;  // 没有匹配的
+                    ActivateIndex(s_sel, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                    break;
                 case VK_DELETE:
                     if (s_sel > 0 && s_sel <= ItemCount() && s_items[s_sel - 1].hwnd) CloseItem(s_sel);
                     break;
                 case VK_ESCAPE:
+                    if (!s_filter.empty()) {  // 先清掉打的字
+                        s_filter.clear();
+                        ApplyFilter();
+                        break;
+                    }
                     // 焦点交还给原来的窗口，随后的失活消息会触发收起
                     if (s_prevForeground && IsWindow(s_prevForeground)) ForceForeground(s_prevForeground);
                     Popup_Hide();
                     break;
             }
             return 0;
+
+        case WM_CHAR: {
+            wchar_t ch = static_cast<wchar_t>(wParam);
+            if (ch == L'\b') {
+                if (s_filter.empty()) return 0;
+                s_filter.pop_back();
+                if (!s_filter.empty() && IS_HIGH_SURROGATE(s_filter.back())) s_filter.pop_back();
+            } else if (ch == 0x7F) {  // Ctrl+Backspace：全删掉
+                if (s_filter.empty()) return 0;
+                s_filter.clear();
+            } else if (ch >= 0x20 && !(ch == L' ' && s_filter.empty())) {
+                s_filter += ch;
+            } else {
+                return 0;  // 回车、Esc、Tab 之类在 WM_KEYDOWN 里处理了
+            }
+            ApplyFilter();
+            return 0;
+        }
 
         case WM_DPICHANGED:
             return 0;  // 尺寸由 Popup_Show 按目标显示器自己算
@@ -929,6 +1123,10 @@ std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows) {
         if (used[i]) continue;
         const WindowEntry& w = windows[i];
         tiles.push_back({w.title, w.icon, w.hwnd, w.active, L"", L"", nullptr});
+    }
+    for (Tile& t : tiles) {
+        std::wstring exe = t.hwnd ? WindowExeName(t.hwnd) : NormalizeExeName(t.launch);
+        t.search = ToLower(t.title + L"\n" + t.pinName + L"\n" + exe);
     }
     return tiles;
 }
@@ -966,7 +1164,9 @@ void Popup_Init() {
 }
 
 void Popup_Destroy() {
+    Thumb_Destroy();
     s_items.clear();
+    s_allItems.clear();
     Pinned_ClearCache();
     s_fontFamily.reset();
     ReleaseCanvas();
@@ -1000,7 +1200,13 @@ void Popup_Show() {
     s_drag = kNone;
     s_wheelRest = 0;
 
-    s_items = BuildTiles(EnumerateWindows(s_prevForeground));
+    s_allItems = BuildTiles(EnumerateWindows(s_prevForeground));
+    s_items = s_allItems;
+    s_filter.clear();
+    s_lockedItemsW = 0;
+    s_keyNav = false;
+    s_menuOpen = false;
+    Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
     ComputeLayout();
     UpdatePlacement();
 
@@ -1016,13 +1222,7 @@ void Popup_Show() {
 
     s_first = 0;
     s_hover = -1;
-    // 默认选中当前窗口，没有的话选第一个打开的窗口，再没有就选第一个格子
-    s_sel = 0;
-    for (int i = 0; i < ItemCount() && !s_sel; ++i)
-        if (s_items[i].active) s_sel = i + 1;
-    for (int i = 0; i < ItemCount() && !s_sel; ++i)
-        if (s_items[i].hwnd) s_sel = i + 1;
-    if (!s_sel && !s_items.empty()) s_sel = 1;
+    s_sel = DefaultSelection();
     EnsureVisible(s_sel);
     s_pillIndex = -1;
 
