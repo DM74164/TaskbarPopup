@@ -33,8 +33,9 @@ struct IconPos {
 HANDLE s_thread = nullptr;
 DWORD s_threadId = 0;
 HANDLE s_savedEvent = nullptr;  // 手动重置；记图标位置期间不发信号
-HANDLE s_updatedEvent = nullptr;  // 手动重置；Update 排着、还没读完时不发信号。关自动隐藏之前等它
-std::atomic<bool> s_updateLate{false};  // 等 Update 的一方不等了，自动隐藏已经在关：读到的位置不能用
+HANDLE s_updatedEvent = nullptr;  // 手动重置；最后发出的那次 Update 还没读完时不发信号。关自动隐藏之前等它
+UINT s_updatePosted = 0;          // 发出的 Update 的编号（s_lock 保护），读完的是最后一次才发信号
+std::atomic<UINT> s_updateLate{0};  // 等的一方不等了时最后发出的编号：这个编号及以前的读到的位置不能用
 std::mutex s_lock;              // 保护 s_session、s_snapshot
 UINT s_session = 0;             // 每打开一次自动隐藏（和退出时）加一，旧的摆放请求看到变了就放弃
 bool s_snapshot = false;        // 有一份打开自动隐藏之前记下的位置（可能还在记）
@@ -261,10 +262,11 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 if (Current(static_cast<UINT>(msg.wParam)) && !s_icons.empty()) s_mark = Read();
                 break;
             case kCmdUpdate: {
+                UINT number = static_cast<UINT>(msg.lParam);
                 if (Current(static_cast<UINT>(msg.wParam)) && !s_mark.empty()) {
                     std::vector<POINT> now = Read();
                     // 等的一方已经不等了：自动隐藏可能正在关，读到的也许是资源管理器重新排的位置
-                    if (!s_updateLate.exchange(false) && now.size() == s_mark.size()) {
+                    if (number > s_updateLate && now.size() == s_mark.size()) {
                         int moved = 0;
                         for (size_t i = 0; i < now.size(); ++i) {
                             const POINT& a = s_mark[i];
@@ -277,7 +279,8 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                     }
                 }
                 s_mark.clear();
-                SetEvent(s_updatedEvent);
+                std::lock_guard<std::mutex> guard(s_lock);
+                if (number == s_updatePosted) SetEvent(s_updatedEvent);  // 后面还排着一次的话等它
                 break;
             }
             case kCmdFinish: {
@@ -339,13 +342,15 @@ bool DesktopIcons_Mark() {
 void DesktopIcons_UpdateMoved() {
     std::lock_guard<std::mutex> guard(s_lock);
     if (!s_thread || !s_snapshot || !s_updatedEvent) return;
-    s_updateLate = false;
+    UINT number = ++s_updatePosted;
     ResetEvent(s_updatedEvent);
-    if (!PostThreadMessageW(s_threadId, kCmdUpdate, s_session, 0)) SetEvent(s_updatedEvent);
+    if (!PostThreadMessageW(s_threadId, kCmdUpdate, s_session, number)) SetEvent(s_updatedEvent);
 }
 
 void DesktopIcons_WaitUpdated(DWORD ms) {
-    if (s_updatedEvent && WaitForSingleObject(s_updatedEvent, ms) == WAIT_TIMEOUT) s_updateLate = true;
+    if (!s_updatedEvent || WaitForSingleObject(s_updatedEvent, ms) != WAIT_TIMEOUT) return;
+    std::lock_guard<std::mutex> guard(s_lock);
+    s_updateLate = s_updatePosted;
 }
 
 void DesktopIcons_RestoreLater() {
