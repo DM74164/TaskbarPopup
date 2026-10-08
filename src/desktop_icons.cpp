@@ -35,7 +35,7 @@ DWORD s_threadId = 0;
 HANDLE s_savedEvent = nullptr;  // 手动重置；记图标位置期间不发信号
 HANDLE s_updatedEvent = nullptr;  // 手动重置；最后发出的那次 Update 还没读完时不发信号。关自动隐藏之前等它
 UINT s_updatePosted = 0;          // 发出的 Update 的编号（s_lock 保护），读完的是最后一次才发信号
-std::atomic<UINT> s_updateLate{0};  // 等的一方不等了时最后发出的编号：这个编号及以前的读到的位置不能用
+std::atomic<UINT> s_updateLate{0};  // 关自动隐藏那一刻最后发出的编号：这个编号及以前、还没读完的读到的位置不能用
 std::mutex s_lock;              // 保护 s_session、s_snapshot
 UINT s_session = 0;             // 每打开一次自动隐藏（和退出时）加一，旧的摆放请求看到变了就放弃
 bool s_snapshot = false;        // 有一份打开自动隐藏之前记下的位置（可能还在记）
@@ -348,7 +348,10 @@ void DesktopIcons_UpdateMoved() {
 }
 
 void DesktopIcons_WaitUpdated(DWORD ms) {
-    if (!s_updatedEvent || WaitForSingleObject(s_updatedEvent, ms) != WAIT_TIMEOUT) return;
+    if (s_updatedEvent) WaitForSingleObject(s_updatedEvent, ms);
+}
+
+void DesktopIcons_AbandonUpdates() {
     std::lock_guard<std::mutex> guard(s_lock);
     s_updateLate = s_updatePosted;
 }

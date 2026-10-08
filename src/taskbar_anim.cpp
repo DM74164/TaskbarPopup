@@ -198,6 +198,7 @@ void ApplyPendingOff() {
     // 等的时候主线程改了主意（窗口又最大化了，已经要求重新打开），或者要退出了（主线程自己关）：不关了。
     // 主线程那边已经不等这次的回报
     if (Stopped() || s_wantedSeq != 0) return;
+    DesktopIcons_AbandonUpdates();
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
 }
@@ -542,6 +543,7 @@ void TaskbarAnim_Show(HWND taskbar, UINT offSeq) {
 void TaskbarAnim_AutoHideOff(UINT seq) {
     if (EnsureThread() && PostThreadMessageW(s_threadId, kCmdAutoHideOff, seq, 0)) return;
     DesktopIcons_WaitUpdated(1000);
+    DesktopIcons_AbandonUpdates();
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
 }
