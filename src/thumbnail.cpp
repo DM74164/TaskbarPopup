@@ -47,6 +47,8 @@ bool EnsureWindow() {
     if (!s_wnd) return false;
     DWORD round = 2;  // DWMWCP_ROUND：Win11 的圆角和阴影
     DwmSetWindowAttribute(s_wnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &round, sizeof(round));
+    BOOL dark = s_background == RGB(44, 44, 44);  // 和一开始的底色一致，之后换底色时再改
+    DwmSetWindowAttribute(s_wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
     BOOL noTransitions = TRUE;
     DwmSetWindowAttribute(s_wnd, DWMWA_TRANSITIONS_FORCEDISABLED, &noTransitions, sizeof(noTransitions));
     return true;

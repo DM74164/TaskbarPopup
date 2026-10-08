@@ -22,18 +22,88 @@ enum {
     IDC_EXCLUDE_HINT,
 };
 
+// 各个控件在 96 DPI 下的位置；换到缩放比例不同的显示器上时按新的 DPI 重新摆
+struct Place {
+    int id, x, y, w, h;
+};
+constexpr Place kLayout[] = {
+    {IDC_AUTOHIDE, 16, 14, 320, 22},      {IDC_LONGPRESS, 16, 42, 300, 22},     {IDC_MS_LABEL, 36, 72, 128, 24},
+    {IDC_MS_EDIT, 166, 72, 90, 24},       {IDC_MS_HINT, 36, 100, 280, 20},      {IDC_PINNED, 34, 124, 300, 22},
+    {IDC_AUTOSTART, 16, 156, 300, 22},    {IDC_EXCLUDE_LABEL, 16, 190, 330, 20}, {IDC_EXCLUDE, 16, 212, 320, 76},
+    {IDC_EXCLUDE_HINT, 16, 292, 330, 20}, {IDOK, 160, 322, 84, 28},             {IDCANCEL, 252, 322, 84, 28},
+};
+constexpr int kClientW = 352, kClientH = 366;
+
 HWND s_dlg = nullptr;
 HFONT s_font = nullptr;
 UINT s_dpi = 96;
 
+// 打开窗口时各项的值。确定时只改用户在窗口里动过的项：窗口开着的时候在迷你任务栏或托盘菜单里改的设置不会被盖掉
+struct Initial {
+    bool autoHide = false, longPress = false, pinned = false, autoStart = false;
+    int ms = 0;
+    std::vector<std::wstring> exclude;
+} s_initial;
+
 int S(int v) { return MulDiv(v, static_cast<int>(s_dpi), 96); }
 
-HWND AddControl(const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id,
-                DWORD exStyle = 0) {
-    HWND c = CreateWindowExW(exStyle, cls, text, WS_CHILD | WS_VISIBLE | style, S(x), S(y), S(w), S(h), s_dlg,
+const Place& PlaceOf(int id) {
+    for (const Place& p : kLayout)
+        if (p.id == id) return p;
+    return kLayout[0];
+}
+
+HWND AddControl(const wchar_t* cls, const wchar_t* text, DWORD style, int id, DWORD exStyle = 0) {
+    const Place& p = PlaceOf(id);
+    HWND c = CreateWindowExW(exStyle, cls, text, WS_CHILD | WS_VISIBLE | style, S(p.x), S(p.y), S(p.w), S(p.h), s_dlg,
                              reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_instance, nullptr);
     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(s_font), TRUE);
     return c;
+}
+
+HFONT CreateDialogFont() {
+    NONCLIENTMETRICSW ncm = {sizeof(ncm)};
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, s_dpi);
+    return CreateFontIndirectW(&ncm.lfMessageFont);
+}
+
+SIZE WindowSize() {
+    RECT rc = {0, 0, S(kClientW), S(kClientH)};
+    AdjustWindowRectExForDpi(&rc, kStyle, FALSE, kExStyle, s_dpi);
+    return {rc.right - rc.left, rc.bottom - rc.top};
+}
+
+// 每行一个（也接受分号），去掉重复的
+std::vector<std::wstring> ParseExcludeList(const std::wstring& text) {
+    std::vector<std::wstring> list;
+    for (size_t start = 0; start <= text.size();) {
+        size_t end = text.find_first_of(L"\r\n;", start);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring name = NormalizeExeName(text.substr(start, end - start));
+        if (!name.empty() && std::find(list.begin(), list.end(), name) == list.end()) list.push_back(name);
+        start = end + 1;
+    }
+    return list;
+}
+
+bool Checked(int id) { return IsDlgButtonChecked(s_dlg, id) == BST_CHECKED; }
+
+// 换到 DPI 不同的显示器：字体、控件位置和窗口大小都按新的 DPI 重新算
+void OnDpiChanged(UINT dpi, const RECT& suggested) {
+    s_dpi = dpi;
+    HFONT old = s_font;
+    s_font = CreateDialogFont();
+    for (const Place& p : kLayout) {
+        HWND c = GetDlgItem(s_dlg, p.id);
+        SetWindowPos(c, nullptr, S(p.x), S(p.y), S(p.w), S(p.h), SWP_NOZORDER | SWP_NOACTIVATE);
+        SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(s_font), TRUE);
+    }
+    // 微调按钮重新贴到输入框右边（会把输入框缩窄一点）
+    SendMessageW(GetDlgItem(s_dlg, IDC_MS_SPIN), UDM_SETBUDDY, reinterpret_cast<WPARAM>(GetDlgItem(s_dlg, IDC_MS_EDIT)), 0);
+    if (old) DeleteObject(old);
+    SIZE size = WindowSize();
+    SetWindowPos(s_dlg, nullptr, suggested.left, suggested.top, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(s_dlg, nullptr, TRUE);
 }
 
 void UpdateEnabled() {
@@ -44,16 +114,14 @@ void UpdateEnabled() {
 
 void CreateControls() {
     s_dpi = GetDpiForWindow(s_dlg);
-    NONCLIENTMETRICSW ncm = {sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, s_dpi);
-    s_font = CreateFontIndirectW(&ncm.lfMessageFont);
+    s_font = CreateDialogFont();
 
-    AddControl(L"BUTTON", L"窗口最大化或全屏时隐藏任务栏，窗口铺满屏幕", BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP, 16,
-               14, 320, 22, IDC_AUTOHIDE);
-    AddControl(L"BUTTON", L"长按 Win 键弹出迷你任务栏", BS_AUTOCHECKBOX | WS_TABSTOP, 16, 42, 300, 22, IDC_LONGPRESS);
-    AddControl(L"STATIC", L"长按时长（毫秒）：", SS_LEFT | SS_CENTERIMAGE, 36, 72, 128, 24, IDC_MS_LABEL);
-    HWND edit = AddControl(L"EDIT", L"", ES_NUMBER | ES_LEFT | ES_AUTOHSCROLL | WS_TABSTOP, 166, 72, 90, 24,
-                           IDC_MS_EDIT, WS_EX_CLIENTEDGE);
+    AddControl(L"BUTTON", L"窗口最大化或全屏时隐藏任务栏，窗口铺满屏幕", BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP,
+               IDC_AUTOHIDE);
+    AddControl(L"BUTTON", L"长按 Win 键弹出迷你任务栏", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_LONGPRESS);
+    AddControl(L"STATIC", L"长按时长（毫秒）：", SS_LEFT | SS_CENTERIMAGE, IDC_MS_LABEL);
+    HWND edit = AddControl(L"EDIT", L"", ES_NUMBER | ES_LEFT | ES_AUTOHSCROLL | WS_TABSTOP, IDC_MS_EDIT,
+                           WS_EX_CLIENTEDGE);
     HWND spin = CreateWindowExW(0, UPDOWN_CLASSW, nullptr,
                                 WS_CHILD | WS_VISIBLE | UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
                                 0, 0, 0, 0, s_dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MS_SPIN)),
@@ -66,31 +134,33 @@ void CreateControls() {
 
     wchar_t hint[96];
     swprintf(hint, 96, L"可设置 %d – %d 毫秒，默认 %d", kMinLongPressMs, kMaxLongPressMs, kDefaultLongPressMs);
-    AddControl(L"STATIC", hint, SS_LEFT, 36, 100, 280, 20, IDC_MS_HINT);
-    AddControl(L"BUTTON", L"显示固定在任务栏的应用", BS_AUTOCHECKBOX | WS_TABSTOP, 34, 124, 300, 22, IDC_PINNED);
-    AddControl(L"BUTTON", L"开机自动启动", BS_AUTOCHECKBOX | WS_TABSTOP, 16, 156, 300, 22, IDC_AUTOSTART);
-    AddControl(L"STATIC", L"最大化时不隐藏任务栏的程序（每行一个，如 notepad.exe）：", SS_LEFT, 16, 190, 330, 20,
-               IDC_EXCLUDE_LABEL);
+    AddControl(L"STATIC", hint, SS_LEFT, IDC_MS_HINT);
+    AddControl(L"BUTTON", L"显示固定在任务栏的应用", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PINNED);
+    AddControl(L"BUTTON", L"开机自动启动", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_AUTOSTART);
+    AddControl(L"STATIC", L"最大化时不隐藏任务栏的程序（每行一个，如 notepad.exe）：", SS_LEFT, IDC_EXCLUDE_LABEL);
     std::wstring exclude;
     for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L"\r\n") + name;
-    AddControl(L"EDIT", exclude.c_str(),
-               ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP, 16, 212, 320, 76, IDC_EXCLUDE,
-               WS_EX_CLIENTEDGE);
-    AddControl(L"STATIC", L"也可以在迷你任务栏里右键运行中的程序来添加或去掉", SS_LEFT, 16, 292, 330, 20,
-               IDC_EXCLUDE_HINT);
-    AddControl(L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, 160, 322, 84, 28, IDOK);
-    AddControl(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, 252, 322, 84, 28, IDCANCEL);
+    AddControl(L"EDIT", exclude.c_str(), ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_TABSTOP,
+               IDC_EXCLUDE, WS_EX_CLIENTEDGE);
+    AddControl(L"STATIC", L"也可以在迷你任务栏里右键运行中的程序来添加或去掉", SS_LEFT, IDC_EXCLUDE_HINT);
+    AddControl(L"BUTTON", L"确定", BS_DEFPUSHBUTTON | WS_TABSTOP, IDOK);
+    AddControl(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
 
-    CheckDlgButton(s_dlg, IDC_AUTOHIDE, g_settings.autoHideOnFullscreen ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(s_dlg, IDC_LONGPRESS, g_settings.longPressPopup ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(s_dlg, IDC_PINNED, g_settings.showPinnedApps ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(s_dlg, IDC_AUTOSTART, IsAutoStartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+    s_initial.autoHide = g_settings.autoHideOnFullscreen;
+    s_initial.longPress = g_settings.longPressPopup;
+    s_initial.pinned = g_settings.showPinnedApps;
+    s_initial.autoStart = IsAutoStartEnabled();
+    s_initial.ms = g_settings.longPressMs;
+    s_initial.exclude = g_settings.excludeApps;
+    CheckDlgButton(s_dlg, IDC_AUTOHIDE, s_initial.autoHide ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_dlg, IDC_LONGPRESS, s_initial.longPress ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_dlg, IDC_PINNED, s_initial.pinned ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_dlg, IDC_AUTOSTART, s_initial.autoStart ? BST_CHECKED : BST_UNCHECKED);
     UpdateEnabled();
 
     // 按 DPI 调整窗口大小，并居中到鼠标所在的显示器
-    RECT rc = {0, 0, S(352), S(366)};
-    AdjustWindowRectExForDpi(&rc, kStyle, FALSE, kExStyle, s_dpi);
-    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    SIZE size = WindowSize();
+    int w = size.cx, h = size.cy;
     POINT pt;
     GetCursorPos(&pt);
     MONITORINFO mi = {sizeof(mi)};
@@ -111,23 +181,27 @@ bool Apply() {
         return false;
     }
 
-    g_settings.autoHideOnFullscreen = IsDlgButtonChecked(s_dlg, IDC_AUTOHIDE) == BST_CHECKED;
-    g_settings.longPressPopup = IsDlgButtonChecked(s_dlg, IDC_LONGPRESS) == BST_CHECKED;
-    g_settings.longPressMs = static_cast<int>(ms);
-    g_settings.showPinnedApps = IsDlgButtonChecked(s_dlg, IDC_PINNED) == BST_CHECKED;
+    // 只改窗口里动过的项，其余的保持现在的值（窗口开着的时候可能在别处改过）
+    if (Checked(IDC_AUTOHIDE) != s_initial.autoHide) g_settings.autoHideOnFullscreen = Checked(IDC_AUTOHIDE);
+    if (Checked(IDC_LONGPRESS) != s_initial.longPress) g_settings.longPressPopup = Checked(IDC_LONGPRESS);
+    if (Checked(IDC_PINNED) != s_initial.pinned) g_settings.showPinnedApps = Checked(IDC_PINNED);
+    if (static_cast<int>(ms) != s_initial.ms) g_settings.longPressMs = static_cast<int>(ms);
+
+    // 名单按增删合并到现在的名单上，不整个替换
     std::wstring text(GetWindowTextLengthW(GetDlgItem(s_dlg, IDC_EXCLUDE)) + 1, L'\0');
     text.resize(GetDlgItemTextW(s_dlg, IDC_EXCLUDE, text.data(), static_cast<int>(text.size())));
-    std::vector<std::wstring> exclude;
-    for (size_t start = 0; start <= text.size();) {
-        size_t end = text.find_first_of(L"\r\n;", start);
-        if (end == std::wstring::npos) end = text.size();
-        std::wstring name = NormalizeExeName(text.substr(start, end - start));
-        if (!name.empty() && std::find(exclude.begin(), exclude.end(), name) == exclude.end()) exclude.push_back(name);
-        start = end + 1;
-    }
-    g_settings.excludeApps = exclude;
+    std::vector<std::wstring> edited = ParseExcludeList(text);
+    auto contains = [](const std::vector<std::wstring>& list, const std::wstring& name) {
+        return std::find(list.begin(), list.end(), name) != list.end();
+    };
+    std::vector<std::wstring>& current = g_settings.excludeApps;
+    for (const std::wstring& name : s_initial.exclude)
+        if (!contains(edited, name)) current.erase(std::remove(current.begin(), current.end(), name), current.end());
+    for (const std::wstring& name : edited)
+        if (!contains(s_initial.exclude, name) && !contains(current, name)) current.push_back(name);
+
     SaveSettings();
-    SetAutoStart(IsDlgButtonChecked(s_dlg, IDC_AUTOSTART) == BST_CHECKED);
+    if (Checked(IDC_AUTOSTART) != s_initial.autoStart) SetAutoStart(Checked(IDC_AUTOSTART));
     ApplySettings();
     return true;
 }
@@ -150,6 +224,21 @@ LRESULT CALLBACK DialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_CLOSE:
             DestroyWindow(hwnd);
+            return 0;
+
+        // 多行输入框里按 Tab 时会让父窗口切换焦点（普通对话框由 DefDlgProc 处理，这里不是对话框类）
+        case WM_NEXTDLGCTL: {
+            HWND next = LOWORD(lParam) ? reinterpret_cast<HWND>(wParam)
+                                       : GetNextDlgTabItem(hwnd, GetFocus(), wParam != 0);
+            if (next) {
+                SetFocus(next);
+                if (SendMessageW(next, WM_GETDLGCODE, 0, 0) & DLGC_HASSETSEL) SendMessageW(next, EM_SETSEL, 0, -1);
+            }
+            return 0;
+        }
+
+        case WM_DPICHANGED:
+            OnDpiChanged(HIWORD(wParam), *reinterpret_cast<const RECT*>(lParam));
             return 0;
 
         case WM_DESTROY:
