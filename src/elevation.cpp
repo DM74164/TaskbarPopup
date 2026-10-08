@@ -199,7 +199,14 @@ bool RelaunchUnelevated() {
 
 void LaunchAsUser(const std::wstring& target) {
     AllowSetForegroundWindow(ASFW_ANY);  // 让新启动的程序能拿到前台
-    if (IsElevated() && ShellExecuteViaExplorer(target, L"")) return;
+    if (IsElevated()) {
+        if (ShellExecuteViaExplorer(target, L"")) return;
+        // 资源管理器没在运行（正在重启）时不能退回到自己启动：那样启动的程序也是管理员权限
+        Log(L"通过资源管理器以普通权限启动失败：%ls", target.c_str());
+        MessageBeep(MB_ICONWARNING);
+        ShowTrayBalloon(L"暂时无法启动", L"资源管理器还没准备好，稍后再试一次。");
+        return;
+    }
     SHELLEXECUTEINFOW sei = {sizeof(sei)};
     sei.lpFile = target.c_str();
     sei.nShow = SW_SHOWNORMAL;
@@ -210,10 +217,25 @@ bool AdminTask_Exists() { return RunSchtasks(std::wstring(L"/Query /TN \"") + kT
 
 bool AdminTask_Run() { return RunSchtasks(std::wstring(L"/Run /TN \"") + kTaskName + L"\"") == 0; }
 
+// 建任务时用的程序路径记在设置文件里，程序换了位置时就知道任务过时了
+bool AdminTask_MatchesExe() {
+    wchar_t path[MAX_PATH * 2] = {};
+    GetPrivateProfileStringW(L"State", L"AdminTaskExe", L"", path, ARRAYSIZE(path), SettingsFile().c_str());
+    return *path && CompareStringOrdinal(path, -1, ExePath().c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+namespace {
+void RememberTaskExe(const wchar_t* path) {
+    EnsureUnicodeIni();
+    WritePrivateProfileStringW(L"State", L"AdminTaskExe", path, SettingsFile().c_str());
+}
+}  // namespace
+
 bool AdminTask_Set(bool enabled) {
     if (!enabled) {
-        if (!AdminTask_Exists()) return true;
-        return RunSchtasks(std::wstring(L"/Delete /TN \"") + kTaskName + L"\" /F") == 0;
+        bool gone = !AdminTask_Exists() || RunSchtasks(std::wstring(L"/Delete /TN \"") + kTaskName + L"\" /F") == 0;
+        if (gone) RememberTaskExe(nullptr);
+        return gone;
     }
     wchar_t domain[256] = {}, user[256] = {};
     GetEnvironmentVariableW(L"USERDOMAIN", domain, 256);
@@ -249,6 +271,7 @@ bool AdminTask_Set(bool enabled) {
     int code = RunSchtasks(std::wstring(L"/Create /TN \"") + kTaskName + L"\" /XML \"" + file + L"\" /F");
     DeleteFileW(file);
     if (code != 0) Log(L"创建开机自启的计划任务失败（%d）", code);
+    if (code == 0) RememberTaskExe(ExePath().c_str());
     return code == 0;
 }
 

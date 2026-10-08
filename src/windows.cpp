@@ -66,7 +66,7 @@ std::shared_ptr<Gdiplus::Bitmap> GetIcon(HWND h, const std::wstring& exePath) {
 
 }  // namespace
 
-std::vector<WindowEntry> EnumerateWindows(HWND foreground) {
+std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx) {
     std::vector<HWND> handles;
     EnumWindows(
         [](HWND h, LPARAM lp) -> BOOL {
@@ -93,7 +93,10 @@ std::vector<WindowEntry> EnumerateWindows(HWND foreground) {
         e.title = GetWindowTitle(h);
         e.exePath = ToLower(GetProcessPath(AppWindowTarget(h)));
         e.aumid = GetWindowAumid(h);
-        e.icon = GetIcon(h, e.exePath);
+        // 应用商店应用的框架窗口给不出应用自己的图标，按 AppUserModelID 向外壳要（带缓存）
+        if (!e.aumid.empty() && GetClassNameStr(h) == L"ApplicationFrameWindow")
+            e.icon = ShellItemIcon(L"shell:AppsFolder\\" + e.aumid, iconPx);
+        if (!e.icon) e.icon = GetIcon(h, e.exePath);
         e.active = h == foreground || h == activeRoot;
         result.push_back(std::move(e));
     }

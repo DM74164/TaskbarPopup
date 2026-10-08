@@ -65,6 +65,7 @@ std::vector<Before> s_before;  // 不为空 = 打开过自动隐藏、跟着变�
 std::vector<Attempt> s_attempts;
 // 自动隐藏是本程序打开的（或者已经让动画线程去打开）。用户自己开着的不算，本程序也不会去关
 bool s_ownAutoHide = false;
+bool s_desktopTouched = false;  // 自动隐藏开着期间桌面到过前台（用户可能拖过图标）
 bool s_offRequested = false;  // 已经让动画线程去关
 bool s_autoHideConfirmed = false;  // 动画线程回报已经打开（工作区已经变大），之前窗口没铺满不算它不肯
 DWORD s_offFailedAt = 0;           // 上次没能关掉的时间（资源管理器没在运行），过一会儿再试
@@ -171,20 +172,6 @@ std::vector<TaskbarHome> s_homes;
 HMONITOR TaskbarMonitor(HWND tb) {
     RECT r;
     if (!GetWindowRect(tb, &r)) return nullptr;
-    MONITORINFO mi = {sizeof(mi)};
-    HMONITOR whole = MonitorFromRect(&r, MONITOR_DEFAULTTONULL);
-    if (whole && GetMonitorInfoW(whole, &mi)) {
-        const RECT& m = mi.rcMonitor;
-        LONG tol = 4;  // 有的任务栏会伸出屏幕边缘一两个像素
-        if (r.left >= m.left - tol && r.top >= m.top - tol && r.right <= m.right + tol && r.bottom <= m.bottom + tol) {
-            auto it = std::find_if(s_homes.begin(), s_homes.end(), [&](const TaskbarHome& h) { return h.taskbar == tb; });
-            if (it != s_homes.end()) it->monitor = whole;
-            else s_homes.push_back({tb, whole});
-            return whole;
-        }
-    }
-    for (const TaskbarHome& h : s_homes)
-        if (h.taskbar == tb && GetMonitorInfoW(h.monitor, &mi)) return h.monitor;
     bool horizontal = r.right - r.left >= r.bottom - r.top;
     POINT a, b;  // a 在上沿（竖着的在左沿），b 在下沿（右沿）
     if (horizontal) {
@@ -198,6 +185,22 @@ HMONITOR TaskbarMonitor(HWND tb) {
     }
     HMONITOR ma = MonitorFromPoint(a, MONITOR_DEFAULTTONULL);
     HMONITOR mb = MonitorFromPoint(b, MONITOR_DEFAULTTONULL);
+    MONITORINFO mi = {sizeof(mi)};
+    HMONITOR whole = MonitorFromRect(&r, MONITOR_DEFAULTTONULL);
+    // 两条长边落在另一块屏上时不算整条在这块屏上：上下排列时缩下去的任务栏只差一两个像素就整条在下面那块屏上了
+    bool sameScreen = (!ma || ma == whole) && (!mb || mb == whole);
+    if (whole && sameScreen && GetMonitorInfoW(whole, &mi)) {
+        const RECT& m = mi.rcMonitor;
+        LONG tol = 4;  // 有的任务栏会伸出屏幕边缘一两个像素
+        if (r.left >= m.left - tol && r.top >= m.top - tol && r.right <= m.right + tol && r.bottom <= m.bottom + tol) {
+            auto it = std::find_if(s_homes.begin(), s_homes.end(), [&](const TaskbarHome& h) { return h.taskbar == tb; });
+            if (it != s_homes.end()) it->monitor = whole;
+            else s_homes.push_back({tb, whole});
+            return whole;
+        }
+    }
+    for (const TaskbarHome& h : s_homes)
+        if (h.taskbar == tb && GetMonitorInfoW(h.monitor, &mi)) return h.monitor;
     if (ma == mb) return ma ? ma : MonitorFromWindow(tb, MONITOR_DEFAULTTONEAREST);
     if (!ma || !mb) return ma ? ma : mb;
     APPBARDATA abd = {sizeof(abd)};
@@ -607,11 +610,15 @@ void BeginAutoHide() {
     SetRestoreAutoHideFlag(true);  // 被强行结束的话，下次启动时关掉
 }
 
+void CALLBACK OnRetryOff(HWND hwnd, UINT, UINT_PTR id, DWORD);
+
 // 让动画线程关掉本程序打开的自动隐藏。taskbar 不为空时等它的截图滑回原位再关。
-// 资源管理器没在运行、或者刚关失败过时先不要求：定时器过一会儿还会来
+// 资源管理器没在运行、卡住、或者刚关失败过时先不要求，过一会儿再试（功能刚被关掉、
+// 或者前台一直是任务栏之类时，250 毫秒的定时器不会再来）
 void RequestAutoHideOff(HWND taskbar) {
     bool backoff = s_offFailedAt && GetTickCount() - s_offFailedAt < 1000;
     if (!s_ownAutoHide || s_offRequested || backoff || !ExplorerRunning()) {
+        if (s_ownAutoHide && !s_offRequested) SetTimer(g_mainWnd, kTimerRetryOff, 1100, OnRetryOff);
         if (taskbar) TaskbarAnim_Show(taskbar);
         return;
     }
@@ -791,13 +798,20 @@ bool IsTransient(HWND hwnd) {
 
 // 窗口属于排除名单里的程序（最大化时不隐藏任务栏）。按进程记住上一次的结果，不用每次都查程序路径
 bool IsExcluded(HWND hwnd) {
-    if (g_settings.excludeApps.empty()) return false;
+    static HWND lastApp = nullptr;
     static DWORD lastPid = 0;
     static std::wstring lastExe;
+    if (g_settings.excludeApps.empty()) {
+        lastApp = nullptr;
+        lastPid = 0;
+        return false;
+    }
+    // 窗口和进程都没变才用记下的：进程号会被新进程重用
     HWND app = AppWindowTarget(hwnd);
     DWORD pid = 0;
     GetWindowThreadProcessId(app, &pid);
-    if (pid != lastPid) {
+    if (app != lastApp || pid != lastPid) {
+        lastApp = app;
         lastPid = pid;
         lastExe = WindowExeName(app);
     }
@@ -853,6 +867,14 @@ void EvaluateNow(bool enforce) {
         s_lastTray = tray;
     }
     HWND fg = GetForegroundWindow();
+    // 自动隐藏开着期间用户在（另一块屏上的）桌面上操作过：可能拖过图标，离开桌面时按现在的样子重新记，
+    // 免得关掉自动隐藏以后拿旧位置把用户摆好的图标挪回去
+    if (s_ownAutoHide && fg && InList(GetClassNameStr(fg), kDesktopClasses)) {
+        s_desktopTouched = true;
+    } else if (s_desktopTouched) {
+        s_desktopTouched = false;
+        DesktopIcons_Resave();
+    }
     bool transient = !fg || IsTransient(fg);
     WatchLocation(transient ? s_targetWindow : fg);
     if (transient) {
@@ -894,6 +916,10 @@ void EvaluateNow(bool enforce) {
         s_targetWindow = nullptr;
         LeaveHiddenMode();
     } else if (!target) {
+        if (s_desktopTouched) {  // 还在桌面上时目标窗口就没了：关自动隐藏之前先记
+            s_desktopTouched = false;
+            DesktopIcons_Resave();
+        }
         LeaveHiddenMode();
     }
 }
@@ -1104,8 +1130,10 @@ void Taskbar_RestoreAll() {
 }
 
 void Taskbar_EmergencyRestore() {
-    // 先关自动隐藏，任务栏回来以后最大化的窗口才不会钻到它下面
-    if (s_ownAutoHide) Taskbar_SetAutoHide(false);
+    TaskbarAnim_Abort();  // 动画线程上排着的“藏起来、打开自动隐藏”不要再做了
+    // 先关自动隐藏，任务栏回来以后最大化的窗口才不会钻到它下面。
+    // 崩溃可能发生在别的线程上，再看一眼设置文件里的记号
+    if (s_ownAutoHide || GetRestoreAutoHideFlag()) Taskbar_SetAutoHide(false);
     // 本程序藏过的不管现在看上去是否可见都发一次：藏的请求可能还排在资源管理器的队列里
     for (HWND h : FindTaskbars())
         if (!IsWindowVisible(h) || std::find(s_everHidden.begin(), s_everHidden.end(), h) != s_everHidden.end())
