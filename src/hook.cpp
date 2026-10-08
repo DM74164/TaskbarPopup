@@ -74,6 +74,15 @@ bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
 
     bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
     bool isWin = k.vkCode == VK_LWIN || k.vkCode == VK_RWIN;
+    if (isWin) {
+        // 等 Win 松开的状态下，隔了很久又来一个 Win 按下：不是按住时的自动重复（最慢也几百毫秒一次），
+        // 是上次松开没收到（松开时前台是管理员权限的程序、或者切到了锁屏 / UAC 界面）。从头开始，这次照常处理
+        static DWORD lastWinTime = 0;
+        if (down && k.vkCode == s_winVk && (s_state == State::Triggered || s_state == State::Passthrough) &&
+            k.time - lastWinTime > 1500)
+            s_state = State::Idle;
+        lastWinTime = k.time;
+    }
 
     switch (s_state) {
         case State::Idle:

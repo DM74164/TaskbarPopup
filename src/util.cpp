@@ -41,9 +41,13 @@ std::wstring GetProcessPath(HWND hwnd) {
 }
 
 HWND AppWindowTarget(HWND hwnd) {
-    // UWP 应用的顶层窗口属于 ApplicationFrameHost，真正的应用进程在子窗口 CoreWindow 里
+    // UWP 应用的顶层窗口属于 ApplicationFrameHost，真正的应用进程在子窗口 CoreWindow 里。
+    // 最小化或者还在启动时 CoreWindow 不挂在框架下面，是一个同标题的顶层窗口
     if (GetClassNameStr(hwnd) == L"ApplicationFrameWindow") {
         if (HWND core = FindWindowExW(hwnd, nullptr, L"Windows.UI.Core.CoreWindow", nullptr)) return core;
+        std::wstring title = GetWindowTitle(hwnd);
+        if (!title.empty())
+            if (HWND core = FindWindowExW(nullptr, nullptr, L"Windows.UI.Core.CoreWindow", title.c_str())) return core;
     }
     return hwnd;
 }
@@ -123,8 +127,10 @@ void ForceForeground(HWND hwnd) {
     if (fg == hwnd) return;
     DWORD fgThread = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
     DWORD me = GetCurrentThreadId();
-    bool attached = fgThread && fgThread != me && AttachThreadInput(me, fgThread, TRUE);
-    BringWindowToTop(hwnd);
+    // 前台程序卡住时不挂：挂上以后对它的窗口操作会变成同步的，跟着卡住
+    bool attached = fgThread && fgThread != me && !IsHungAppWindow(fg) && AttachThreadInput(me, fgThread, TRUE);
+    // 别的程序的窗口用异步的方式提到最前（BringWindowToTop 要等它处理完，它卡住时本程序也跟着卡住）
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS);
     SetForegroundWindow(hwnd);
     if (attached) AttachThreadInput(me, fgThread, FALSE);
 }

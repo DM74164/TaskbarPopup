@@ -6,6 +6,7 @@
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音。
 #include "common.h"
 
+#include <climits>
 #include <cmath>
 #include <cwchar>
 
@@ -80,6 +81,7 @@ std::wstring s_filter;         // 打的字
 float s_lockedItemsW = 0;      // 筛选期间格子区宽度不变（面板不跟着变窄变宽）；0 = 没锁
 bool s_keyNav = false;         // 最近是用键盘选的（选中项也显示缩略图）
 bool s_menuOpen = false;
+POINT s_lastMouse = {INT_MIN, INT_MIN};  // 上一次 WM_MOUSEMOVE 的位置：窗口出现、移动时系统会补发一条位置没变的
 HWND s_thumbWant = nullptr;    // 想显示缩略图的窗口
 HWND s_thumbShown = nullptr;   // 正显示着缩略图的窗口
 int s_thumbIdx = -1;
@@ -790,6 +792,7 @@ void ApplyFilter() {
     s_pillIndex = -1;
     s_sel = f.empty() ? DefaultSelection() : (s_items.empty() ? -1 : 1);  // 没有匹配的就什么都不选
     s_keyNav = !f.empty();
+    s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
     EnsureVisible(s_sel);
     Redraw();
 }
@@ -819,11 +822,11 @@ void ActivateIndex(int idx, bool newInstance = false) {
     // 和系统任务栏一样：点当前窗口就最小化
     if (item.active && !IsIconic(h)) {
         HideNow();
-        ShowWindow(h, SW_MINIMIZE);
+        ShowWindowAsync(h, SW_MINIMIZE);  // 异步：那个程序卡住时本程序不跟着卡
         return;
     }
     s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
-    if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+    if (IsIconic(h)) ShowWindowAsync(h, SW_RESTORE);
     ForceForeground(h);  // 先激活目标窗口，趁本窗口还在前台有权限切换
     HideNow();
 }
@@ -837,7 +840,12 @@ void CloseItem(int idx) {
     }
     HWND h = item.hwnd;
     std::wstring launch = item.launch;
-    PostMessageW(h, WM_CLOSE, 0, 0);
+    if (!PostMessageW(h, WM_CLOSE, 0, 0)) {
+        // 以管理员身份运行的程序（比如任务管理器），普通权限发不进去：窗口还在，格子也留着
+        Log(L"关闭窗口失败（%lu）：%ls", GetLastError(), item.title.c_str());
+        MessageBeep(MB_ICONWARNING);
+        return;
+    }
 
     // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉。
     // 按全部格子判断，筛选后显示的格子和全部格子一起改
@@ -875,11 +883,19 @@ void CloseItem(int idx) {
 // 把这个程序加进 / 移出“最大化时不隐藏任务栏”的名单
 void ShowItemMenu(int idx, POINT at) {
     if (idx <= 0 || idx > ItemCount() || !s_items[idx - 1].hwnd) return;
-    std::wstring exe = GetProcessPath(s_items[idx - 1].hwnd);
-    std::wstring exeName = WindowExeName(s_items[idx - 1].hwnd);
+    // 同一个程序：有 AppUserModelID 的按它比（应用商店应用的窗口都属于同一个 ApplicationFrameHost 进程），
+    // 没有的按程序路径比
+    auto appKey = [](HWND h) {
+        std::wstring id = GetWindowAumid(h);
+        return id.empty() ? ToLower(GetProcessPath(AppWindowTarget(h))) : id;
+    };
+    std::wstring key = appKey(s_items[idx - 1].hwnd);
     std::vector<HWND> same;
     for (const Tile& t : s_items)
-        if (t.hwnd && !exe.empty() && GetProcessPath(t.hwnd) == exe) same.push_back(t.hwnd);
+        if (t.hwnd && !key.empty() && appKey(t.hwnd) == key) same.push_back(t.hwnd);
+    // 应用商店应用最小化时偶尔找不到它自己的进程，别把 ApplicationFrameHost 当成它加进排除名单
+    std::wstring exeName = WindowExeName(s_items[idx - 1].hwnd);
+    if (exeName == L"applicationframehost.exe") exeName.clear();
 
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"关闭窗口");
@@ -961,6 +977,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetSliderFromX(SliderOf(s_drag), x);
                 return 0;
             }
+            // 位置没变的是系统补发的（比如缩略图窗口出现了），不是用户在动鼠标：别打乱键盘选中的项
+            if (x == s_lastMouse.x && y == s_lastMouse.y) return 0;
+            s_lastMouse = {x, y};
             s_keyNav = false;
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
@@ -976,6 +995,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_MOUSELEAVE:
+            s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_hover = -1;
             s_hoverControl = kNone;
             Redraw();
@@ -1040,6 +1060,13 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 NudgeSlider(SliderOf(control), up);
             } else if (ItemCount() > s_visible) {
                 s_first = std::max(0, std::min(s_first - up, ItemCount() - s_visible));
+                // 格子在鼠标下面挪了：重新看鼠标下是哪个，缩略图也按新位置摆
+                s_hover = HitTest(pt.x, pt.y);
+                if (s_hover >= 0) {
+                    s_sel = s_hover;
+                    s_keyNav = false;
+                }
+                s_thumbIdx = -1;
                 Redraw();
             }
             return 0;
@@ -1200,12 +1227,13 @@ void Popup_Show() {
     s_drag = kNone;
     s_wheelRest = 0;
 
-    s_allItems = BuildTiles(EnumerateWindows(s_prevForeground));
+    s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, static_cast<int>(std::lround(Px(32)))));
     s_items = s_allItems;
     s_filter.clear();
     s_lockedItemsW = 0;
     s_keyNav = false;
     s_menuOpen = false;
+    s_lastMouse = {INT_MIN, INT_MIN};
     Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
     ComputeLayout();
     UpdatePlacement();

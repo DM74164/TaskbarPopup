@@ -247,7 +247,47 @@ std::wstring SettingsDir() {
 
 std::wstring SettingsFile() { return SettingsDir() + L"\\settings.ini"; }
 
+// WritePrivateProfileString 新建的文件是 ANSI 编码，系统代码页以外的字符（比如英文版 Windows 上中文名字的程序）
+// 会存成“?”。先建好一个带 UTF-16 BOM 的文件，之后的读写就都按 Unicode；旧版本留下的 ANSI 文件转换一次
+void EnsureUnicodeIni() {
+    CreateDirectoryW(SettingsDir().c_str(), nullptr);
+    HANDLE h = CreateFileW(SettingsFile().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER size = {};
+    std::string bytes;
+    bool ok = GetFileSizeEx(h, &size) && size.QuadPart < (1 << 20);
+    if (ok && size.QuadPart > 0) {
+        bytes.resize(static_cast<size_t>(size.QuadPart));
+        DWORD read = 0;
+        ok = ReadFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) && read == bytes.size();
+    }
+    bool unicode = bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
+                   static_cast<unsigned char>(bytes[1]) == 0xFE;
+    if (ok && !unicode) {
+        UINT codePage = CP_ACP;
+        size_t skip = 0;
+        if (bytes.compare(0, 3, "\xEF\xBB\xBF") == 0) {  // 用户自己存成了 UTF-8
+            codePage = CP_UTF8;
+            skip = 3;
+        }
+        std::wstring text(1, L'\xFEFF');
+        int length = static_cast<int>(bytes.size() - skip);
+        int n = length > 0 ? MultiByteToWideChar(codePage, 0, bytes.data() + skip, length, nullptr, 0) : 0;
+        if (n > 0) {
+            text.resize(1 + static_cast<size_t>(n));
+            MultiByteToWideChar(codePage, 0, bytes.data() + skip, length, &text[1], n);
+        }
+        DWORD written = 0;
+        SetFilePointer(h, 0, nullptr, FILE_BEGIN);
+        if (WriteFile(h, text.data(), static_cast<DWORD>(text.size() * sizeof(wchar_t)), &written, nullptr))
+            SetEndOfFile(h);
+    }
+    CloseHandle(h);
+}
+
 void LoadSettings() {
+    EnsureUnicodeIni();
     std::wstring f = SettingsFile();
     g_settings.autoHideOnFullscreen = GetPrivateProfileIntW(L"General", L"AutoHideOnFullscreen", 1, f.c_str()) != 0;
     g_settings.longPressPopup = GetPrivateProfileIntW(L"General", L"LongPressPopup", 1, f.c_str()) != 0;
@@ -270,7 +310,7 @@ void LoadSettings() {
 }
 
 void SaveSettings() {
-    CreateDirectoryW(SettingsDir().c_str(), nullptr);
+    EnsureUnicodeIni();
     std::wstring f = SettingsFile();
     WritePrivateProfileStringW(L"General", L"AutoHideOnFullscreen", g_settings.autoHideOnFullscreen ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressPopup", g_settings.longPressPopup ? L"1" : L"0", f.c_str());
@@ -288,7 +328,7 @@ bool GetRestoreAutoHideFlag() {
 }
 
 void SetRestoreAutoHideFlag(bool value) {
-    CreateDirectoryW(SettingsDir().c_str(), nullptr);
+    EnsureUnicodeIni();
     WritePrivateProfileStringW(L"State", L"RestoreAutoHide", value ? L"1" : L"0", SettingsFile().c_str());
 }
 
@@ -369,7 +409,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // 设置了以管理员身份运行却是普通权限启动的（比如双击 exe）：交给计划任务（不弹 UAC）或者弹 UAC 重新启动
         CloseHandle(mutex);
         mutex = nullptr;
-        if (AdminTask_Run() || RelaunchElevated()) return 0;
+        // 计划任务里记的是建任务时的程序路径：程序换了位置（解压了新版本）就别用它，弹 UAC，启动后会更新任务
+        if ((AdminTask_MatchesExe() && AdminTask_Run()) || RelaunchElevated()) return 0;
         mutex = CreateMutexW(nullptr, TRUE, L"Local\\TaskbarPopup.SingleInstance");
         if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) return 0;
     }
@@ -391,8 +432,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // 以管理员身份运行时，资源管理器（普通权限）发来的消息默认会被拦下
     ChangeWindowMessageFilterEx(g_mainWnd, s_msgTaskbarCreated, MSGFLT_ALLOW, nullptr);
     ChangeWindowMessageFilterEx(g_mainWnd, WM_APP_TRAY, MSGFLT_ALLOW, nullptr);
-    // 刚切换成以管理员身份运行：原来写在 Run 里的开机自启换成计划任务
-    if (g_settings.runAsAdmin && IsElevated() && RunKeyExists()) SetAutoStart(true);
+    // 刚切换成以管理员身份运行：原来写在 Run 里的开机自启换成计划任务；程序换了位置时计划任务也改成现在的路径
+    if (g_settings.runAsAdmin && IsElevated() && (RunKeyExists() || (!AdminTask_MatchesExe() && AdminTask_Exists())))
+        SetAutoStart(true);
     Elevation_Init();
 
     Popup_Init();
@@ -419,5 +461,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     Gdiplus::GdiplusShutdown(gdiplusToken);
     CoUninitialize();
     if (mutex) CloseHandle(mutex);
+    // 后台线程（桌面图标、任务栏动画）没在限定时间里结束时还可能在用全局对象，
+    // 正常 return 会跑静态析构、把它们释放掉。收尾已经做完，直接结束进程
+    TerminateProcess(GetCurrentProcess(), 0);
     return 0;
 }

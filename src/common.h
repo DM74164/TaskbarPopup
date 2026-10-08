@@ -60,6 +60,7 @@ extern Settings g_settings;
 
 std::wstring SettingsDir();
 std::wstring SettingsFile();  // SettingsDir() 下的 settings.ini
+void EnsureUnicodeIni();      // 写 settings.ini 之前调用：保证它是 UTF-16 编码
 void LoadSettings();
 void SaveSettings();
 bool IsAutoStartEnabled();
@@ -114,12 +115,14 @@ void TaskbarAnim_WantAutoHide(UINT seq);  // 主线程现在要开的请求编�
 void TaskbarAnim_Show(HWND taskbar, UINT offSeq = 0);
 void TaskbarAnim_AutoHideOff(UINT seq);  // 没有要滑回来的任务栏时关掉自动隐藏（正在滑回来的话等它滑完）
 void TaskbarAnim_Stop();  // 结束动画线程，去掉所有截图
+void TaskbarAnim_Abort();  // 崩溃时：让动画线程不再做任何事（只改原子变量，不等），可以在任何线程上调用
 
 // ---------------- 桌面图标（跨进程调用在单独的线程上做）----------------
 // 工作区变化时桌面会按新的工作区重新排列图标，打开自动隐藏前记下位置，关掉以后摆回去
 void DesktopIcons_BeginSession();       // 主线程，要打开自动隐藏时：开始记位置（上次的还没摆完就接着用）
 void DesktopIcons_WaitSaved(DWORD ms);  // 动画线程，打开自动隐藏之前：等位置记完，超时的话这次不摆
 void DesktopIcons_RestoreLater();       // 主线程，关掉自动隐藏以后：等桌面排完再摆回去，又打开的话作废
+void DesktopIcons_Resave();             // 主线程，自动隐藏开着期间用户在桌面上操作过：按现在的位置重新记
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
 
 // ---------------- 键盘钩子（在单独的线程上运行）----------------
@@ -137,7 +140,7 @@ struct WindowEntry {
     std::wstring aumid;    // AppUserModelID，小写，可能为空
     bool active = false;
 };
-std::vector<WindowEntry> EnumerateWindows(HWND foreground);
+std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx);
 void Windows_ClearCache();
 
 // ---------------- 固定在任务栏的应用 ----------------
@@ -164,6 +167,7 @@ void LaunchAsUser(const std::wstring& target);  // 本程序是管理员时也�
 bool AdminTask_Exists();      // 以管理员身份开机自启的计划任务
 bool AdminTask_Set(bool enabled);
 bool AdminTask_Run();
+bool AdminTask_MatchesExe();  // 计划任务是用现在这个 exe 的路径建的
 void ShowTrayBalloon(const wchar_t* title, const wchar_t* text);
 void Pinned_ClearCache();
 

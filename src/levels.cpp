@@ -222,7 +222,7 @@ public:
         int percent = -1;
         for (int pass = 0; pass < 2; ++pass) {
             bool wmi = (pass == 0) == WmiFirst(monitor);
-            if (wmi ? WmiRead(monitor, percent) : DdcRead(monitor, percent)) {
+            if (wmi ? WmiRetry([&] { return WmiRead(monitor, percent); }) : DdcRead(monitor, percent)) {
                 m_method[monitor] = wmi ? kWmi : kDdc;
                 return percent;
             }
@@ -234,7 +234,7 @@ public:
     void Write(HMONITOR monitor, int percent) {
         for (int pass = 0; pass < 2; ++pass) {
             bool wmi = (pass == 0) == WmiFirst(monitor);
-            if (wmi ? WmiWrite(monitor, percent) : DdcWrite(monitor, percent)) {
+            if (wmi ? WmiRetry([&] { return WmiWrite(monitor, percent); }) : DdcWrite(monitor, percent)) {
                 m_method[monitor] = wmi ? kWmi : kDdc;
                 return;
             }
@@ -319,6 +319,16 @@ private:
 
     // ---- WMI ----
     // WMI 一般只有笔记本内屏（也可能是一体机）有亮度实例，外接显示器得靠 DDC/CI
+
+    // 缓存的连接失效（WMI 服务重启过）时调用会失败并丢掉连接：重新连上再试一次，
+    // 不然这块屏幕会被当成不支持调亮度
+    template <class Fn>
+    bool WmiRetry(Fn fn) {
+        bool had = m_wmi != nullptr;
+        if (fn()) return true;
+        return had && !m_wmi && fn();
+    }
+
     bool WmiConnect() {
         if (m_wmi) return true;
         if (!m_comReady) return false;
@@ -404,7 +414,11 @@ private:
         WmiResetSet();
         IWbemClassObject* cls = nullptr;
         Bstr className(L"WmiMonitorBrightnessMethods");
-        if (FAILED(m_wmi->GetObject(className, 0, nullptr, &cls, nullptr)) || !cls) return false;
+        HRESULT got = m_wmi->GetObject(className, 0, nullptr, &cls, nullptr);
+        if (FAILED(got) || !cls) {
+            if (FAILED(got) && HRESULT_FACILITY(got) != FACILITY_ITF) WmiReset();  // 同 WmiQuery
+            return false;
+        }
         HRESULT hr = cls->GetMethod(L"WmiSetBrightness", 0, &m_setParams, nullptr);
         cls->Release();
         if (FAILED(hr) || !m_setParams) {

@@ -494,8 +494,10 @@ bool EnsureThread() {
     if (s_thread) return true;
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     s_thread = CreateThread(nullptr, 0, AnimThread, ready, 0, &s_threadId);
-    if (s_thread) WaitForSingleObject(ready, 2000);
-    CloseHandle(ready);
+    // 一直等到线程建好消息队列：等不到就关掉事件的话，线程以后会去 SetEvent 一个已经关掉（可能被重用）的句柄，
+    // 之前发给它的命令和退出消息也会丢
+    if (s_thread && ready) WaitForSingleObject(ready, INFINITE);
+    if (ready) CloseHandle(ready);
     return s_thread != nullptr;
 }
 
@@ -519,6 +521,11 @@ void TaskbarAnim_Hide(HWND taskbar, HWND stretch, const RECT& stretchRect, bool 
 }
 
 void TaskbarAnim_WantAutoHide(UINT seq) { s_wantedSeq = seq; }
+
+void TaskbarAnim_Abort() {
+    ++s_generation;
+    s_wantedSeq = 0;
+}
 
 void TaskbarAnim_Show(HWND taskbar, UINT offSeq) {
     if (EnsureThread() &&

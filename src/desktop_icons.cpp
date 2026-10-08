@@ -19,6 +19,7 @@ namespace {
 constexpr UINT kCmdSave = WM_APP + 1;
 constexpr UINT kCmdRestore = WM_APP + 2;  // wParam：发出时的会话编号
 constexpr UINT kCmdFinish = WM_APP + 3;
+constexpr UINT kCmdResave = WM_APP + 4;  // wParam：会话编号。自动隐藏开着期间用户在桌面上操作过，按现在的样子重新记
 
 struct IconPos {
     PITEMID_CHILD pidl;
@@ -202,7 +203,12 @@ bool RestoreWhenSettled(UINT session, bool& pressed) {
         last = std::move(now);
     }
     if (!WaitReleased(session, pressed)) return false;
-    if (pressed) last = Read();  // 松开以后的位置
+    if (pressed) {
+        last = Read();  // 松开以后的位置
+        // 和第一次读到的不一样的可能是用户刚拖过的：第二遍别把它当成“还停在资源管理器排的位置上”
+        for (size_t i = 0; i < last.size(); ++i)
+            if (i >= first.size() || last[i].x != first[i].x || last[i].y != first[i].y) last[i] = {LONG_MIN, LONG_MIN};
+    }
     s_layout = std::move(last);
     if (pressed) Log(L"用户在桌面上按过鼠标，只摆没被拖过的图标");
     Log(L"桌面图标摆回原位 %d 个", Restore(pressed ? &first : nullptr));
@@ -238,6 +244,18 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                     if (int moved = Restore(pressed ? &s_layout : nullptr)) Log(L"又摆回 %d 个桌面图标", moved);
                 // 用户一直按着没摆完也丢掉，免得下次拿旧位置把用户拖过的图标挪回去。又打开了自动隐藏（会话变了）时留着接着用
                 Done(session);
+                break;
+            }
+            case kCmdResave: {
+                bool ok;
+                {
+                    std::lock_guard<std::mutex> guard(s_lock);
+                    ok = static_cast<UINT>(msg.wParam) == s_session && s_snapshot;
+                }
+                if (ok) {
+                    Log(L"用户在桌面上操作过，按现在的样子重新记图标位置");
+                    Save();
+                }
                 break;
             }
             case kCmdFinish: {
@@ -288,6 +306,11 @@ void DesktopIcons_BeginSession() {
 void DesktopIcons_WaitSaved(DWORD ms) {
     if (!s_savedEvent) return;
     if (WaitForSingleObject(s_savedEvent, ms) == WAIT_TIMEOUT) s_discard = true;
+}
+
+void DesktopIcons_Resave() {
+    std::lock_guard<std::mutex> guard(s_lock);
+    if (s_thread && s_snapshot) PostThreadMessageW(s_threadId, kCmdResave, s_session, 0);
 }
 
 void DesktopIcons_RestoreLater() {
