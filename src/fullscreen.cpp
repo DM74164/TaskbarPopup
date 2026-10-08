@@ -67,6 +67,7 @@ std::vector<Attempt> s_attempts;
 bool s_ownAutoHide = false;
 bool s_desktopMarked = false;  // 自动隐藏开着期间桌面到了前台，已经让图标线程读过一遍位置（DesktopIcons_Mark）
 DWORD s_autoHideOnAt = 0;      // 确认自动隐藏打开的时刻
+DWORD s_markedAt = 0;          // s_desktopMarked 是什么时候记的
 bool s_offRequested = false;  // 已经让动画线程去关
 bool s_autoHideConfirmed = false;  // 动画线程回报已经打开（工作区已经变大），之前窗口没铺满不算它不肯
 DWORD s_offFailedAt = 0;           // 上次没能关掉的时间（资源管理器没在运行），过一会儿再试
@@ -622,6 +623,9 @@ bool AutoHideSteady() {
 void FlushDesktopMark() {
     if (!s_desktopMarked) return;
     s_desktopMarked = false;
+    // 刚记的（比如关掉最大化的窗口、桌面到了前台，同一次判断里就要关自动隐藏）：
+    // 这么短的时间里不可能拖过图标，不用再读一遍，免得耽误关自动隐藏
+    if (GetTickCount() - s_markedAt < 200) return;
     DesktopIcons_UpdateMoved();
 }
 
@@ -886,7 +890,10 @@ void EvaluateNow(bool enforce) {
     // 要关自动隐藏时 RequestAutoHideOff 会先读完；不稳定的时候（正在开、正在关）读到的不算数
     bool steady = AutoHideSteady();
     if (steady && fg && InList(GetClassNameStr(fg), kDesktopClasses)) {
-        if (!s_desktopMarked) s_desktopMarked = DesktopIcons_Mark();
+        if (!s_desktopMarked && DesktopIcons_Mark()) {
+            s_desktopMarked = true;
+            s_markedAt = GetTickCount();
+        }
     } else if (s_desktopMarked) {
         if (steady) FlushDesktopMark();
         else s_desktopMarked = false;
@@ -1118,10 +1125,10 @@ void Taskbar_RestoreAll() {
     }
     bool wasOn = s_ownAutoHide || GetRestoreAutoHideFlag();
     if (s_ownAutoHide && !s_offRequested) SampleWorkAreas();
-    if (s_desktopMarked) {  // 退出时还在桌面上：用户挪过的图标先按新位置记
-        FlushDesktopMark();
-        DesktopIcons_WaitUpdated(1000);
-    }
+    // 退出时还在桌面上：用户挪过的图标先按新位置记。前面 Fullscreen_SetEnabled(false) 可能已经发出了这次读取，
+    // 而动画线程已经停了、不会替我们等，这里等它读完再关自动隐藏
+    FlushDesktopMark();
+    DesktopIcons_WaitUpdated(1000);
     Taskbar_EmergencyRestore();  // 显示任务栏，关掉本程序打开的自动隐藏
     UndoSavedAutoHide();         // 上次异常退出时没来得及关的
     s_ownAutoHide = false;
