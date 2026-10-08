@@ -204,8 +204,10 @@ void LaunchAsUser(const std::wstring& target) {
         // 资源管理器没在运行（正在重启）时不能退回到自己启动：那样启动的程序也是管理员权限
         Log(L"通过资源管理器以普通权限启动失败：%ls", target.c_str());
         const wchar_t* text = L"资源管理器还没准备好，稍后再试一次。";
-        // 资源管理器不在时托盘气泡也出不来，改用对话框
-        if (!ShowTrayBalloon(L"暂时无法启动", text))
+        // 资源管理器不在时托盘气泡也出不来，改用对话框（勿扰模式下气泡可能不弹出来，所以也响一声）
+        if (ShowTrayBalloon(L"暂时无法启动", text))
+            MessageBeep(MB_ICONWARNING);
+        else
             MessageBoxW(nullptr, text, L"TaskbarPopup", MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
         return;
     }
