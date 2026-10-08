@@ -194,6 +194,7 @@ void ApplyPendingOff() {
     if (!s_offSeq) return;
     UINT seq = s_offSeq;
     s_offSeq = 0;
+    DesktopIcons_WaitUpdated(1000);  // 工作区一变桌面就重新排列，用户挪过的图标得先读完
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
 }
@@ -537,6 +538,7 @@ void TaskbarAnim_Show(HWND taskbar, UINT offSeq) {
 
 void TaskbarAnim_AutoHideOff(UINT seq) {
     if (EnsureThread() && PostThreadMessageW(s_threadId, kCmdAutoHideOff, seq, 0)) return;
+    DesktopIcons_WaitUpdated(1000);
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
 }

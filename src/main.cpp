@@ -230,13 +230,13 @@ LONG WINAPI OnCrash(EXCEPTION_POINTERS*) {
 
 }  // namespace
 
-void ShowTrayBalloon(const wchar_t* title, const wchar_t* text) {
+bool ShowTrayBalloon(const wchar_t* title, const wchar_t* text) {
     NOTIFYICONDATAW nid = s_nid;
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_INFO;
     lstrcpynW(nid.szInfoTitle, title, ARRAYSIZE(nid.szInfoTitle));
     lstrcpynW(nid.szInfo, text, ARRAYSIZE(nid.szInfo));
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
+    return Shell_NotifyIconW(NIM_MODIFY, &nid) != FALSE;
 }
 
 std::wstring SettingsDir() {

@@ -68,6 +68,15 @@ void StartTimer() {
     s_timer = SetTimer(nullptr, 0, static_cast<UINT>(s_thresholdMs.load()), OnLongPressTimer);
 }
 
+// 按住 Win 时两次自动重复之间最长隔多久。一般不到 1 秒；开了“筛选键”的话重复延迟、间隔可以设到 2 秒
+DWORD RepeatGapLimit() {
+    DWORD limit = 1500;
+    FILTERKEYS fk = {sizeof(fk)};
+    if (SystemParametersInfoW(SPI_GETFILTERKEYS, sizeof(fk), &fk, 0) && (fk.dwFlags & FKF_FILTERKEYSON))
+        limit = std::max<DWORD>(limit, std::max(fk.iDelayMSec, fk.iRepeatMSec) + 500);
+    return limit;
+}
+
 // 返回 true 表示吞掉这个按键事件
 bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
     if (k.dwExtraInfo == kInjectMarker) return false;
@@ -79,7 +88,7 @@ bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
         // 是上次松开没收到（松开时前台是管理员权限的程序、或者切到了锁屏 / UAC 界面）。从头开始，这次照常处理
         static DWORD lastWinTime = 0;
         if (down && k.vkCode == s_winVk && (s_state == State::Triggered || s_state == State::Passthrough) &&
-            k.time - lastWinTime > 1500)
+            k.time - lastWinTime > 1500 && k.time - lastWinTime > RepeatGapLimit())
             s_state = State::Idle;
         lastWinTime = k.time;
     }

@@ -19,7 +19,11 @@ namespace {
 constexpr UINT kCmdSave = WM_APP + 1;
 constexpr UINT kCmdRestore = WM_APP + 2;  // wParam：发出时的会话编号
 constexpr UINT kCmdFinish = WM_APP + 3;
-constexpr UINT kCmdResave = WM_APP + 4;  // wParam：会话编号。自动隐藏开着期间用户在桌面上操作过，按现在的样子重新记
+// 自动隐藏开着期间用户可能在（另一块屏上的）桌面上拖过图标：桌面到前台时读一遍位置（Mark），
+// 离开桌面或者要关自动隐藏之前再读一遍（Update），两次之间挪过的图标按新位置记，免得之后被摆回旧位置。
+// 只记用户挪过的：其余的还按打开自动隐藏之前的位置摆回去。wParam：会话编号
+constexpr UINT kCmdMark = WM_APP + 4;
+constexpr UINT kCmdUpdate = WM_APP + 5;
 
 struct IconPos {
     PITEMID_CHILD pidl;
@@ -29,6 +33,8 @@ struct IconPos {
 HANDLE s_thread = nullptr;
 DWORD s_threadId = 0;
 HANDLE s_savedEvent = nullptr;  // 手动重置；记图标位置期间不发信号
+HANDLE s_updatedEvent = nullptr;  // 手动重置；Update 排着、还没读完时不发信号。关自动隐藏之前等它
+std::atomic<bool> s_updateLate{false};  // 等 Update 的一方不等了，自动隐藏已经在关：读到的位置不能用
 std::mutex s_lock;              // 保护 s_session、s_snapshot
 UINT s_session = 0;             // 每打开一次自动隐藏（和退出时）加一，旧的摆放请求看到变了就放弃
 bool s_snapshot = false;        // 有一份打开自动隐藏之前记下的位置（可能还在记）
@@ -36,6 +42,7 @@ std::atomic<bool> s_discard{false};  // 记得太慢，自动隐藏已经打开�
 std::atomic<bool> s_quit{false};
 std::vector<IconPos> s_icons;  // 只在图标线程上用
 std::vector<POINT> s_layout;   // 关掉自动隐藏、桌面排好以后读到的位置（资源管理器排的），和 s_icons 一一对应
+std::vector<POINT> s_mark;     // Mark 时读到的位置，和 s_icons 一一对应
 
 // 用完自动 Release 的接口指针
 template <class T>
@@ -77,6 +84,7 @@ void Clear() {
     for (IconPos& icon : s_icons) CoTaskMemFree(icon.pidl);
     s_icons.clear();
     s_layout.clear();
+    s_mark.clear();
 }
 
 // 用户正在桌面上按着鼠标主键（可能在拖图标）。在别的窗口上按着（拖窗口标题栏之类）不算。
@@ -189,29 +197,31 @@ bool WaitReleased(UINT session, bool& pressed) {
 
 // 桌面重新排列图标是资源管理器过一会儿才做的：每 150 毫秒读一次位置，连续两次没变（或者等了 2 秒）再摆回去。
 // 用户在桌面上按着鼠标（可能在拖图标）时不算排好，等松开。
-// 期间用户在桌面上按过鼠标（pressed）的话，只摆从第一次读到现在没动过的：动过的可能是用户自己拖的
+// 期间用户在桌面上按过鼠标（pressed）的话，只摆从按下之前到现在没动过的：动过的可能是用户自己拖的
 bool RestoreWhenSettled(UINT session, bool& pressed) {
     s_layout.clear();
     if (s_icons.empty()) return true;
-    std::vector<POINT> first = Read();
-    std::vector<POINT> last = first;
+    std::vector<POINT> last = Read();
+    std::vector<POINT> beforePress = last;  // 第一次按下之前最后读到的（资源管理器那时已经排过的也在里面）
     int stable = 0;
     for (DWORD start = GetTickCount(); stable < 2 && GetTickCount() - start < 2000;) {
         if (!Wait(150, session, &pressed)) return false;
         std::vector<POINT> now = Read();
         stable = Same(now, last) && !DesktopPressed() ? stable + 1 : 0;
+        if (!pressed) beforePress = now;
         last = std::move(now);
     }
     if (!WaitReleased(session, pressed)) return false;
     if (pressed) {
         last = Read();  // 松开以后的位置
-        // 和第一次读到的不一样的可能是用户刚拖过的：第二遍别把它当成“还停在资源管理器排的位置上”
+        // 和按下之前不一样的可能是用户刚拖过的：第二遍别把它当成“还停在资源管理器排的位置上”
         for (size_t i = 0; i < last.size(); ++i)
-            if (i >= first.size() || last[i].x != first[i].x || last[i].y != first[i].y) last[i] = {LONG_MIN, LONG_MIN};
+            if (i >= beforePress.size() || last[i].x != beforePress[i].x || last[i].y != beforePress[i].y)
+                last[i] = {LONG_MIN, LONG_MIN};
     }
     s_layout = std::move(last);
     if (pressed) Log(L"用户在桌面上按过鼠标，只摆没被拖过的图标");
-    Log(L"桌面图标摆回原位 %d 个", Restore(pressed ? &first : nullptr));
+    Log(L"桌面图标摆回原位 %d 个", Restore(pressed ? &beforePress : nullptr));
     return true;
 }
 
@@ -246,16 +256,28 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 Done(session);
                 break;
             }
-            case kCmdResave: {
-                bool ok;
-                {
-                    std::lock_guard<std::mutex> guard(s_lock);
-                    ok = static_cast<UINT>(msg.wParam) == s_session && s_snapshot;
+            case kCmdMark:
+                s_mark.clear();
+                if (Current(static_cast<UINT>(msg.wParam)) && !s_icons.empty()) s_mark = Read();
+                break;
+            case kCmdUpdate: {
+                if (Current(static_cast<UINT>(msg.wParam)) && !s_mark.empty()) {
+                    std::vector<POINT> now = Read();
+                    // 等的一方已经不等了：自动隐藏可能正在关，读到的也许是资源管理器重新排的位置
+                    if (!s_updateLate.exchange(false) && now.size() == s_mark.size()) {
+                        int moved = 0;
+                        for (size_t i = 0; i < now.size(); ++i) {
+                            const POINT& a = s_mark[i];
+                            const POINT& b = now[i];
+                            if (a.x == LONG_MIN || b.x == LONG_MIN || (a.x == b.x && a.y == b.y)) continue;
+                            s_icons[i].pt = b;
+                            ++moved;
+                        }
+                        if (moved) Log(L"自动隐藏期间用户挪过 %d 个桌面图标，按新位置记", moved);
+                    }
                 }
-                if (ok) {
-                    Log(L"用户在桌面上操作过，按现在的样子重新记图标位置");
-                    Save();
-                }
+                s_mark.clear();
+                SetEvent(s_updatedEvent);
                 break;
             }
             case kCmdFinish: {
@@ -275,8 +297,9 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
 bool EnsureThread() {
     if (s_thread) return true;
     if (!s_savedEvent) s_savedEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    if (!s_updatedEvent) s_updatedEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!s_savedEvent || !ready) {
+    if (!s_savedEvent || !s_updatedEvent || !ready) {
         if (ready) CloseHandle(ready);
         return false;
     }
@@ -308,9 +331,21 @@ void DesktopIcons_WaitSaved(DWORD ms) {
     if (WaitForSingleObject(s_savedEvent, ms) == WAIT_TIMEOUT) s_discard = true;
 }
 
-void DesktopIcons_Resave() {
+bool DesktopIcons_Mark() {
     std::lock_guard<std::mutex> guard(s_lock);
-    if (s_thread && s_snapshot) PostThreadMessageW(s_threadId, kCmdResave, s_session, 0);
+    return s_thread && s_snapshot && PostThreadMessageW(s_threadId, kCmdMark, s_session, 0);
+}
+
+void DesktopIcons_UpdateMoved() {
+    std::lock_guard<std::mutex> guard(s_lock);
+    if (!s_thread || !s_snapshot || !s_updatedEvent) return;
+    s_updateLate = false;
+    ResetEvent(s_updatedEvent);
+    if (!PostThreadMessageW(s_threadId, kCmdUpdate, s_session, 0)) SetEvent(s_updatedEvent);
+}
+
+void DesktopIcons_WaitUpdated(DWORD ms) {
+    if (s_updatedEvent && WaitForSingleObject(s_updatedEvent, ms) == WAIT_TIMEOUT) s_updateLate = true;
 }
 
 void DesktopIcons_RestoreLater() {
@@ -337,6 +372,7 @@ void DesktopIcons_Finish(DWORD ms) {
     s_thread = nullptr;
     s_threadId = 0;
     if (s_savedEvent) SetEvent(s_savedEvent);
+    if (s_updatedEvent) SetEvent(s_updatedEvent);
 }
 
 }  // namespace app

@@ -840,8 +840,9 @@ void CloseItem(int idx) {
     }
     HWND h = item.hwnd;
     std::wstring launch = item.launch;
-    if (!PostMessageW(h, WM_CLOSE, 0, 0)) {
-        // 以管理员身份运行的程序（比如任务管理器），普通权限发不进去：窗口还在，格子也留着
+    if (!PostMessageW(h, WM_CLOSE, 0, 0) && IsWindow(h)) {
+        // 以管理员身份运行的程序（比如任务管理器），普通权限发不进去：窗口还在，格子也留着。
+        // 窗口已经没了的话照常去掉格子
         Log(L"关闭窗口失败（%lu）：%ls", GetLastError(), item.title.c_str());
         MessageBeep(MB_ICONWARNING);
         return;
@@ -876,6 +877,7 @@ void CloseItem(int idx) {
     s_sel = std::min(s_sel, ItemCount());
     s_hover = -1;
     s_pillIndex = -1;
+    s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
     Redraw();
 }
 
@@ -977,9 +979,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetSliderFromX(SliderOf(s_drag), x);
                 return 0;
             }
-            // 位置没变的是系统补发的（比如缩略图窗口出现了），不是用户在动鼠标：别打乱键盘选中的项
-            if (x == s_lastMouse.x && y == s_lastMouse.y) return 0;
-            s_lastMouse = {x, y};
+            // 位置没变的是系统补发的（比如缩略图窗口出现了、面板重新居中），不是用户在动鼠标：别打乱键盘选中的项。
+            // 按屏幕坐标比，面板自己挪了位置时光标没动也算没变
+            POINT screen = {x, y};
+            ClientToScreen(hwnd, &screen);
+            if (screen.x == s_lastMouse.x && screen.y == s_lastMouse.y) return 0;
+            s_lastMouse = screen;
             s_keyNav = false;
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
