@@ -840,12 +840,15 @@ void CloseItem(int idx) {
     }
     HWND h = item.hwnd;
     std::wstring launch = item.launch;
-    if (!PostMessageW(h, WM_CLOSE, 0, 0) && IsWindow(h)) {
+    if (!PostMessageW(h, WM_CLOSE, 0, 0)) {
+        DWORD error = GetLastError();
         // 以管理员身份运行的程序（比如任务管理器），普通权限发不进去：窗口还在，格子也留着。
         // 窗口已经没了的话照常去掉格子
-        Log(L"关闭窗口失败（%lu）：%ls", GetLastError(), item.title.c_str());
-        MessageBeep(MB_ICONWARNING);
-        return;
+        if (IsWindow(h)) {
+            Log(L"关闭窗口失败（%lu）：%ls", error, item.title.c_str());
+            MessageBeep(MB_ICONWARNING);
+            return;
+        }
     }
 
     // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉。

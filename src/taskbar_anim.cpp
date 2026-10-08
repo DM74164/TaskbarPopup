@@ -195,6 +195,9 @@ void ApplyPendingOff() {
     UINT seq = s_offSeq;
     s_offSeq = 0;
     DesktopIcons_WaitUpdated(1000);  // 工作区一变桌面就重新排列，用户挪过的图标得先读完
+    // 等的时候主线程改了主意（窗口又最大化了，已经要求重新打开），或者要退出了（主线程自己关）：不关了。
+    // 主线程那边已经不等这次的回报
+    if (Stopped() || s_wantedSeq != 0) return;
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
 }
