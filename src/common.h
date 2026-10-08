@@ -124,7 +124,8 @@ void DesktopIcons_WaitSaved(DWORD ms);  // 动画线程，打开自动隐藏之�
 void DesktopIcons_RestoreLater();       // 主线程，关掉自动隐藏以后：等桌面排完再摆回去，又打开的话作废
 bool DesktopIcons_Mark();               // 主线程，自动隐藏开着期间桌面到了前台：读一遍图标位置
 void DesktopIcons_UpdateMoved();        // 主线程，离开桌面或要关自动隐藏前：Mark 以后挪过的图标按新位置记
-void DesktopIcons_WaitUpdated(DWORD ms);  // 关自动隐藏之前：等上面那次读完，超时的话不用它
+void DesktopIcons_WaitUpdated(DWORD ms);  // 关自动隐藏之前：等上面那次读完
+void DesktopIcons_AbandonUpdates();       // 马上要关自动隐藏：还没读完的不用了（读到的可能是重新排过的位置）
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
 
 // ---------------- 键盘钩子（在单独的线程上运行）----------------

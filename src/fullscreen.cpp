@@ -1129,6 +1129,7 @@ void Taskbar_RestoreAll() {
     // 而动画线程已经停了、不会替我们等，这里等它读完再关自动隐藏
     FlushDesktopMark();
     DesktopIcons_WaitUpdated(1000);
+    DesktopIcons_AbandonUpdates();
     Taskbar_EmergencyRestore();  // 显示任务栏，关掉本程序打开的自动隐藏
     UndoSavedAutoHide();         // 上次异常退出时没来得及关的
     s_ownAutoHide = false;

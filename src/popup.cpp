@@ -982,11 +982,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetSliderFromX(SliderOf(s_drag), x);
                 return 0;
             }
-            // 位置没变的是系统补发的（比如缩略图窗口出现了、面板重新居中），不是用户在动鼠标：别打乱键盘选中的项。
-            // 按屏幕坐标比，面板自己挪了位置时光标没动也算没变
+            // 正在用键盘选时，位置没变的是系统补发的（比如缩略图窗口出现了、面板重新居中），不是用户在动鼠标：
+            // 别打乱键盘选中的项。按屏幕坐标比，面板自己挪了位置时光标没动也算没变。
+            // 不是键盘选的时候照常处理：关掉一个窗口、面板重新居中以后，悬停的格子要跟着光标下面的格子走
             POINT screen = {x, y};
             ClientToScreen(hwnd, &screen);
-            if (screen.x == s_lastMouse.x && screen.y == s_lastMouse.y) return 0;
+            if (s_keyNav && screen.x == s_lastMouse.x && screen.y == s_lastMouse.y) return 0;
             s_lastMouse = screen;
             s_keyNav = false;
             int hit = HitTest(x, y);
