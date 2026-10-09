@@ -40,7 +40,10 @@ struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool longPressPopup = true;
     int longPressMs = 1000;
+    bool desktopDock = false;    // 桌面上用迷你任务栏代替系统任务栏
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
+    bool showLevels = true;      // 迷你任务栏里显示音量和亮度调节
+    int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
@@ -53,6 +56,9 @@ void SetExcluded(const std::wstring& exeName, bool excluded);  // 改排除名�
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
+constexpr int kMinPopupScale = 50;
+constexpr int kMaxPopupScale = 200;
+constexpr int kDefaultPopupScale = 100;
 
 extern HINSTANCE g_instance;
 extern HWND g_mainWnd;  // 隐藏的主消息窗口，托盘和计时器都挂在它上面
@@ -115,6 +121,7 @@ void TaskbarAnim_WantAutoHide(UINT seq);  // 主线程现在要开的请求编�
 void TaskbarAnim_Show(HWND taskbar, UINT offSeq = 0);
 void TaskbarAnim_AutoHideOff(UINT seq);  // 没有要滑回来的任务栏时关掉自动隐藏（正在滑回来的话等它滑完）
 void TaskbarAnim_Stop();  // 结束动画线程，去掉所有截图
+bool TaskbarAnim_SlidingOn(HMONITOR monitor);  // 这块屏幕上有任务栏的截图正在滑动
 void TaskbarAnim_Abort();  // 崩溃时：让动画线程不再做任何事（只改原子变量，不等），可以在任何线程上调用
 
 // ---------------- 桌面图标（跨进程调用在单独的线程上做）----------------
@@ -145,6 +152,9 @@ struct WindowEntry {
 };
 std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx);
 void Windows_ClearCache();
+std::vector<HWND> TaskbarWindowHandles();  // 任务栏上会列出的窗口，只要句柄，不取标题和图标
+// 这块屏幕上露着的应用窗口（任务栏上会列出、没有最小化的）有没有，except 不算
+bool AppWindowShownOn(HMONITOR monitor, HWND except);
 
 // ---------------- 固定在任务栏的应用 ----------------
 struct PinnedApp {
@@ -198,6 +208,10 @@ void Popup_Destroy();
 void Popup_Show();
 void Popup_Hide();
 void Popup_Toggle();
+// 桌面在前台时停靠在 monitor 底部、代替系统任务栏（等系统任务栏滑走以后出现，失去前台也不收起）；
+// nullptr = 不再停靠，停靠着的收起来。每次判断前台窗口时都会调用，没变化时什么都不做
+void Popup_SetDock(HMONITOR monitor);
+void Popup_ApplySettings();  // 设置改了：停靠着的按新设置重新停靠
 
 // ---------------- 音量和亮度 ----------------
 // 音量：默认播放设备的主音量（Core Audio）。在调用线程上同步执行（线程需已初始化 COM），很快

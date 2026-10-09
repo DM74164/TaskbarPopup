@@ -19,7 +19,7 @@ constexpr wchar_t kMainClass[] = L"TaskbarPopupMain";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"TaskbarPopup";
 
-enum MenuId { ID_SHOW = 100, ID_SETTINGS, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG, ID_RUNASADMIN, ID_EXIT };
+enum MenuId { ID_SHOW = 100, ID_SETTINGS, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG, ID_RUNASADMIN, ID_EXIT, ID_DESKTOPDOCK };
 
 NOTIFYICONDATAW s_nid = {};
 HICON s_trayIcon = nullptr;
@@ -97,6 +97,11 @@ void HandleCommand(UINT id) {
             SaveSettings();
             ApplySettings();
             break;
+        case ID_DESKTOPDOCK:
+            g_settings.desktopDock = !g_settings.desktopDock;
+            SaveSettings();
+            ApplySettings();
+            break;
         case ID_LONGPRESS:
             g_settings.longPressPopup = !g_settings.longPressPopup;
             SaveSettings();
@@ -138,6 +143,7 @@ void ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, ID_SETTINGS, L"设置...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | check(g_settings.autoHideOnFullscreen), ID_AUTOHIDE, L"窗口最大化或全屏时隐藏任务栏");
+    AppendMenuW(menu, MF_STRING | check(g_settings.desktopDock), ID_DESKTOPDOCK, L"桌面上用迷你任务栏代替系统任务栏");
     AppendMenuW(menu, MF_STRING | check(g_settings.longPressPopup), ID_LONGPRESS, longPressText);
     AppendMenuW(menu, MF_STRING | check(IsAutoStartEnabled()), ID_AUTOSTART, L"开机自动启动");
     AppendMenuW(menu, MF_STRING | check(g_settings.runAsAdmin), ID_RUNASADMIN, L"以管理员身份运行（游戏里也能长按 Win）");
@@ -293,7 +299,11 @@ void LoadSettings() {
     g_settings.longPressPopup = GetPrivateProfileIntW(L"General", L"LongPressPopup", 1, f.c_str()) != 0;
     int ms = static_cast<int>(GetPrivateProfileIntW(L"General", L"LongPressMs", kDefaultLongPressMs, f.c_str()));
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
+    g_settings.desktopDock = GetPrivateProfileIntW(L"General", L"DesktopDock", 0, f.c_str()) != 0;
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
+    g_settings.showLevels = GetPrivateProfileIntW(L"General", L"ShowLevels", 1, f.c_str()) != 0;
+    int scale = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupScale", kDefaultPopupScale, f.c_str()));
+    g_settings.popupScale = std::max(kMinPopupScale, std::min(scale, kMaxPopupScale));
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
     std::vector<wchar_t> buf(32768);
@@ -315,7 +325,10 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"AutoHideOnFullscreen", g_settings.autoHideOnFullscreen ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressPopup", g_settings.longPressPopup ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressMs", std::to_wstring(g_settings.longPressMs).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"DesktopDock", g_settings.desktopDock ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowLevels", g_settings.showLevels ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
     std::wstring exclude;
@@ -365,7 +378,8 @@ void SetAutoStart(bool enabled) {
 }
 
 void ApplySettings() {
-    Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen);
+    Popup_ApplySettings();
+    Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen || g_settings.desktopDock);
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
 }
 
