@@ -22,6 +22,9 @@ constexpr UINT kThumbShowMs = 400;
 constexpr UINT kThumbHideMs = 120;   // 鼠标在两个图标之间的缝里时别闪
 constexpr size_t kMaxAppMatches = 12;
 constexpr UINT WM_APP_FRAME = WM_APP + 20;  // 动画的下一帧
+constexpr UINT_PTR kTimerRefocus = 4;  // 刚弹出就失去了前台：稍等一下再抢回来
+constexpr UINT kRefocusDelayMs = 100;
+constexpr double kRefocusMs = 500;     // 弹出后多久之内失去前台算“刚弹出”
 constexpr double kShowMs = 320.0 * TP_ANIM_SCALE;
 constexpr double kHideMs = 170.0 * TP_ANIM_SCALE;
 constexpr double kPillMs = 160.0 * TP_ANIM_SCALE;
@@ -96,6 +99,8 @@ int s_visible = 0;  // 一屏能放下几个
 int s_hover = -1;   // 鼠标下的格子：-1 无，0 开始按钮，i+1 第 i 个格子
 int s_sel = 0;      // 选中的格子（键盘焦点），编号同上
 bool s_open = false;
+double s_shownAt = 0;      // 这次弹出的时间
+bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
 double s_animStart = 0;
 float s_lastSlide = 0;  // 最近一帧的位置和透明度：弹出到一半就收起时从这里接着走
@@ -691,6 +696,12 @@ double EaseOutBack(double t) {
     return 1 + c3 * u * u * u + c1 * u * u;
 }
 
+bool MouseButtonDown() {
+    for (int vk : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2})
+        if (GetAsyncKeyState(vk) & 0x8000) return true;
+    return false;
+}
+
 void HideNow() {
     HideThumb();
     s_open = false;
@@ -944,7 +955,20 @@ void ShowItemMenu(int idx, POINT at) {
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_ACTIVATE:
-            if (LOWORD(wParam) == WA_INACTIVE) Popup_Hide();
+            if (LOWORD(wParam) == WA_INACTIVE && s_open) {
+                HWND to = reinterpret_cast<HWND>(lParam);
+                if (!to) to = GetForegroundWindow();
+                // 刚弹出就失去前台，又没按着鼠标键（不是用户点了别处）：点别处收起后再弹出时，
+                // 前台可能马上又被刚才点过的窗口拿回去，看起来就像这次长按没反应。抢回来一次
+                if (!s_refocused && NowMs() - s_shownAt < kRefocusMs && !MouseButtonDown()) {
+                    s_refocused = true;
+                    Log(L"迷你任务栏刚弹出就失去前台（换成 %ls %ls），抢回来", GetClassNameStr(to).c_str(),
+                        GetProcessPath(to).c_str());
+                    SetTimer(hwnd, kTimerRefocus, kRefocusDelayMs, nullptr);
+                    return 0;
+                }
+                Popup_Hide();
+            }
             return 0;
 
         case WM_APP_FRAME:
@@ -956,6 +980,17 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (wParam == kTimerClock) {
                 if (s_drag != kVolumeTrack) RefreshVolume();  // 别处改了音量（键盘上的音量键）也跟着变
                 Redraw();
+            } else if (wParam == kTimerRefocus) {
+                KillTimer(hwnd, kTimerRefocus);
+                if (s_open && GetForegroundWindow() != hwnd) {
+                    if (!SetForegroundWindow(hwnd)) ForceForeground(hwnd);
+                    if (GetForegroundWindow() == hwnd) {
+                        SetFocus(hwnd);
+                    } else {
+                        Log(L"迷你任务栏没抢回前台，收起");
+                        Popup_Hide();
+                    }
+                }
             } else if (wParam == kTimerThumb) {
                 if (s_thumbWant) ShowThumbNow();
                 else HideThumb();
@@ -1104,9 +1139,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         ApplyFilter();
                         break;
                     }
-                    // 焦点交还给原来的窗口，随后的失活消息会触发收起
-                    if (s_prevForeground && IsWindow(s_prevForeground)) ForceForeground(s_prevForeground);
+                    // 先收起再把焦点交还给原来的窗口，随后的失活消息就不会当成“刚弹出就失去前台”
                     Popup_Hide();
+                    if (s_prevForeground && IsWindow(s_prevForeground)) ForceForeground(s_prevForeground);
                     break;
             }
             return 0;
@@ -1264,8 +1299,10 @@ void Popup_Show() {
     s_pillIndex = -1;
 
     s_open = true;
+    s_shownAt = NowMs();
+    s_refocused = false;
     s_anim = Anim::Showing;
-    s_animStart = NowMs();
+    s_animStart = s_shownAt;
     Render(SlideDistance(), 0);
     ShowWindow(s_hwnd, SW_SHOW);
     ForceForeground(s_hwnd);
