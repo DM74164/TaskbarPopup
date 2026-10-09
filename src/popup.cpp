@@ -110,6 +110,9 @@ HMONITOR s_dockWanted = nullptr;  // 要停靠到的屏幕，nullptr = 不停靠
 bool s_dockPending = false;       // 停靠的定时器排着
 double s_dockAskedAt = 0;         // 开始等着停靠的时间
 bool s_pinned = true;             // 这次列没列固定的应用（设置改了要重新停靠）
+std::vector<HWND> s_closing;      // 刚在迷你任务栏里关掉、可能还没关完的窗口
+double s_closingAt = 0;
+bool s_recapture = false;         // 停靠着时换了壁纸、当时正在用它：回到后台时再重新停靠，玻璃背景重新截
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
@@ -850,38 +853,84 @@ void Relayout() {
     s_first = std::max(0, std::min(s_first, ItemCount() - s_visible));
     s_sel = std::min(s_sel, ItemCount());
     s_hover = -1;
+    s_hoverControl = kNone;
     s_pillIndex = -1;
-    s_thumbIdx = -1;
+    s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
+}
+
+// 格子重新排过、滚动位置也定了以后：鼠标还在上面的话，按新的位置重新算它下面是哪个格子，
+// 和 WM_MOUSEMOVE 一样处理（在前台时选中的跟着悬停的走）。正在用键盘选时不算，高亮的就是要操作的那个
+void Rehover() {
+    POINT pt;
+    if (s_keyNav || s_lastMouse.x == INT_MIN || !GetCursorPos(&pt)) return;
+    int x = pt.x - s_pos.x, y = pt.y - s_pos.y;
+    s_hover = HitTest(x, y);
+    if (s_hover < 0) s_hoverControl = ControlAt(x, y);
+    else if (GetForegroundWindow() == s_hwnd) s_sel = s_hover;
+}
+
+// 打字筛选时比较的小写文字：标题、应用名、程序文件名
+void SetSearch(Tile& t) {
+    std::wstring exe = t.hwnd ? WindowExeName(t.hwnd) : NormalizeExeName(t.launch);
+    t.search = ToLower(t.title + L"\n" + t.pinName + L"\n" + exe);
 }
 
 std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows);
 
-// 停靠期间窗口开了、关了或者改了标题：重新列一遍。返回 true 表示重新排过了
+// 停靠期间窗口开了、关了或者改了标题：跟着更新。返回 true 表示重新排过了
 bool RefreshDockTiles() {
     if (!s_filter.empty() || s_menuOpen || s_drag != kNone || s_anim != Anim::None) return false;
+    // 刚关掉的窗口可能要过一会儿才真正关掉：这期间别把它的格子又列回来
+    if (NowMs() - s_closingAt < 5000 && std::any_of(s_closing.begin(), s_closing.end(), IsWindow)) return false;
+    s_closing.clear();
     std::vector<HWND> handles = TaskbarWindowHandles();
     size_t running = 0;
     bool same = true;
     for (const Tile& t : s_allItems) {
         if (!t.hwnd) continue;
         ++running;
-        same = same && std::find(handles.begin(), handles.end(), t.hwnd) != handles.end() &&
-               GetWindowTitle(t.hwnd) == t.title;
+        same = same && std::find(handles.begin(), handles.end(), t.hwnd) != handles.end();
     }
-    if (same && running == handles.size()) return false;
+    if (same && running == handles.size()) {
+        // 还是这些窗口，只是标题可能变了：原地改，不重新排（鼠标下的格子、缩略图都不动）
+        bool renamed = false;
+        for (Tile& t : s_allItems) {
+            if (!t.hwnd) continue;
+            std::wstring title = GetWindowTitle(t.hwnd);
+            if (title == t.title) continue;
+            t.title = title;
+            SetSearch(t);
+            renamed = true;
+        }
+        if (renamed) s_items = s_allItems;
+        return false;
+    }
+    // 重新列一遍，键盘选中的格子跟着它的窗口（或者固定的应用）走
+    Tile selected = s_sel > 0 && s_sel <= ItemCount() ? s_items[s_sel - 1] : Tile{};
     s_allItems = BuildTiles(EnumerateWindows(nullptr, static_cast<int>(std::lround(Px(32)))));
     s_items = s_allItems;
     Relayout();
+    if (s_sel > 0) {
+        for (int i = 0; i < ItemCount(); ++i)
+            if (s_items[i].hwnd == selected.hwnd && s_items[i].launch == selected.launch) s_sel = i + 1;
+        EnsureVisible(s_sel);
+    }
+    Rehover();
     return true;
 }
 
 // 停靠着的迷你任务栏失去前台：清掉打的字和选中的格子
 void ResetDock() {
     s_keyNav = false;
+    if (s_recapture) {  // 用着的时候换了壁纸：现在重新停靠
+        HideNow();
+        return;
+    }
     if (!s_filter.empty()) {
         s_filter.clear();
         s_items = s_allItems;
         Relayout();
+        Rehover();
     }
     s_sel = -1;
     Redraw();
@@ -896,6 +945,8 @@ void ActivateDock() {
     SetFocus(s_hwnd);
     s_sel = DefaultSelection();
     s_keyNav = true;
+    s_hover = -1;  // 鼠标正停在别的格子上的话，高亮的会和回车要打开的不是同一个
+    s_hoverControl = kNone;
     EnsureVisible(s_sel);
     Redraw();
 }
@@ -961,6 +1012,8 @@ void CloseItem(int idx) {
             return;
         }
     }
+    s_closing.push_back(h);
+    s_closingAt = NowMs();
 
     // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉。
     // 按全部格子判断，筛选后显示的格子和全部格子一起改
@@ -1094,7 +1147,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 s_dockPending = false;
                 if (!s_dockWanted || s_open) return 0;  // 弹出着的收起以后会重新排上
                 // 还在播收起动画，或者系统任务栏还没藏好、它的截图还在往下滑：这时截玻璃背景会截到它们
-                bool busy = s_anim != Anim::None ||
+                bool busy = s_menuOpen || s_anim != Anim::None ||
                             (NowMs() - s_dockAskedAt < kDockGiveUpMs &&
                              (Taskbar_IsShownOn(s_dockWanted) || TaskbarAnim_SlidingOn(s_dockWanted)));
                 if (busy) {
@@ -1158,7 +1211,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (hit != s_hover || control != s_hoverControl) {
                 s_hover = hit;
                 s_hoverControl = control;
-                if (hit >= 0) s_sel = hit;
+                if (hit >= 0 && (!s_docked || GetForegroundWindow() == hwnd)) s_sel = hit;  // 停靠着没拿到前台时只算悬停
                 Redraw();
             }
             TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
@@ -1170,6 +1223,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_hover = -1;
             s_hoverControl = kNone;
+            if (s_docked && GetForegroundWindow() != hwnd) s_sel = -1;
             Redraw();
             return 0;
 
@@ -1296,6 +1350,14 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_SETTINGCHANGE:
+            // 换了壁纸：停靠着的重新停靠，玻璃背景重新截。正在用（在前台、开着菜单、拖着调节条）时等它回到后台
+            if (wParam == SPI_SETDESKWALLPAPER && s_open && s_docked) {
+                if (GetForegroundWindow() == hwnd || s_menuOpen || s_drag != kNone) s_recapture = true;
+                else HideNow();
+            }
+            break;
+
         case WM_DPICHANGED:
             return 0;  // 尺寸由 Popup_Show 按目标显示器自己算
 
@@ -1328,10 +1390,7 @@ std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows) {
         const WindowEntry& w = windows[i];
         tiles.push_back({w.title, w.icon, w.hwnd, w.active, L"", L"", nullptr});
     }
-    for (Tile& t : tiles) {
-        std::wstring exe = t.hwnd ? WindowExeName(t.hwnd) : NormalizeExeName(t.launch);
-        t.search = ToLower(t.title + L"\n" + t.pinName + L"\n" + exe);
-    }
+    for (Tile& t : tiles) SetSearch(t);
     return tiles;
 }
 
@@ -1343,6 +1402,7 @@ void ShowOn(HMONITOR mon, bool dock) {
     s_bounds = dock || !Taskbar_IsShownOn(mon) ? mi.rcMonitor : mi.rcWork;
     s_scale = PopupScale(mon);
     s_docked = dock;
+    s_recapture = false;
     s_pinned = g_settings.showPinnedApps;
     if (dock) {
         Log(L"迷你任务栏停靠在桌面上");
