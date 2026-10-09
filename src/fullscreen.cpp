@@ -7,6 +7,8 @@
 // 自动隐藏的任务栏碰到屏幕边缘会弹出来，所以真任务栏同时用 ShowWindow 藏着，要用任务栏时长按 Win。
 // 前台换成普通窗口或桌面、窗口还原或最小化时：任务栏滑回来，盖住原来的位置以后关掉自动隐藏，窗口在它后面缩回去。
 // 工作区一变，桌面会重新排列图标，所以打开前记下图标的位置，关掉以后摆回去。
+// 打开了“桌面上用迷你任务栏代替系统任务栏”时，桌面在前台也藏起任务栏（不为它打开自动隐藏），
+// 迷你任务栏停靠在屏幕底部；换成别的窗口时它收起来，照上面的规则处理。
 #include "common.h"
 
 #include <cmath>
@@ -78,6 +80,7 @@ UINT s_autoHideSeq = 0;       // 给动画线程的开 / 关请求编号：动�
 DWORD s_autoHideAskedAt = 0;  // 上次让动画线程打开自动隐藏的时间
 HMONITOR s_targetMonitor = nullptr;
 HWND s_targetWindow = nullptr;
+HMONITOR s_dockMonitor = nullptr;  // 桌面在前台：这块屏上藏起任务栏，迷你任务栏停靠在底部
 HWND s_minimizing = nullptr;  // 刚开始最小化的目标窗口（事件比窗口状态变化早一点到）
 DWORD s_minimizingTick = 0;
 bool s_enabled = false;
@@ -701,19 +704,22 @@ bool RemoveHidden(HWND taskbar) {
 }
 
 // 藏起 monitor 上的任务栏、打开自动隐藏、拉伸 window；别的屏幕上被本程序藏起来的任务栏放回来。
-// window 刚被判定不肯铺满时什么都不做，返回 false
-bool EnterHiddenMode(HMONITOR monitor, HWND window) {
+// window 刚被判定不肯铺满时什么都不做，返回 false。
+// dock：桌面在前台、迷你任务栏要停靠在这块屏上，window 为空。只藏任务栏，不为它打开自动隐藏
+// （桌面用不着铺满），已经开着的接着用：任务栏藏着时关掉它，资源管理器可能会把任务栏重新显示出来
+bool EnterHiddenMode(HMONITOR monitor, HWND window, bool dock = false) {
     // 资源管理器没在运行（崩溃、重启中）或者卡住了：什么都不动，开着的自动隐藏接着算本程序的，等它回来。
     // 刚重新启动时副屏的任务栏要过一会儿才出来，这时也别当成“这块屏没有任务栏”去关自动隐藏
     if (!ExplorerRunning()) return true;
     if (s_ownAutoHide && GetTickCount() - s_explorerStartedAt < 3000 && !HasTaskbar(monitor)) return true;
     RECT want = {};
-    HWND stretch = PlanStretch(window, monitor, want) ? window : nullptr;
-    if (IsRefused(window)) return false;
+    HWND stretch = !dock && PlanStretch(window, monitor, want) ? window : nullptr;
+    if (!dock && IsRefused(window)) return false;
 
     // 这块屏上有任务栏、自动隐藏又不是用户自己开着的：要打开自动隐藏，工作区才会占满整块屏。
     // 无边框全屏的窗口（游戏、全屏视频）本来就盖住了任务栏，不为它去开；已经开着的接着用
-    bool autoHide = HasTaskbar(monitor) && (s_ownAutoHide || (IsZoomed(window) && !Taskbar_AutoHideOn()));
+    bool autoHide = HasTaskbar(monitor) && (dock ? s_ownAutoHide && !s_offRequested
+                                                 : s_ownAutoHide || (IsZoomed(window) && !Taskbar_AutoHideOn()));
     // 要（重新）让动画线程打开自动隐藏：刚开始用，或者刚让它去关又反悔了（它可能已经关了）
     bool reissue = false;
     if (autoHide && !s_ownAutoHide) {
@@ -814,6 +820,39 @@ bool IsTransient(HWND hwnd) {
     return IsOwnProcess(hwnd) || InList(GetClassNameStr(hwnd), kTransientClasses);
 }
 
+// 桌面，或者桌面弹出的右键菜单之类（和桌面同一个线程、没有标题栏）
+bool IsDesktop(HWND hwnd) {
+    if (InList(GetClassNameStr(hwnd), kDesktopClasses)) return true;
+    HWND shell = GetShellWindow();
+    return shell && GetWindowThreadProcessId(hwnd, nullptr) == GetWindowThreadProcessId(shell, nullptr) &&
+           (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION;
+}
+
+// 要停靠迷你任务栏的屏幕：桌面在前台时；或者前台是任务栏、没有前台窗口、前台窗口最小化了（或者正在最小化），
+// 而这块屏上已经没有露着的窗口时（关掉、最小化最后一个窗口以后前台常常落到任务栏上，或者留在最小化的窗口上）。
+// 停靠着的接着停在原来的屏幕上，刚回到桌面时停在鼠标所在的屏幕上。否则返回 nullptr
+HMONITOR DockMonitor(HWND fg) {
+    if (!g_settings.desktopDock) return nullptr;
+    bool minimizing = fg && (IsIconic(fg) || (fg == s_minimizing && GetTickCount() - s_minimizingTick < 1000));
+    std::wstring cls = fg ? GetClassNameStr(fg) : L"";
+    bool idle = !fg || minimizing || cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd";
+    if (!idle && !IsDesktop(fg)) return nullptr;
+    HMONITOR mon = nullptr;
+    MONITORINFO mi = {sizeof(mi)};
+    if (s_dockMonitor && GetMonitorInfoW(s_dockMonitor, &mi)) {
+        mon = s_dockMonitor;
+    } else if (minimizing) {
+        mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
+    } else {
+        POINT pt;
+        GetCursorPos(&pt);
+        mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+    }
+    if (!HasTaskbar(mon)) return nullptr;
+    if (idle && AppWindowShownOn(mon, minimizing ? fg : nullptr)) return nullptr;
+    return mon;
+}
+
 // 窗口属于排除名单里的程序（最大化时不隐藏任务栏）。按进程记住上一次的结果，不用每次都查程序路径
 bool IsExcluded(HWND hwnd) {
     static HWND lastApp = nullptr;
@@ -898,34 +937,48 @@ void EvaluateNow(bool enforce) {
         if (steady) FlushDesktopMark();
         else s_desktopMarked = false;
     }
-    bool transient = !fg || IsTransient(fg);
+    HMONITOR dock = DockMonitor(fg);
+    bool transient = !dock && (!fg || IsTransient(fg));
     WatchLocation(transient ? s_targetWindow : fg);
     if (transient) {
         // 开始菜单、迷你任务栏这类临时界面在前台时不藏任务栏，也不关自动隐藏，
         // 除非让任务栏隐藏的那个窗口已经最小化、关掉或还原了：
-        // 最小化最后一个窗口后，前台常常落到正隐藏着的任务栏上，不处理的话任务栏就一直出不来
-        if (!s_targetMonitor || GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
-            if (s_targetMonitor && fg && InList(GetClassNameStr(fg), kShellUiClasses)) ShowForShellUi();
+        // 最小化最后一个窗口后，前台常常落到正隐藏着的任务栏上，不处理的话任务栏就一直出不来。
+        // 设置里刚关掉的功能也不再保持（设置窗口本身就算临时界面）
+        bool shellUi = fg && InList(GetClassNameStr(fg), kShellUiClasses);
+        bool keepTarget = !s_targetMonitor ||
+                          (g_settings.autoHideOnFullscreen && GetTargetMonitor(s_targetWindow) == s_targetMonitor);
+        bool keepDock = !s_dockMonitor || g_settings.desktopDock;
+        if (keepTarget && keepDock) {
+            if ((s_targetMonitor || s_dockMonitor) && shellUi) ShowForShellUi();
+            // 开始菜单贴着任务栏摆，停靠着的迷你任务栏会挡住它的下半截：先收起来，回到桌面再停靠
+            if (s_dockMonitor && shellUi) Popup_SetDock(nullptr);
             return;
         }
         fg = nullptr;
+        // 比如在迷你任务栏里关掉了最后一个最大化的窗口：桌面上没有别的窗口了就接着停靠
+        if (!shellUi) dock = DockMonitor(nullptr);
     }
 
-    HMONITOR target = fg ? GetTargetMonitor(fg) : nullptr;
+    HMONITOR target = fg && g_settings.autoHideOnFullscreen ? GetTargetMonitor(fg) : nullptr;
     HWND window = target ? fg : nullptr;
     // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
     // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏。
     // 前台是排除名单里的程序、而且它自己最大化着时除外：用户要的是它在前台时看得到任务栏
     bool excludedOnTop = fg && IsZoomed(fg) && IsExcluded(fg);
-    if (!target && fg && !excludedOnTop && s_targetWindow && fg != s_targetWindow && IsWindow(s_targetWindow) &&
-        GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
+    if (!target && fg && !excludedOnTop && g_settings.autoHideOnFullscreen && s_targetWindow && fg != s_targetWindow &&
+        IsWindow(s_targetWindow) && GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
         target = s_targetMonitor;
         window = s_targetWindow;
     }
-    bool changed = target != s_targetMonitor || window != s_targetWindow;
+    if (target) dock = nullptr;  // 最大化的窗口还露着（比如在另一块屏上）：按它来
+    bool changed = target != s_targetMonitor || window != s_targetWindow || dock != s_dockMonitor;
+    Popup_SetDock(dock);
     if (!enforce && !changed) return;
     if (changed) {
-        if (g_settings.debugLog) Log(L"目标 %ls（前台 %ls）", Describe(window).c_str(), Describe(fg).c_str());
+        if (g_settings.debugLog)
+            Log(L"目标 %ls（前台 %ls）%ls", Describe(window).c_str(), Describe(fg).c_str(),
+                dock ? L"，桌面上停靠迷你任务栏" : L"");
         // 换了目标：旧目标还在等结果的拉伸请求作废，免得以后被当成它拒绝
         if (s_targetWindow && window != s_targetWindow)
             for (Attempt& a : s_attempts)
@@ -933,11 +986,14 @@ void EvaluateNow(bool enforce) {
     }
     s_targetMonitor = target;
     s_targetWindow = window;
+    s_dockMonitor = dock;
     if (target && !EnterHiddenMode(target, window)) {
         // 刚判定它不肯铺满：当作没有目标，任务栏放回来，自动隐藏关掉
         s_targetMonitor = nullptr;
         s_targetWindow = nullptr;
         LeaveHiddenMode();
+    } else if (dock) {
+        EnterHiddenMode(dock, nullptr, true);
     } else if (!target) {
         LeaveHiddenMode();
     }
@@ -1058,6 +1114,8 @@ void Fullscreen_SetEnabled(bool enabled) {
         KillTimer(g_mainWnd, kTimerFullscreen);
         s_targetMonitor = nullptr;
         s_targetWindow = nullptr;
+        s_dockMonitor = nullptr;
+        Popup_SetDock(nullptr);
         LeaveHiddenMode();
     }
 }
