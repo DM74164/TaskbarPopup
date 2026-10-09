@@ -59,6 +59,8 @@ constexpr DWORD kRetryMs = 400;
 constexpr DWORD kRequestWindowMs = 10000;
 constexpr int kMaxRequests = 3;       // kRequestWindowMs 里最多发这么多次，还要再发就算它拒绝
 constexpr DWORD kReshowMs = 3000;     // 刚藏起来又被资源管理器显示出来时，不再播动画，直接藏
+constexpr DWORD kTrayHoldMs = 2000;   // 点了任务栏以后至少这么久都当用户还在用它（鼠标还在它上面时一直算）
+constexpr DWORD kHiddenFrontMs = 500; // 前台停在看不见的窗口上这么久才算（程序启动时它藏着的窗口有时会短暂拿到前台）
 
 std::vector<Hidden> s_hidden;
 std::vector<HWND> s_everHidden;  // 本次运行藏过的任务栏，退出时无论如何都发一次显示
@@ -81,6 +83,15 @@ DWORD s_autoHideAskedAt = 0;  // 上次让动画线程打开自动隐藏的时�
 HMONITOR s_targetMonitor = nullptr;
 HWND s_targetWindow = nullptr;
 HMONITOR s_dockMonitor = nullptr;  // 桌面在前台：这块屏上藏起任务栏，迷你任务栏停靠在底部
+bool s_dockAside = false;     // 开始菜单等系统界面在前台，停靠的迷你任务栏让开了、任务栏显示着：这期间别再把任务栏藏起
+HWND s_lastFront = nullptr;  // 最近一个普通的前台窗口（不算开始菜单、任务栏这类临时界面和本程序）：
+                             // 任务栏到了前台时，分辨是用户点的还是窗口没了落到它上面
+HWND s_seenFront = nullptr;   // 上一次看到的前台窗口
+DWORD s_seenSince = 0;        // 它到前台的时间
+bool s_trayClicked = false;   // 前台换到任务栏上的那一刻鼠标就在它上面：是用户点的
+bool s_goneAtClick = false;   // 点任务栏的那一刻，之前的前台窗口就已经不在了
+bool s_trayLeft = false;      // 点过任务栏以后鼠标离开了：当用户不用它了
+bool s_handedOff = false;     // 这次任务栏在前台时已经把前台交给过桌面
 HWND s_minimizing = nullptr;  // 刚开始最小化的目标窗口（事件比窗口状态变化早一点到）
 DWORD s_minimizingTick = 0;
 bool s_enabled = false;
@@ -828,28 +839,99 @@ bool IsDesktop(HWND hwnd) {
            (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) != WS_CAPTION;
 }
 
-// 要停靠迷你任务栏的屏幕：桌面在前台时；或者前台是任务栏、没有前台窗口、前台窗口最小化了（或者正在最小化），
-// 而这块屏上已经没有露着的窗口时（关掉、最小化最后一个窗口以后前台常常落到任务栏上，或者留在最小化的窗口上）。
-// 停靠着的接着停在原来的屏幕上，刚回到桌面时停在鼠标所在的屏幕上。否则返回 nullptr
-HMONITOR DockMonitor(HWND fg) {
+bool IsTray(HWND hwnd) {
+    std::wstring cls = GetClassNameStr(hwnd);
+    return cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd";
+}
+
+// 有弹出菜单开着（比如托盘菜单）
+bool MenuOpen() {
+    HWND h = nullptr;
+    while ((h = FindWindowExW(nullptr, h, L"#32768", nullptr)) != nullptr)
+        if (IsWindowVisible(h)) return true;
+    return false;
+}
+
+// 前台停在一个看不见的窗口上，菜单也关了：托盘图标的菜单（本程序或者别的程序的）关掉以后常常这样
+bool LeftOnHiddenWindow(HWND fg) {
+    return fg && fg == s_seenFront && GetTickCount() - s_seenSince >= kHiddenFrontMs &&
+           (!IsWindowVisible(fg) || IsCloaked(fg)) && !MenuOpen();
+}
+
+// 记下最近一个普通的前台窗口：不算开始菜单、任务栏这类临时界面、本程序和看不见的窗口
+void RememberFront(HWND fg) {
+    if (fg && !IsTransient(fg) && IsWindowVisible(fg) && !IsCloaked(fg)) s_lastFront = fg;
+}
+
+// 之前的前台窗口已经关掉、最小化或者藏起来了
+bool LastFrontGone() {
+    HWND last = s_lastFront;
+    return !last || !IsWindow(last) || !IsWindowVisible(last) || IsIconic(last) || IsCloaked(last);
+}
+
+// 用户正用着任务栏：鼠标在它（或者它弹出的缩略图、菜单之类）上面，或者开着菜单
+bool TrayInUse(HWND tray) {
+    if (MenuOpen()) return true;
+    POINT pt;
+    if (!GetCursorPos(&pt)) return false;
+    HWND under = WindowFromPoint(pt);
+    under = under ? GetAncestor(under, GA_ROOT) : nullptr;
+    return under && GetWindowThreadProcessId(under, nullptr) == GetWindowThreadProcessId(tray, nullptr);
+}
+
+// 记下前台换成了谁。前台换到显示着的任务栏上、鼠标正在上面，而且不是刚才的前台窗口没了落到它上面的：是用户点的。
+// 点完过了 kTrayHoldMs、用户也不再用它了就算不用了（在开始菜单里点了任务栏上的应用时，等它的窗口出来；
+// 点开始按钮关掉开始菜单时，过一会儿就回到停靠）
+void NoteForeground(HWND fg) {
+    if (fg != s_seenFront) {
+        bool fell = s_seenFront && s_seenFront == s_lastFront && LastFrontGone();
+        s_seenFront = fg;
+        s_seenSince = GetTickCount();
+        s_trayClicked = fg && IsTray(fg) && IsWindowVisible(fg) && !fell && TrayInUse(fg);
+        s_goneAtClick = LastFrontGone();
+        s_trayLeft = false;
+        s_handedOff = false;
+    } else if (s_trayClicked && !s_trayLeft && GetTickCount() - s_seenSince >= kTrayHoldMs && !TrayInUse(fg)) {
+        s_trayLeft = true;
+    }
+}
+
+// 用户面前已经没有窗口了：前台窗口最小化了（或者正在最小化）；或者前台落到了任务栏上（或者托盘菜单关掉后
+// 留在看不见的窗口上），而之前的前台窗口已经不在了（关掉、最小化最后一个窗口以后常常这样）。
+// 按 Win+T 时之前的窗口还在，不算；用户正用着点过的任务栏时，只算点完以后才没了的（比如点任务栏按钮把它最小化了）
+bool NothingInFront(HWND fg) {
+    if (!fg) return false;  // 锁屏、UAC 提示时没有前台窗口：保持现状
+    if (IsIconic(fg) || (fg == s_minimizing && GetTickCount() - s_minimizingTick < 1000)) return true;
+    if (IsTray(fg) && s_trayClicked && !s_trayLeft) return !s_goneAtClick && LastFrontGone();
+    return (IsTray(fg) || LeftOnHiddenWindow(fg)) && LastFrontGone();
+}
+
+// 托盘菜单关掉后前台留在看不见的窗口上，或者落在点过、已经不用了的任务栏上，而之前在前台的是桌面
+bool DesktopBehind(HWND fg) {
+    return (LeftOnHiddenWindow(fg) || (fg && IsTray(fg) && s_trayClicked && s_trayLeft)) && !LastFrontGone() &&
+           IsDesktop(s_lastFront);
+}
+
+// 要停靠迷你任务栏的屏幕：桌面在前台时；或者用户面前已经没有窗口（idle），而这块屏上也没有露着的窗口时。
+// 停靠着的接着停在原来的屏幕上，刚回到桌面时停在鼠标所在（或者刚最小化的窗口所在）的屏幕上。否则返回 nullptr
+HMONITOR DockMonitor(HWND fg, bool idle) {
     if (!g_settings.desktopDock) return nullptr;
-    bool minimizing = fg && (IsIconic(fg) || (fg == s_minimizing && GetTickCount() - s_minimizingTick < 1000));
-    std::wstring cls = fg ? GetClassNameStr(fg) : L"";
-    bool idle = !fg || minimizing || cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd";
-    if (!idle && !IsDesktop(fg)) return nullptr;
+    bool desktop = fg && (IsDesktop(fg) || DesktopBehind(fg));
+    if (!idle && !desktop) return nullptr;
     HMONITOR mon = nullptr;
     MONITORINFO mi = {sizeof(mi)};
+    POINT pt;
     if (s_dockMonitor && GetMonitorInfoW(s_dockMonitor, &mi)) {
         mon = s_dockMonitor;
-    } else if (minimizing) {
-        mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
-    } else {
-        POINT pt;
-        GetCursorPos(&pt);
+    } else if (fg && (IsIconic(fg) || fg == s_minimizing)) {
+        mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);  // 最小化的窗口按它原来的位置算
+    } else if (GetCursorPos(&pt)) {
         mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+    } else {
+        return nullptr;  // 读不到鼠标位置：别的桌面（UAC 提示、锁屏）在前面
     }
     if (!HasTaskbar(mon)) return nullptr;
-    if (idle && AppWindowShownOn(mon, minimizing ? fg : nullptr)) return nullptr;
+    if (idle && !desktop && AppWindowShownOn(mon, fg)) return nullptr;
     return mon;
 }
 
@@ -937,7 +1019,10 @@ void EvaluateNow(bool enforce) {
         if (steady) FlushDesktopMark();
         else s_desktopMarked = false;
     }
-    HMONITOR dock = DockMonitor(fg);
+    NoteForeground(fg);
+    bool idle = NothingInFront(fg);
+    RememberFront(fg);
+    HMONITOR dock = DockMonitor(fg, idle);
     bool transient = !dock && (!fg || IsTransient(fg));
     WatchLocation(transient ? s_targetWindow : fg);
     if (transient) {
@@ -951,13 +1036,19 @@ void EvaluateNow(bool enforce) {
         bool keepDock = !s_dockMonitor || g_settings.desktopDock;
         if (keepTarget && keepDock) {
             if ((s_targetMonitor || s_dockMonitor) && shellUi) ShowForShellUi();
-            // 开始菜单贴着任务栏摆，停靠着的迷你任务栏会挡住它的下半截：先收起来，回到桌面再停靠
-            if (s_dockMonitor && shellUi) Popup_SetDock(nullptr);
+            // 开始菜单贴着任务栏摆，停靠着的迷你任务栏会挡住它的下半截：先收起来，回到桌面再停靠。
+            // 其余临时界面（比如点了停靠着的迷你任务栏）期间照样把任务栏藏好：资源管理器重新启动后新的任务栏会显示出来
+            if (s_dockMonitor && shellUi) {
+                Popup_SetDock(nullptr);
+                s_dockAside = true;
+            } else if (s_dockMonitor && enforce && !s_dockAside) {
+                EnterHiddenMode(s_dockMonitor, nullptr, true);
+            }
             return;
         }
         fg = nullptr;
         // 比如在迷你任务栏里关掉了最后一个最大化的窗口：桌面上没有别的窗口了就接着停靠
-        if (!shellUi) dock = DockMonitor(nullptr);
+        if (!shellUi) dock = DockMonitor(nullptr, true);
     }
 
     HMONITOR target = fg && g_settings.autoHideOnFullscreen ? GetTargetMonitor(fg) : nullptr;
@@ -972,7 +1063,18 @@ void EvaluateNow(bool enforce) {
         window = s_targetWindow;
     }
     if (target) dock = nullptr;  // 最大化的窗口还露着（比如在另一块屏上）：按它来
+    if (dock && fg && IsTray(fg) && !s_handedOff) {
+        // 要藏起的任务栏还在前台：先把前台交给桌面，等桌面到了前台再停靠。
+        // 不然藏起它时系统会另找一个窗口激活（常常是后面露着的窗口），停靠马上又被撤掉
+        s_handedOff = true;
+        HWND desktop = GetShellWindow();
+        if (desktop) {
+            if (!SetForegroundWindow(desktop)) ForceForeground(desktop);
+            if (GetForegroundWindow() == desktop) return;
+        }
+    }
     bool changed = target != s_targetMonitor || window != s_targetWindow || dock != s_dockMonitor;
+    s_dockAside = false;
     Popup_SetDock(dock);
     if (!enforce && !changed) return;
     if (changed) {
@@ -1002,6 +1104,7 @@ void EvaluateNow(bool enforce) {
 void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
     switch (event) {
         case EVENT_SYSTEM_FOREGROUND:
+            if (!s_enabled) RememberFront(GetForegroundWindow());
             Evaluate(false);
             break;
         case EVENT_SYSTEM_MINIMIZESTART:
@@ -1096,18 +1199,23 @@ void Fullscreen_OnTaskbarCreated() {
 }
 
 void Fullscreen_SetEnabled(bool enabled) {
+    bool was = s_enabled;
     s_enabled = enabled;
+    // 前台窗口一直盯着：功能关着时也记着最近的前台窗口，从托盘菜单打开停靠时才知道用户面前是什么
+    if (!s_foregroundHook)
+        s_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnWinEvent, 0, 0,
+                                           WINEVENT_OUTOFCONTEXT);
     if (enabled) {
-        if (!s_foregroundHook)
-            s_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnWinEvent, 0, 0,
-                                               WINEVENT_OUTOFCONTEXT);
+        if (!was) {
+            s_seenFront = nullptr;
+            s_trayClicked = false;
+        }
         if (!s_minimizeHook)
             s_minimizeHook = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, nullptr, OnWinEvent, 0,
                                              0, WINEVENT_OUTOFCONTEXT);
         SetTimer(g_mainWnd, kTimerFullscreen, 250, nullptr);
         Evaluate(true);
     } else {
-        Unhook(s_foregroundHook);
         Unhook(s_minimizeHook);
         Unhook(s_locationHook);
         s_locationPid = 0;
@@ -1115,6 +1223,7 @@ void Fullscreen_SetEnabled(bool enabled) {
         s_targetMonitor = nullptr;
         s_targetWindow = nullptr;
         s_dockMonitor = nullptr;
+        s_dockAside = false;
         Popup_SetDock(nullptr);
         LeaveHiddenMode();
     }
