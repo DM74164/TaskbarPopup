@@ -1,4 +1,4 @@
-// 设置窗口：开关两个功能、自定义长按时长、开机自启动、最大化时不隐藏任务栏的程序。
+// 设置窗口：开关各项功能、自定义长按时长、迷你任务栏的大小和内容、开机自启动、最大化时不隐藏任务栏的程序。
 #include "common.h"
 
 namespace app {
@@ -10,12 +10,18 @@ constexpr DWORD kExStyle = WS_EX_DLGMODALFRAME;
 
 enum {
     IDC_AUTOHIDE = 1001,
+    IDC_DESKTOPDOCK,
     IDC_LONGPRESS,
     IDC_MS_LABEL,
     IDC_MS_EDIT,
     IDC_MS_SPIN,
     IDC_MS_HINT,
+    IDC_SCALE_LABEL,
+    IDC_SCALE_EDIT,
+    IDC_SCALE_SPIN,
+    IDC_SCALE_HINT,
     IDC_PINNED,
+    IDC_LEVELS,
     IDC_AUTOSTART,
     IDC_EXCLUDE_LABEL,
     IDC_EXCLUDE,
@@ -27,12 +33,14 @@ struct Place {
     int id, x, y, w, h;
 };
 constexpr Place kLayout[] = {
-    {IDC_AUTOHIDE, 16, 14, 320, 22},      {IDC_LONGPRESS, 16, 42, 300, 22},     {IDC_MS_LABEL, 36, 72, 128, 24},
-    {IDC_MS_EDIT, 166, 72, 90, 24},       {IDC_MS_HINT, 36, 100, 280, 20},      {IDC_PINNED, 34, 124, 300, 22},
-    {IDC_AUTOSTART, 16, 156, 300, 22},    {IDC_EXCLUDE_LABEL, 16, 190, 330, 20}, {IDC_EXCLUDE, 16, 212, 320, 76},
-    {IDC_EXCLUDE_HINT, 16, 292, 330, 20}, {IDOK, 160, 322, 84, 28},             {IDCANCEL, 252, 322, 84, 28},
+    {IDC_AUTOHIDE, 16, 14, 320, 22},       {IDC_DESKTOPDOCK, 16, 42, 320, 22},    {IDC_LONGPRESS, 16, 70, 300, 22},
+    {IDC_MS_LABEL, 36, 100, 128, 24},      {IDC_MS_EDIT, 166, 100, 90, 24},       {IDC_MS_HINT, 36, 128, 280, 20},
+    {IDC_SCALE_LABEL, 16, 160, 148, 24},   {IDC_SCALE_EDIT, 166, 160, 90, 24},    {IDC_SCALE_HINT, 36, 188, 280, 20},
+    {IDC_PINNED, 16, 212, 300, 22},        {IDC_LEVELS, 16, 238, 300, 22},        {IDC_AUTOSTART, 16, 270, 300, 22},
+    {IDC_EXCLUDE_LABEL, 16, 304, 330, 20}, {IDC_EXCLUDE, 16, 326, 320, 76},       {IDC_EXCLUDE_HINT, 16, 406, 330, 20},
+    {IDOK, 160, 436, 84, 28},              {IDCANCEL, 252, 436, 84, 28},
 };
-constexpr int kClientW = 352, kClientH = 366;
+constexpr int kClientW = 352, kClientH = 480;
 
 HWND s_dlg = nullptr;
 HFONT s_font = nullptr;
@@ -40,8 +48,8 @@ UINT s_dpi = 96;
 
 // 打开窗口时各项的值。确定时只改用户在窗口里动过的项：窗口开着的时候在迷你任务栏或托盘菜单里改的设置不会被盖掉
 struct Initial {
-    bool autoHide = false, longPress = false, pinned = false, autoStart = false;
-    int ms = 0;
+    bool autoHide = false, desktopDock = false, longPress = false, pinned = false, levels = false, autoStart = false;
+    int ms = 0, scale = 0;
     std::vector<std::wstring> exclude;
 } s_initial;
 
@@ -100,16 +108,49 @@ void OnDpiChanged(UINT dpi, const RECT& suggested) {
     }
     // 微调按钮重新贴到输入框右边（会把输入框缩窄一点）
     SendMessageW(GetDlgItem(s_dlg, IDC_MS_SPIN), UDM_SETBUDDY, reinterpret_cast<WPARAM>(GetDlgItem(s_dlg, IDC_MS_EDIT)), 0);
+    SendMessageW(GetDlgItem(s_dlg, IDC_SCALE_SPIN), UDM_SETBUDDY,
+                 reinterpret_cast<WPARAM>(GetDlgItem(s_dlg, IDC_SCALE_EDIT)), 0);
     if (old) DeleteObject(old);
     SIZE size = WindowSize();
     SetWindowPos(s_dlg, nullptr, suggested.left, suggested.top, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
     InvalidateRect(s_dlg, nullptr, TRUE);
 }
 
+// 迷你任务栏的大小和内容不跟着长按开关变灰：左键单击托盘图标也能弹出迷你任务栏
 void UpdateEnabled() {
     BOOL on = IsDlgButtonChecked(s_dlg, IDC_LONGPRESS) == BST_CHECKED;
-    for (int id : {IDC_MS_LABEL, IDC_MS_EDIT, IDC_MS_SPIN, IDC_MS_HINT, IDC_PINNED})
+    for (int id : {IDC_MS_LABEL, IDC_MS_EDIT, IDC_MS_SPIN, IDC_MS_HINT})
         EnableWindow(GetDlgItem(s_dlg, id), on);
+}
+
+// 数字输入框加右边的微调按钮
+HWND AddNumberBox(int editId, int spinId, int minValue, int maxValue, int step, int value) {
+    HWND edit = AddControl(L"EDIT", L"", ES_NUMBER | ES_LEFT | ES_AUTOHSCROLL | WS_TABSTOP, editId, WS_EX_CLIENTEDGE);
+    HWND spin = CreateWindowExW(0, UPDOWN_CLASSW, nullptr,
+                                WS_CHILD | WS_VISIBLE | UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
+                                0, 0, 0, 0, s_dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(spinId)), g_instance,
+                                nullptr);
+    SendMessageW(spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(edit), 0);
+    SendMessageW(spin, UDM_SETRANGE32, minValue, maxValue);
+    UDACCEL accel = {0, static_cast<UINT>(step)};
+    SendMessageW(spin, UDM_SETACCEL, 1, reinterpret_cast<LPARAM>(&accel));
+    SendMessageW(spin, UDM_SETPOS32, 0, value);
+    return edit;
+}
+
+// 读一个数字输入框，不在范围内时提示并把焦点放回去
+bool ReadNumber(int editId, int minValue, int maxValue, const wchar_t* what, const wchar_t* unit, int& value) {
+    BOOL ok = FALSE;
+    UINT v = GetDlgItemInt(s_dlg, editId, &ok, FALSE);
+    if (!ok || v < static_cast<UINT>(minValue) || v > static_cast<UINT>(maxValue)) {
+        wchar_t msg[128];
+        swprintf(msg, 128, L"%ls需要在 %d 到 %d%ls之间。", what, minValue, maxValue, unit);
+        MessageBoxW(s_dlg, msg, L"TaskbarPopup", MB_ICONWARNING);
+        SetFocus(GetDlgItem(s_dlg, editId));
+        return false;
+    }
+    value = static_cast<int>(v);
+    return true;
 }
 
 void CreateControls() {
@@ -118,24 +159,20 @@ void CreateControls() {
 
     AddControl(L"BUTTON", L"窗口最大化或全屏时隐藏任务栏，窗口铺满屏幕", BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP,
                IDC_AUTOHIDE);
+    AddControl(L"BUTTON", L"在桌面上用迷你任务栏代替系统任务栏", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_DESKTOPDOCK);
     AddControl(L"BUTTON", L"长按 Win 键弹出迷你任务栏", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_LONGPRESS);
     AddControl(L"STATIC", L"长按时长（毫秒）：", SS_LEFT | SS_CENTERIMAGE, IDC_MS_LABEL);
-    HWND edit = AddControl(L"EDIT", L"", ES_NUMBER | ES_LEFT | ES_AUTOHSCROLL | WS_TABSTOP, IDC_MS_EDIT,
-                           WS_EX_CLIENTEDGE);
-    HWND spin = CreateWindowExW(0, UPDOWN_CLASSW, nullptr,
-                                WS_CHILD | WS_VISIBLE | UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
-                                0, 0, 0, 0, s_dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_MS_SPIN)),
-                                g_instance, nullptr);
-    SendMessageW(spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(edit), 0);
-    SendMessageW(spin, UDM_SETRANGE32, kMinLongPressMs, kMaxLongPressMs);
-    UDACCEL accel = {0, 100};
-    SendMessageW(spin, UDM_SETACCEL, 1, reinterpret_cast<LPARAM>(&accel));
-    SendMessageW(spin, UDM_SETPOS32, 0, g_settings.longPressMs);
-
+    AddNumberBox(IDC_MS_EDIT, IDC_MS_SPIN, kMinLongPressMs, kMaxLongPressMs, 100, g_settings.longPressMs);
     wchar_t hint[96];
     swprintf(hint, 96, L"可设置 %d – %d 毫秒，默认 %d", kMinLongPressMs, kMaxLongPressMs, kDefaultLongPressMs);
     AddControl(L"STATIC", hint, SS_LEFT, IDC_MS_HINT);
-    AddControl(L"BUTTON", L"显示固定在任务栏的应用", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PINNED);
+
+    AddControl(L"STATIC", L"迷你任务栏大小（%）：", SS_LEFT | SS_CENTERIMAGE, IDC_SCALE_LABEL);
+    AddNumberBox(IDC_SCALE_EDIT, IDC_SCALE_SPIN, kMinPopupScale, kMaxPopupScale, 10, g_settings.popupScale);
+    swprintf(hint, 96, L"可设置 %d – %d%%，默认 %d%%", kMinPopupScale, kMaxPopupScale, kDefaultPopupScale);
+    AddControl(L"STATIC", hint, SS_LEFT, IDC_SCALE_HINT);
+    AddControl(L"BUTTON", L"迷你任务栏里显示固定在任务栏的应用", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_PINNED);
+    AddControl(L"BUTTON", L"迷你任务栏里显示音量和亮度调节", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_LEVELS);
     AddControl(L"BUTTON", L"开机自动启动", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_AUTOSTART);
     AddControl(L"STATIC", L"最大化时不隐藏任务栏的程序（每行一个，如 notepad.exe）：", SS_LEFT, IDC_EXCLUDE_LABEL);
     std::wstring exclude;
@@ -147,14 +184,19 @@ void CreateControls() {
     AddControl(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
 
     s_initial.autoHide = g_settings.autoHideOnFullscreen;
+    s_initial.desktopDock = g_settings.desktopDock;
     s_initial.longPress = g_settings.longPressPopup;
     s_initial.pinned = g_settings.showPinnedApps;
+    s_initial.levels = g_settings.showLevels;
     s_initial.autoStart = IsAutoStartEnabled();
     s_initial.ms = g_settings.longPressMs;
+    s_initial.scale = g_settings.popupScale;
     s_initial.exclude = g_settings.excludeApps;
     CheckDlgButton(s_dlg, IDC_AUTOHIDE, s_initial.autoHide ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_dlg, IDC_DESKTOPDOCK, s_initial.desktopDock ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_LONGPRESS, s_initial.longPress ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_PINNED, s_initial.pinned ? BST_CHECKED : BST_UNCHECKED);
+    CheckDlgButton(s_dlg, IDC_LEVELS, s_initial.levels ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_AUTOSTART, s_initial.autoStart ? BST_CHECKED : BST_UNCHECKED);
     UpdateEnabled();
 
@@ -171,21 +213,19 @@ void CreateControls() {
 }
 
 bool Apply() {
-    BOOL ok = FALSE;
-    UINT ms = GetDlgItemInt(s_dlg, IDC_MS_EDIT, &ok, FALSE);
-    if (!ok || ms < static_cast<UINT>(kMinLongPressMs) || ms > static_cast<UINT>(kMaxLongPressMs)) {
-        wchar_t msg[128];
-        swprintf(msg, 128, L"长按时长需要在 %d 到 %d 毫秒之间。", kMinLongPressMs, kMaxLongPressMs);
-        MessageBoxW(s_dlg, msg, L"TaskbarPopup", MB_ICONWARNING);
-        SetFocus(GetDlgItem(s_dlg, IDC_MS_EDIT));
+    int ms = 0, scale = 0;
+    if (!ReadNumber(IDC_MS_EDIT, kMinLongPressMs, kMaxLongPressMs, L"长按时长", L" 毫秒", ms) ||
+        !ReadNumber(IDC_SCALE_EDIT, kMinPopupScale, kMaxPopupScale, L"迷你任务栏大小", L"%", scale))
         return false;
-    }
 
     // 只改窗口里动过的项，其余的保持现在的值（窗口开着的时候可能在别处改过）
     if (Checked(IDC_AUTOHIDE) != s_initial.autoHide) g_settings.autoHideOnFullscreen = Checked(IDC_AUTOHIDE);
+    if (Checked(IDC_DESKTOPDOCK) != s_initial.desktopDock) g_settings.desktopDock = Checked(IDC_DESKTOPDOCK);
     if (Checked(IDC_LONGPRESS) != s_initial.longPress) g_settings.longPressPopup = Checked(IDC_LONGPRESS);
     if (Checked(IDC_PINNED) != s_initial.pinned) g_settings.showPinnedApps = Checked(IDC_PINNED);
-    if (static_cast<int>(ms) != s_initial.ms) g_settings.longPressMs = static_cast<int>(ms);
+    if (Checked(IDC_LEVELS) != s_initial.levels) g_settings.showLevels = Checked(IDC_LEVELS);
+    if (ms != s_initial.ms) g_settings.longPressMs = ms;
+    if (scale != s_initial.scale) g_settings.popupScale = scale;
 
     // 名单按增删合并到现在的名单上，不整个替换
     std::wstring text(GetWindowTextLengthW(GetDlgItem(s_dlg, IDC_EXCLUDE)) + 1, L'\0');
