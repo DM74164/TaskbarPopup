@@ -18,6 +18,7 @@ namespace {
 constexpr wchar_t kMainClass[] = L"TaskbarPopupMain";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"TaskbarPopup";
+constexpr DWORD kExitDeadlineMs = 15000;  // 退出最多花这么久，超过就直接结束进程（正常收尾各步都有自己的超时，加起来也到不了）
 
 enum MenuId {
     ID_SHOW = 100, ID_SETTINGS, ID_CHECKUPDATE, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG,
@@ -171,6 +172,7 @@ void Shutdown() {
     Hook_Uninstall();
     Brightness_Stop();
     Fullscreen_SetEnabled(false);
+    Log(L"退出：还原任务栏");
     Taskbar_RestoreAll();
     Shell_NotifyIconW(NIM_DELETE, &s_nid);
     if (HWND dlg = SettingsDialog_Hwnd()) DestroyWindow(dlg);
@@ -230,6 +232,16 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_DESTROY:
+            // 收尾时某一步卡住（资源管理器或别的程序没响应、后台线程卡在系统调用里）也要保证进程结束，
+            // 不然托盘图标没了、任务管理器里还留着
+            CreateThread(
+                nullptr, 0,
+                [](void*) -> DWORD {
+                    Sleep(kExitDeadlineMs);
+                    TerminateProcess(GetCurrentProcess(), 0);
+                    return 0;
+                },
+                nullptr, 0, nullptr);
             Shutdown();
             PostQuitMessage(0);
             return 0;
@@ -486,6 +498,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    Log(L"退出：结束后台线程");
     Elevation_Shutdown();
     Update_Stop();
     Popup_Destroy();
@@ -496,6 +509,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     Gdiplus::GdiplusShutdown(gdiplusToken);
     CoUninitialize();
     if (mutex) CloseHandle(mutex);
+    Log(L"退出完成");
     // 后台线程（桌面图标、任务栏动画）没在限定时间里结束时还可能在用全局对象，
     // 正常 return 会跑静态析构、把它们释放掉。收尾已经做完，直接结束进程
     TerminateProcess(GetCurrentProcess(), 0);
