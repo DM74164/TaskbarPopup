@@ -4,8 +4,6 @@
 // 方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
 // 鼠标停在窗口图标上时在上方显示它的实时缩略图。
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音（可以在设置里关掉）。
-// 打开了“桌面上用迷你任务栏代替系统任务栏”时，桌面在前台期间它停靠在屏幕底部：不抢前台，
-// 失去前台也不收起，打开、切换窗口以后由外面（fullscreen.cpp）让它收起。
 #include "common.h"
 
 #include <climits>
@@ -27,10 +25,6 @@ constexpr UINT WM_APP_FRAME = WM_APP + 20;  // 动画的下一帧
 constexpr UINT_PTR kTimerRefocus = 4;  // 刚弹出就失去了前台：稍等一下再抢回来
 constexpr UINT kRefocusDelayMs = 100;
 constexpr double kRefocusMs = 500;     // 弹出后多久之内失去前台算“刚弹出”
-constexpr UINT_PTR kTimerDock = 5;      // 等系统任务栏滑走以后再停靠
-constexpr UINT kDockDelayMs = 400;
-constexpr UINT kDockRetryMs = 100;
-constexpr double kDockGiveUpMs = 2000;  // 任务栏一直没藏好也不再等
 constexpr double kShowMs = 320.0 * TP_ANIM_SCALE;
 constexpr double kHideMs = 170.0 * TP_ANIM_SCALE;
 constexpr double kPillMs = 160.0 * TP_ANIM_SCALE;
@@ -105,14 +99,6 @@ int s_visible = 0;  // 一屏能放下几个
 int s_hover = -1;   // 鼠标下的格子：-1 无，0 开始按钮，i+1 第 i 个格子
 int s_sel = 0;      // 选中的格子（键盘焦点），编号同上
 bool s_open = false;
-bool s_docked = false;            // 这次是停靠在桌面上的
-HMONITOR s_dockWanted = nullptr;  // 要停靠到的屏幕，nullptr = 不停靠
-bool s_dockPending = false;       // 停靠的定时器排着
-double s_dockAskedAt = 0;         // 开始等着停靠的时间
-bool s_pinned = true;             // 这次列没列固定的应用（设置改了要重新停靠）
-std::vector<HWND> s_closing;      // 刚在迷你任务栏里关掉、可能还没关完的窗口
-double s_closingAt = 0;
-bool s_recapture = false;         // 停靠着时换了壁纸、当时正在用它：回到后台时再重新停靠，玻璃背景重新截
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
@@ -723,28 +709,14 @@ bool MouseButtonDown() {
     return false;
 }
 
-void StartDockTimer() {
-    if (s_dockPending || !s_hwnd) return;
-    s_dockPending = true;
-    s_dockAskedAt = NowMs();
-    SetTimer(s_hwnd, kTimerDock, kDockDelayMs, nullptr);
-}
-
-void CancelDockTimer() {
-    s_dockPending = false;
-    if (s_hwnd) KillTimer(s_hwnd, kTimerDock);
-}
-
 void HideNow() {
     HideThumb();
     s_open = false;
-    s_docked = false;
     s_anim = Anim::None;
     s_drag = kNone;
     if (GetCapture() == s_hwnd) ReleaseCapture();
     KillTimer(s_hwnd, kTimerClock);
     ShowWindow(s_hwnd, SW_HIDE);
-    if (s_dockWanted) StartDockTimer();  // 还在桌面上：（重新）停靠
 }
 
 // 动画的一帧：按时间算出位置画出来，还没播完就等下一次屏幕刷新再画下一帧
@@ -792,7 +764,6 @@ void Redraw() {
 
 void MoveSelection(int delta) {
     int count = ItemCount() + 1;
-    if (s_sel < 0 && delta < 0) s_sel = 0;  // 什么都没选时往左从最后一个开始
     s_sel = ((s_sel + delta) % count + count) % count;
     s_hover = -1;
     s_hoverControl = kNone;  // 鼠标停在调节条上时，标题也要换成选中的窗口
@@ -844,128 +815,14 @@ void ApplyFilter() {
     Redraw();
 }
 
-// 停靠着的迷你任务栏格子变了（窗口开了、关了，清掉了打的字）：重新排、重新居中。
-// 停靠时截的是整条屏幕底边，变宽了玻璃也对得上
-void Relayout() {
-    s_lockedItemsW = 0;
-    ComputeLayout();
-    UpdatePlacement();
-    s_first = std::max(0, std::min(s_first, ItemCount() - s_visible));
-    s_sel = std::min(s_sel, ItemCount());
-    s_hover = -1;
-    s_hoverControl = kNone;
-    s_pillIndex = -1;
-    s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
-}
-
-// 格子重新排过、滚动位置也定了以后：鼠标还在上面的话，按新的位置重新算它下面是哪个格子，
-// 和 WM_MOUSEMOVE 一样处理（在前台时选中的跟着悬停的走）。正在用键盘选时不算，高亮的就是要操作的那个
-void Rehover() {
-    POINT pt;
-    if (s_keyNav || s_lastMouse.x == INT_MIN || !GetCursorPos(&pt)) return;
-    int x = pt.x - s_pos.x, y = pt.y - s_pos.y;
-    s_hover = HitTest(x, y);
-    if (s_hover < 0) s_hoverControl = ControlAt(x, y);
-    else if (GetForegroundWindow() == s_hwnd) s_sel = s_hover;
-}
-
-// 打字筛选时比较的小写文字：标题、应用名、程序文件名
-void SetSearch(Tile& t) {
-    std::wstring exe = t.hwnd ? WindowExeName(t.hwnd) : NormalizeExeName(t.launch);
-    t.search = ToLower(t.title + L"\n" + t.pinName + L"\n" + exe);
-}
-
-std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows);
-
-// 停靠期间窗口开了、关了或者改了标题：跟着更新。返回 true 表示重新排过了
-bool RefreshDockTiles() {
-    if (!s_filter.empty() || s_menuOpen || s_drag != kNone || s_anim != Anim::None) return false;
-    // 刚关掉的窗口可能要过一会儿才真正关掉：这期间别把它的格子又列回来
-    if (NowMs() - s_closingAt < 5000 && std::any_of(s_closing.begin(), s_closing.end(), IsWindow)) return false;
-    s_closing.clear();
-    std::vector<HWND> handles = TaskbarWindowHandles();
-    size_t running = 0;
-    bool same = true;
-    for (const Tile& t : s_allItems) {
-        if (!t.hwnd) continue;
-        ++running;
-        same = same && std::find(handles.begin(), handles.end(), t.hwnd) != handles.end();
-    }
-    if (same && running == handles.size()) {
-        // 还是这些窗口，只是标题可能变了：原地改，不重新排（鼠标下的格子、缩略图都不动）
-        bool renamed = false;
-        for (Tile& t : s_allItems) {
-            if (!t.hwnd) continue;
-            std::wstring title = GetWindowTitle(t.hwnd);
-            if (title == t.title) continue;
-            t.title = title;
-            SetSearch(t);
-            renamed = true;
-        }
-        if (renamed) s_items = s_allItems;
-        return false;
-    }
-    // 重新列一遍，键盘选中的格子跟着它的窗口（或者固定的应用）走
-    Tile selected = s_sel > 0 && s_sel <= ItemCount() ? s_items[s_sel - 1] : Tile{};
-    s_allItems = BuildTiles(EnumerateWindows(nullptr, static_cast<int>(std::lround(Px(32)))));
-    s_items = s_allItems;
-    Relayout();
-    if (s_sel > 0) {
-        for (int i = 0; i < ItemCount(); ++i)
-            if (s_items[i].hwnd == selected.hwnd && s_items[i].launch == selected.launch) s_sel = i + 1;
-        EnsureVisible(s_sel);
-    }
-    Rehover();
-    return true;
-}
-
-// 停靠着的迷你任务栏失去前台：清掉打的字和选中的格子
-void ResetDock() {
-    s_keyNav = false;
-    if (s_recapture) {  // 用着的时候换了壁纸：现在重新停靠
-        HideNow();
-        return;
-    }
-    if (!s_filter.empty()) {
-        s_filter.clear();
-        s_items = s_allItems;
-        Relayout();
-        Rehover();
-    }
-    s_sel = -1;
-    Redraw();
-}
-
-// 停靠着时长按 Win、点托盘图标：让它拿到前台，可以用键盘选、打字筛选
-void ActivateDock() {
-    HWND fg = GetForegroundWindow();
-    if (fg == s_hwnd) return;
-    s_prevForeground = fg;
-    if (!SetForegroundWindow(s_hwnd)) ForceForeground(s_hwnd);
-    SetFocus(s_hwnd);
-    s_sel = DefaultSelection();
-    s_keyNav = true;
-    s_hover = -1;  // 鼠标正停在别的格子上的话，高亮的会和回车要打开的不是同一个
-    s_hoverControl = kNone;
-    EnsureVisible(s_sel);
-    Redraw();
-}
-
-// 把前台交还给原来的窗口（一般是桌面），迷你任务栏接着停靠着。原来的窗口没了、藏着或者最小化着时交给桌面
-void DeactivateDock() {
-    HWND to = s_prevForeground;
-    if (!to || !IsWindow(to) || !IsWindowVisible(to) || IsIconic(to)) to = GetShellWindow();
-    if (to && !SetForegroundWindow(to)) ForceForeground(to);
-}
-
 void Launch(const std::wstring& target) {
     LaunchApp(target);  // 趁本窗口还在前台时启动，新程序才能顺利拿到前台
-    if (!s_docked) HideNow();  // 停靠着的等程序的窗口到了前台再收起
+    HideNow();
 }
 
 void ActivateIndex(int idx, bool newInstance = false) {
     if (idx == 0) {
-        if (!s_docked) HideNow();  // 停靠着的等开始菜单到了前台再让开
+        HideNow();
         SendStartMenu();
         return;
     }
@@ -977,8 +834,7 @@ void ActivateIndex(int idx, bool newInstance = false) {
     }
     HWND h = item.hwnd;
     if (!IsWindow(h)) {
-        if (!s_docked) HideNow();
-        else if (RefreshDockTiles()) Redraw();
+        HideNow();
         return;
     }
     // 和系统任务栏一样：点当前窗口就最小化
@@ -987,10 +843,10 @@ void ActivateIndex(int idx, bool newInstance = false) {
         ShowWindowAsync(h, SW_MINIMIZE);  // 异步：那个程序卡住时本程序不跟着卡
         return;
     }
-    if (!s_docked) s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
+    s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
     if (IsIconic(h)) ShowWindowAsync(h, SW_RESTORE);
     ForceForeground(h);  // 先激活目标窗口，趁本窗口还在前台有权限切换
-    if (!s_docked) HideNow();  // 停靠着的等它到了前台以后由外面收起
+    HideNow();
 }
 
 void CloseItem(int idx) {
@@ -1012,8 +868,6 @@ void CloseItem(int idx) {
             return;
         }
     }
-    s_closing.push_back(h);
-    s_closingAt = NowMs();
 
     // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉。
     // 按全部格子判断，筛选后显示的格子和全部格子一起改
@@ -1105,18 +959,10 @@ void ShowItemMenu(int idx, POINT at) {
     }
 }
 
-void ShowOn(HMONITOR mon, bool dock);
-
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_ACTIVATE:
-            if (LOWORD(wParam) != WA_INACTIVE && s_open && s_docked) {
-                // 停靠着时被点了一下：记下原来的前台窗口，按 Esc 时交还给它
-                HWND from = reinterpret_cast<HWND>(lParam);
-                if (from && !IsOwnProcess(from)) s_prevForeground = from;
-            } else if (LOWORD(wParam) == WA_INACTIVE && s_open && s_docked) {
-                ResetDock();  // 停靠着的不收起
-            } else if (LOWORD(wParam) == WA_INACTIVE && s_open) {
+            if (LOWORD(wParam) == WA_INACTIVE && s_open) {
                 HWND to = reinterpret_cast<HWND>(lParam);
                 if (!to) to = GetForegroundWindow();
                 // 刚弹出就失去前台，又没按着鼠标键（不是用户点了别处）：点别处收起后再弹出时，
@@ -1140,25 +986,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kTimerClock) {
                 if (s_levels && s_drag != kVolumeTrack) RefreshVolume();  // 别处改了音量（键盘上的音量键）也跟着变
-                if (s_docked) RefreshDockTiles();
                 Redraw();
-            } else if (wParam == kTimerDock) {
-                KillTimer(hwnd, kTimerDock);
-                s_dockPending = false;
-                if (!s_dockWanted || s_open) return 0;  // 弹出着的收起以后会重新排上
-                // 还在播收起动画，或者系统任务栏还没藏好、它的截图还在往下滑：这时截玻璃背景会截到它们
-                bool busy = s_menuOpen || s_anim != Anim::None ||
-                            (NowMs() - s_dockAskedAt < kDockGiveUpMs &&
-                             (Taskbar_IsShownOn(s_dockWanted) || TaskbarAnim_SlidingOn(s_dockWanted)));
-                if (busy) {
-                    s_dockPending = true;
-                    SetTimer(hwnd, kTimerDock, kDockRetryMs, nullptr);
-                    return 0;
-                }
-                ShowOn(s_dockWanted, true);
             } else if (wParam == kTimerRefocus) {
                 KillTimer(hwnd, kTimerRefocus);
-                if (s_open && !s_docked && GetForegroundWindow() != hwnd) {
+                if (s_open && GetForegroundWindow() != hwnd) {
                     if (!SetForegroundWindow(hwnd)) ForceForeground(hwnd);
                     if (GetForegroundWindow() == hwnd) {
                         SetFocus(hwnd);
@@ -1199,11 +1030,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT screen = {x, y};
             ClientToScreen(hwnd, &screen);
             if (s_keyNav && screen.x == s_lastMouse.x && screen.y == s_lastMouse.y) return 0;
-            if (s_docked && s_levels && s_lastMouse.x == INT_MIN) {
-                // 停靠着的一放好久：鼠标移上来时重新读一遍亮度（别处可能调过）
-                s_brightnessEdited = false;
-                Brightness_Query(hwnd, s_monitor);
-            }
             s_lastMouse = screen;
             s_keyNav = false;
             int hit = HitTest(x, y);
@@ -1211,7 +1037,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (hit != s_hover || control != s_hoverControl) {
                 s_hover = hit;
                 s_hoverControl = control;
-                if (hit >= 0 && (!s_docked || GetForegroundWindow() == hwnd)) s_sel = hit;  // 停靠着没拿到前台时只算悬停
+                if (hit >= 0) s_sel = hit;
                 Redraw();
             }
             TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
@@ -1223,7 +1049,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_hover = -1;
             s_hoverControl = kNone;
-            if (s_docked && GetForegroundWindow() != hwnd) s_sel = -1;
             Redraw();
             return 0;
 
@@ -1321,10 +1146,6 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         ApplyFilter();
                         break;
                     }
-                    if (s_docked) {  // 停靠着的不收起，只交还焦点
-                        DeactivateDock();
-                        break;
-                    }
                     // 先收起再把焦点交还给原来的窗口，随后的失活消息就不会当成“刚弹出就失去前台”
                     Popup_Hide();
                     if (s_prevForeground && IsWindow(s_prevForeground)) ForceForeground(s_prevForeground);
@@ -1350,20 +1171,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        case WM_SETTINGCHANGE:
-            // 换了壁纸：停靠着的重新停靠，玻璃背景重新截。正在用（在前台、开着菜单、拖着调节条）时等它回到后台
-            if (wParam == SPI_SETDESKWALLPAPER && s_open && s_docked) {
-                if (GetForegroundWindow() == hwnd || s_menuOpen || s_drag != kNone) s_recapture = true;
-                else HideNow();
-            }
-            break;
-
         case WM_DPICHANGED:
             return 0;  // 尺寸由 Popup_Show 按目标显示器自己算
 
         case WM_CLOSE:
-            if (s_docked) DeactivateDock();  // Alt+F4：停靠着的不收起
-            else Popup_Hide();
+            Popup_Hide();
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1390,92 +1202,11 @@ std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows) {
         const WindowEntry& w = windows[i];
         tiles.push_back({w.title, w.icon, w.hwnd, w.active, L"", L"", nullptr});
     }
-    for (Tile& t : tiles) SetSearch(t);
+    for (Tile& t : tiles) {
+        std::wstring exe = t.hwnd ? WindowExeName(t.hwnd) : NormalizeExeName(t.launch);
+        t.search = ToLower(t.title + L"\n" + t.pinName + L"\n" + exe);
+    }
     return tiles;
-}
-
-// 弹出（dock=false），或者停靠在桌面上（dock=true：不抢前台，没有选中的格子）
-void ShowOn(HMONITOR mon, bool dock) {
-    // 任务栏露着时弹在它上面，藏起来时贴着屏幕底边
-    MONITORINFO mi = {sizeof(mi)};
-    GetMonitorInfoW(mon, &mi);
-    s_bounds = dock || !Taskbar_IsShownOn(mon) ? mi.rcMonitor : mi.rcWork;
-    s_scale = PopupScale(mon);
-    s_docked = dock;
-    s_recapture = false;
-    s_pinned = g_settings.showPinnedApps;
-    if (dock) {
-        Log(L"迷你任务栏停靠在桌面上");
-        s_prevForeground = nullptr;  // 上次弹出时的前台窗口；停靠着时被点到或长按时再记
-    }
-
-    // 音量马上就能读到；亮度在后台读，读到之前先显示上次的值
-    s_levels = g_settings.showLevels;
-    s_monitor = mon;
-    s_brightness = -2;
-    for (const auto& known : s_knownBrightness)
-        if (known.first == mon) s_brightness = known.second;
-    if (s_levels) {
-        RefreshVolume();
-        Brightness_Query(s_hwnd, mon);
-    }
-    s_brightnessEdited = false;
-    s_hoverControl = kNone;
-    s_drag = kNone;
-    s_wheelRest = 0;
-
-    // 停靠在桌面上时没有当前窗口
-    s_allItems = BuildTiles(EnumerateWindows(dock ? nullptr : s_prevForeground, static_cast<int>(std::lround(Px(32)))));
-    s_items = s_allItems;
-    s_filter.clear();
-    s_lockedItemsW = 0;
-    s_keyNav = false;
-    s_menuOpen = false;
-    s_lastMouse = {INT_MIN, INT_MIN};
-    Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
-    ComputeLayout();
-    UpdatePlacement();
-
-    // 截下玻璃后面的屏幕内容：这时弹窗自己不能在屏幕上
-    if (IsWindowVisible(s_hwnd)) {
-        ShowWindow(s_hwnd, SW_HIDE);
-        WaitForVBlank();
-    }
-    RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
-    // 停靠期间格子会变多变少、面板跟着变宽变窄：整条屏幕底边都截下来
-    if (dock) {
-        window.left = s_bounds.left;
-        window.right = s_bounds.right;
-    }
-    RECT panel = {s_pos.x + static_cast<LONG>(s_L.margin), s_pos.y + static_cast<LONG>(s_L.margin),
-                  s_pos.x + static_cast<LONG>(s_L.margin + s_L.panelW), s_pos.y + static_cast<LONG>(s_L.margin + s_L.panelH)};
-    s_glass.Capture(window, panel, s_scale);
-
-    s_first = 0;
-    s_hover = -1;
-    s_sel = dock ? -1 : DefaultSelection();
-    EnsureVisible(s_sel);
-    s_pillIndex = -1;
-
-    s_open = true;
-    s_shownAt = NowMs();
-    s_refocused = false;
-    s_anim = Anim::Showing;
-    s_animStart = s_shownAt;
-    Render(SlideDistance(), 0);
-    if (dock) {
-        // 不抢前台：桌面照样在前台，点到迷你任务栏上它才拿到前台
-        SetWindowPos(s_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    } else {
-        ShowWindow(s_hwnd, SW_SHOW);
-        ForceForeground(s_hwnd);
-        if (GetForegroundWindow() != s_hwnd)
-            Log(L"迷你任务栏没拿到前台，前台是 %ls %ls", GetClassNameStr(GetForegroundWindow()).c_str(),
-                GetProcessPath(GetForegroundWindow()).c_str());
-        SetFocus(s_hwnd);
-    }
-    RequestFrame();
-    SetTimer(s_hwnd, kTimerClock, 1000, nullptr);
 }
 
 }  // namespace
@@ -1523,16 +1254,74 @@ void Popup_Destroy() {
 
 void Popup_Show() {
     if (!s_hwnd) return;
-    if (s_open && s_docked) {
-        ActivateDock();
-        return;
-    }
     HWND fg = GetForegroundWindow();
     if (fg != s_hwnd) s_prevForeground = fg;
-    // 弹在鼠标所在的显示器上
+
+    // 弹在鼠标所在的显示器上；任务栏露着时弹在它上面，藏起来时贴着屏幕底边
     POINT pt;
     GetCursorPos(&pt);
-    ShowOn(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), false);
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(mon, &mi);
+    s_bounds = Taskbar_IsShownOn(mon) ? mi.rcWork : mi.rcMonitor;
+    s_scale = PopupScale(mon);
+
+    // 音量马上就能读到；亮度在后台读，读到之前先显示上次的值
+    s_levels = g_settings.showLevels;
+    s_monitor = mon;
+    s_brightness = -2;
+    for (const auto& known : s_knownBrightness)
+        if (known.first == mon) s_brightness = known.second;
+    if (s_levels) {
+        RefreshVolume();
+        Brightness_Query(s_hwnd, mon);
+    }
+    s_brightnessEdited = false;
+    s_hoverControl = kNone;
+    s_drag = kNone;
+    s_wheelRest = 0;
+
+    s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, static_cast<int>(std::lround(Px(32)))));
+    s_items = s_allItems;
+    s_filter.clear();
+    s_lockedItemsW = 0;
+    s_keyNav = false;
+    s_menuOpen = false;
+    s_lastMouse = {INT_MIN, INT_MIN};
+    Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
+    ComputeLayout();
+    UpdatePlacement();
+
+    // 截下玻璃后面的屏幕内容：这时弹窗自己不能在屏幕上
+    if (IsWindowVisible(s_hwnd)) {
+        ShowWindow(s_hwnd, SW_HIDE);
+        WaitForVBlank();
+    }
+    RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
+    RECT panel = {s_pos.x + static_cast<LONG>(s_L.margin), s_pos.y + static_cast<LONG>(s_L.margin),
+                  s_pos.x + static_cast<LONG>(s_L.margin + s_L.panelW), s_pos.y + static_cast<LONG>(s_L.margin + s_L.panelH)};
+    s_glass.Capture(window, panel, s_scale);
+
+    s_first = 0;
+    s_hover = -1;
+    s_sel = DefaultSelection();
+    EnsureVisible(s_sel);
+    s_pillIndex = -1;
+
+    s_open = true;
+    s_shownAt = NowMs();
+    s_refocused = false;
+    s_anim = Anim::Showing;
+    s_animStart = s_shownAt;
+    Render(SlideDistance(), 0);
+    ShowWindow(s_hwnd, SW_SHOW);
+    ForceForeground(s_hwnd);
+    if (GetForegroundWindow() != s_hwnd)
+        Log(L"迷你任务栏没拿到前台，前台是 %ls %ls", GetClassNameStr(GetForegroundWindow()).c_str(),
+            GetProcessPath(GetForegroundWindow()).c_str());
+    SetFocus(s_hwnd);
+    RequestFrame();
+    SetTimer(s_hwnd, kTimerClock, 1000, nullptr);
 }
 
 void Popup_Hide() {
@@ -1548,40 +1337,8 @@ void Popup_Hide() {
 }
 
 void Popup_Toggle() {
-    if (s_open && s_docked) {
-        // 停靠着：拿到前台，再按一次交还
-        if (GetForegroundWindow() == s_hwnd) DeactivateDock();
-        else ActivateDock();
-    } else if (s_open) {
-        Popup_Hide();
-    } else {
-        Popup_Show();
-    }
-}
-
-void Popup_SetDock(HMONITOR monitor) {
-    if (!s_hwnd) return;
-    if (!monitor) {
-        s_dockWanted = nullptr;
-        CancelDockTimer();
-        if (s_open && s_docked) Popup_Hide();
-        return;
-    }
-    s_dockWanted = monitor;
-    if (s_open && s_docked) {
-        MONITORINFO mi = {sizeof(mi)};
-        bool fits = GetMonitorInfoW(monitor, &mi) && EqualRect(&mi.rcMonitor, &s_bounds) && PopupScale(monitor) == s_scale;
-        if (s_monitor != monitor || !fits) HideNow();  // 换了屏幕，或者分辨率、缩放变了：重新停靠
-        return;
-    }
-    if (!s_open) StartDockTimer();  // 弹出着的收起以后再停靠（HideNow 会排上）
-}
-
-void Popup_ApplySettings() {
-    // 停靠着：大小、调节条、固定的应用这几项改了就按新设置重新停靠
-    if (s_open && s_docked &&
-        (s_scale != PopupScale(s_monitor) || s_levels != g_settings.showLevels || s_pinned != g_settings.showPinnedApps))
-        HideNow();
+    if (s_open) Popup_Hide();
+    else Popup_Show();
 }
 
 }  // namespace app

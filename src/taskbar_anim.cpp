@@ -548,13 +548,6 @@ void TaskbarAnim_AutoHideOff(UINT seq) {
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
 }
 
-bool TaskbarAnim_SlidingOn(HMONITOR monitor) {
-    HWND h = nullptr;
-    while ((h = FindWindowExW(nullptr, h, kOverlayClass, nullptr)) != nullptr)
-        if (IsWindowVisible(h) && MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) == monitor) return true;
-    return false;
-}
-
 void TaskbarAnim_Stop() {
     if (!s_thread) return;
     ++s_generation;

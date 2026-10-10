@@ -12,10 +12,15 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
+            VALUE "CompanyName", "DM74164"
             VALUE "FileDescription", "TaskbarPopup"
             VALUE "FileVersion", "1.0.0"
+            VALUE "InternalName", "TaskbarPopup"
+            VALUE "LegalCopyright", "Copyright (C) 2026 DM74164, AGPL-3.0"
+            VALUE "OriginalFilename", "TaskbarPopup.exe"
             VALUE "ProductName", "TaskbarPopup"
             VALUE "ProductVersion", "1.0.0"
+            VALUE "Comments", "https://github.com/DM74164/TaskbarPopup"
         END
     END
     BLOCK "VarFileInfo"
