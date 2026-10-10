@@ -243,6 +243,10 @@ void Popup_Destroy();
 void Popup_Show();
 void Popup_Hide();
 void Popup_Toggle();
+// 设置窗口里调“迷你任务栏大小”时按 percent 弹出预览（不抢前台，点不到）。hold：还按着滑块，
+// 先不收起；否则过一会儿自己收起
+void Popup_Preview(int percent, bool hold);
+void Popup_EndPreview();  // 马上收起预览
 
 // ---------------- 音量和亮度 ----------------
 // 音量：默认播放设备的主音量（Core Audio）。在调用线程上同步执行（线程需已初始化 COM），很快
@@ -286,6 +290,7 @@ public:
     const std::vector<DWORD>& Raw() const { return m_raw; }
     void SetLight(bool light) { m_light = light; }        // 浅色玻璃配深色文字，深色玻璃配浅色文字
     bool Light() const { return m_light; }
+    void SetScale(float scale) { m_scale = scale; }  // 只换边缘、阴影等的尺寸，背景不重新截
     void SetFrosted(bool frosted) { m_frosted = frosted; }  // 毛玻璃：没有边缘折射和高光，着色更浓
     bool Frosted() const { return m_frosted; }
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
