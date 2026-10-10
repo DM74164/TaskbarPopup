@@ -1,16 +1,17 @@
 name: Build
 
+# 在网页上新建 Release 时 GitHub 也会推送标签，下面的 tags 已经能触发，
+# 不再单独监听 release 事件，免得同一个版本构建、签名两次
 on:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
@@ -25,19 +26,60 @@ jobs:
           sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
           sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
 
+      - name: Version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        # 标签 v1.2.3 构建出的 exe 版本号就是 1.2.3，其他构建用 src/version.h 里的默认值
+        run: echo "TP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Build
         run: sh build-mingw.sh
 
-      - name: Package
+      - name: Stage
         run: |
           mkdir -p dist/TaskbarPopup
           cp TaskbarPopup.exe README.md LICENSE dist/TaskbarPopup/
-          cd dist && zip -r TaskbarPopup.zip TaskbarPopup
 
-      - uses: actions/upload-artifact@v4
+      - id: upload
+        uses: actions/upload-artifact@v4
         with:
           name: TaskbarPopup
           path: dist/TaskbarPopup/
+
+      # 只给标签构建签名，仓库里配好 SIGNPATH_API_TOKEN 密钥和 SIGNPATH_ORGANIZATION_ID 变量后才启用
+      - name: Check signing setup
+        id: signing
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          ORG: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+        run: |
+          if [ -n "$TOKEN" ] && [ -n "$ORG" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::还没配 SignPath，这次发布的 exe 不签名"
+          fi
+
+      - name: Sign with SignPath
+        if: steps.signing.outputs.enabled == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: TaskbarPopup
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          parameters: |
+            version: "${{ env.TP_VERSION }}"
+          # 每个版本都要在 SignPath 网页上人工批准，最多等两小时
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: dist/signed
+
+      - name: Use signed exe
+        if: steps.signing.outputs.enabled == 'true'
+        run: cp dist/signed/TaskbarPopup.exe dist/TaskbarPopup/TaskbarPopup.exe
+
+      - name: Package
+        run: cd dist && zip -r TaskbarPopup.zip TaskbarPopup
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -48,5 +90,6 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/TaskbarPopup.zip --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/TaskbarPopup.zip --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" dist/TaskbarPopup.zip --title "$GITHUB_REF_NAME" --generate-notes \
+              --notes "代码签名策略（Code signing policy）见 [README](https://github.com/${GITHUB_REPOSITORY}#代码签名策略-code-signing-policy)。"
           fi
