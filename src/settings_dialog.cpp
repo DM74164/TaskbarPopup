@@ -919,6 +919,7 @@ void SetSlider(int which, int value) {
     const SliderSpec& spec = kSliderSpec[which];
     value = spec.minValue + (value - spec.minValue + spec.step / 2) / spec.step * spec.step;
     s_v.slider[which] = std::clamp(value, spec.minValue, spec.maxValue);
+    if (which == kScale) Popup_Preview(s_v.slider[kScale], s_drag == kScale);  // 弹出迷你任务栏看看大小
 }
 
 void SetSliderFromX(int which, int x) {
@@ -1141,6 +1142,7 @@ void SetHover(const Item& it) {
 }
 
 void ReleaseAll() {
+    Popup_EndPreview();
     KillTimer(s_hwnd, kTimerAnim);
     KillTimer(s_hwnd, kTimerLive);
     StopShot();
@@ -1273,9 +1275,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             Item pressed = s_press;
             bool dragged = s_drag >= 0;
+            int draggedSlider = s_drag;
             s_press = {};
             s_drag = -1;
             if (GetCapture() == hwnd) ReleaseCapture();
+            if (draggedSlider == kScale) Popup_Preview(s_v.slider[kScale], false);  // 松开了：预览过一会儿收起
             if (dragged || pressed.kind == kSliderRow) {
                 Render();
                 return 0;
@@ -1292,6 +1296,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
             if ((s_drag >= 0 || s_press.kind != kNoItem) && reinterpret_cast<HWND>(lParam) != hwnd) {
+                if (s_drag == kScale) Popup_Preview(s_v.slider[kScale], false);
                 s_drag = -1;
                 s_press = {};
                 Render();
