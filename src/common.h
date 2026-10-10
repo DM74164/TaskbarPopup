@@ -39,6 +39,9 @@ namespace app {
 enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / 毛玻璃
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
+constexpr int kMinLongPressMs = 200;
+constexpr int kMaxLongPressMs = 5000;
+constexpr int kDefaultLongPressMs = 1000;
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool longPressPopup = true;
@@ -51,7 +54,8 @@ struct Settings {
     bool checkUpdates = false;   // 自动检查更新
     bool keepFloatsOnTop = true; // 点全屏（最大化）的窗口时，浮在上面的小窗口不被盖住
     UINT hotkey[kHotkeyCount] = {};       // 快捷键（见 MakeHotkey），下标是 HotkeyId，0 = 没设
-    bool hotkeyHold[kHotkeyCount] = {};   // 长按触发（按住 longPressMs 毫秒），否则单按
+    bool hotkeyHold[kHotkeyCount] = {};   // 长按触发，否则单按
+    int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
@@ -61,9 +65,6 @@ std::wstring NormalizeExeName(const std::wstring& text);  // 路径或名字 →
 bool IsExcludedExe(const std::wstring& exeName);           // exeName 已经是 NormalizeExeName 的结果
 void SetExcluded(const std::wstring& exeName, bool excluded);  // 改排除名单、保存并重新判断要不要藏任务栏
 
-constexpr int kMinLongPressMs = 200;
-constexpr int kMaxLongPressMs = 5000;
-constexpr int kDefaultLongPressMs = 1000;
 constexpr int kMinPopupScale = 50;
 constexpr int kMaxPopupScale = 200;
 constexpr int kDefaultPopupScale = 100;
@@ -302,6 +303,7 @@ struct KeyBinding {
     UINT vk = 0;
     int tap = -1;
     int hold = -1;
+    int holdMs = kDefaultLongPressMs;  // 长按要按住多久
 };
 void Hook_SetBindings(const std::vector<KeyBinding>& bindings);
 HWND SettingsDialog_Hwnd();

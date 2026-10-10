@@ -52,7 +52,7 @@ const ToggleText kToggleText[kToggleCount] = {
 };
 
 // 滑块
-enum SliderId { kLongPressMs, kScale, kSliderCount };
+enum SliderId { kLongPressMs, kScale, kPopupHoldMs, kPinHoldMs, kSliderCount };  // 后两个 = kPopupHoldMs + HotkeyId
 struct SliderSpec {
     const wchar_t* label;
     int minValue, maxValue, step;
@@ -60,6 +60,8 @@ struct SliderSpec {
 const SliderSpec kSliderSpec[kSliderCount] = {
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"迷你任务栏大小", kMinPopupScale, kMaxPopupScale, 10},
+    {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
+    {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
 };
 
 // 几选一（分段按钮）
@@ -174,17 +176,15 @@ float Px(float dip) { return dip * s_scale; }
 const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 
 bool HotkeyEnabled(int which) { return which != kHotkeyPin || s_v.on[kKeepFloats]; }  // 固定了也要它开着才有用
-// 长按时长：长按 Win 和长按的快捷键都用它
 bool SliderEnabled(int which) {
-    if (which != kLongPressMs || s_v.on[kLongPress]) return true;
-    for (int i = 0; i < kHotkeyCount; ++i)
-        if (s_v.hotkey[i] && s_v.hold[i] && HotkeyEnabled(i)) return true;
-    return false;
+    if (which == kLongPressMs) return s_v.on[kLongPress];
+    if (which >= kPopupHoldMs) return HotkeyEnabled(which - kPopupHoldMs);
+    return true;
 }
 
 std::wstring SliderText(int which) {
     wchar_t text[32];
-    if (which == kLongPressMs) swprintf(text, 32, L"%d 毫秒", s_v.slider[which]);
+    if (which != kScale) swprintf(text, 32, L"%d 毫秒", s_v.slider[which]);
     else swprintf(text, 32, L"%d%%", s_v.slider[which]);
     return text;
 }
@@ -254,8 +254,10 @@ float SegRow(int which, float x, float y, float w) {
     return h;
 }
 
+float SliderRow(int which, float x, float y, float w);
+
 // 快捷键：左边名字和说明，右边一个框显示按键（设了的话框里右边有个小叉，点了清掉），框下面选单按还是长按。
-// 点这一行开始录
+// 点这一行开始录。选了长按的话下面再加一条它自己的长按时长
 float HotkeyRow(int which, float x, float y, float w) {
     float h = Px(80), bw = Px(130), bh = Px(28), mh = Px(26);
     s_items.push_back({kHotkeyRow, which, RectF(x, y, w, h)});
@@ -268,6 +270,7 @@ float HotkeyRow(int which, float x, float y, float w) {
     float ow = (bw - 2 * pad) / 2;
     for (int i = 0; i < 2; ++i)
         s_items.push_back({kHotkeyMode, which * kSegStride + i, RectF(track.X + pad + i * ow, track.Y + pad, ow, mh - 2 * pad)});
+    if (s_v.hold[which]) h = Px(76) + SliderRow(kPopupHoldMs + which, x, y + Px(76), w);
     return h;
 }
 
@@ -313,12 +316,13 @@ void BuildLayout() {
     float left =
         AddGroup(px0, top, L"任务栏", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
                                         [](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }});
-    left = AddGroup(px0, left, L"迷你任务栏",
-                    {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); },
-                     [](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); },
-                     [](float x, float y, float w) { return SliderRow(kScale, x, y, w); },
-                     [](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
-                     [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); }});
+    // 长按 Win 关着时收起长按时长
+    std::vector<float (*)(float, float, float)> mini = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
+    if (s_v.on[kLongPress]) mini.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
+    mini.push_back([](float x, float y, float w) { return SliderRow(kScale, x, y, w); });
+    mini.push_back([](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); });
+    mini.push_back([](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); });
+    left = AddGroup(px0, left, L"迷你任务栏", mini);
     left = AddGroup(px0, left, L"外观",
                     {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
                      [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
@@ -1056,6 +1060,7 @@ void SetToggle(int which, bool on) {
     s_knobFrom[which] = s_knob[which];
     s_knobStart[which] = NowMs();
     StartAnimation();
+    if (which == kLongPress) Relayout(true);  // 长按时长跟着收起 / 放出来
 }
 
 void SetSlider(int which, int value) {
@@ -1128,6 +1133,7 @@ void TryHotkey(UINT hotkey) {
     }
     SetHotkey(which, hotkey);
     EndCapture();
+    if (which == kHotkeyPopup) SetToggle(kLongPress, false);  // 有了弹出迷你任务栏的快捷键，长按 Win 先关掉（想要可以再打开）
 }
 
 // 录的时候现在按着的 Ctrl / Shift / Alt；except 这个（分左右的）键不算
@@ -1198,6 +1204,7 @@ void SetHotkeyMode(int which, bool hold) {
         }
     s_v.hold[which] = hold;
     s_hotkeyError[which].clear();
+    Relayout(true);  // 长按时长跟着放出来 / 收起
 }
 
 void AddExclude(const std::wstring& path) {
@@ -1300,6 +1307,9 @@ void Apply() {
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
+    for (int i = 0; i < kHotkeyCount; ++i)
+        if (s_v.slider[kPopupHoldMs + i] != s_initial.slider[kPopupHoldMs + i])
+            g_settings.hotkeyHoldMs[i] = s_v.slider[kPopupHoldMs + i];
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
     for (int i = 0; i < kHotkeyCount; ++i) {
@@ -1733,6 +1743,7 @@ void SettingsDialog_Show() {
     for (int i = 0; i < kHotkeyCount; ++i) {
         s_initial.hotkey[i] = g_settings.hotkey[i];
         s_initial.hold[i] = g_settings.hotkeyHold[i];
+        s_initial.slider[kPopupHoldMs + i] = g_settings.hotkeyHoldMs[i];
         s_hotkeyError[i].clear();
     }
     s_initial.exclude = g_settings.excludeApps;
