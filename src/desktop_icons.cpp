@@ -210,9 +210,10 @@ void Capture(HWND list) {
     Log(L"给桌面拍了照，用了 %.0f 毫秒", NowMs() - start);
 }
 
-// 要回到桌面了，图标还藏着：把照片盖在桌面上。照片窗口紧贴在桌面窗口上面，别的窗口都在它上面，鼠标点得穿
-void ShowCover() {
-    if (!s_shot || !s_hiddenList || !IsWindow(s_desktopRoot)) return;
+// 把照片盖在桌面上（已经盖着的话重新贴到桌面窗口上面）。照片窗口紧贴在桌面窗口上面，别的窗口都在它上面，鼠标点得穿。
+// 没有照片、没盖成时返回 false
+bool ShowCover() {
+    if (!s_shot || !IsWindow(s_desktopRoot)) return false;
     if (!s_cover) {
         WNDCLASSEXW wc = {sizeof(wc)};
         wc.lpfnWndProc = CoverProc;
@@ -221,25 +222,43 @@ void ShowCover() {
         RegisterClassExW(&wc);
         s_cover = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kCoverClass, L"",
                                   WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, g_instance, nullptr);
-        if (!s_cover) return;
+        if (!s_cover) return false;
         BOOL disable = TRUE;  // 不要系统给弹出窗口加的淡入淡出
         DwmSetWindowAttribute(s_cover, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
     }
-    POINT dst = {s_shotArea.left, s_shotArea.top};
-    SIZE size = {s_shotArea.right - s_shotArea.left, s_shotArea.bottom - s_shotArea.top};
-    POINT src = {s_shotArea.left - s_shotWindow.left, s_shotArea.top - s_shotWindow.top};
-    if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, s_shotDC, &src, 0, nullptr, ULW_OPAQUE)) return;
+    // 已经盖着就不再传一遍照片（十几 MB，正回到桌面时传会掉帧）。用整体透明度不透明的 ULW_ALPHA（不看逐像素透明度），
+    // 撤掉时只改透明度就能淡出
+    if (!s_coverShown) {
+        POINT dst = {s_shotArea.left, s_shotArea.top};
+        SIZE size = {s_shotArea.right - s_shotArea.left, s_shotArea.bottom - s_shotArea.top};
+        POINT src = {s_shotArea.left - s_shotWindow.left, s_shotArea.top - s_shotWindow.top};
+        BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, 0};
+        if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, s_shotDC, &src, 0, &blend, ULW_ALPHA)) return false;
+    }
     HWND above = GetWindow(s_desktopRoot, GW_HWNDPREV);  // 紧挨在桌面窗口上面的那个，照片放在它下面
     if (above == s_cover) above = GetWindow(s_cover, GW_HWNDPREV);
     SetWindowPos(s_cover, above ? above : HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     if (!s_coverShown) s_coverAt = NowMs();
     s_coverShown = true;
+    return true;
+}
+
+// 淡出照片再藏起来：照片和真桌面稍有不同（颜色、文字阴影）也不会一下跳变
+void FadeOutCover() {
+    if (!s_coverShown) return;
+    constexpr double kFadeMs = 150;
+    for (double start = NowMs(), t = 0; t < kFadeMs; t = NowMs() - start) {
+        BLENDFUNCTION blend = {AC_SRC_OVER, 0, static_cast<BYTE>(255 * (1 - t / kFadeMs)), 0};
+        if (!UpdateLayeredWindow(s_cover, nullptr, nullptr, nullptr, nullptr, nullptr, 0, &blend, ULW_ALPHA)) break;
+        WaitForVBlank();
+    }
+    HideCover();
 }
 
 // 要藏这个图标窗口：只有一块屏幕，用户也没关“显示桌面图标”
 bool WillHide(HWND list) { return list && GetSystemMetrics(SM_CMONITORS) == 1 && IsWindowVisible(list); }
 
-// 藏起记位置时找到的桌面图标窗口（这时桌面被全屏窗口挡着，藏了也看不出来）。照片在记位置时已经拍好了
+// 藏起记位置时找到的桌面图标窗口。照片在记位置时已经拍好了
 void HideIcons() {
     HWND list = s_savedList;
     if (s_hiddenList || !IsWindow(list) || !WillHide(list)) return;
@@ -249,6 +268,19 @@ void HideIcons() {
     s_hiddenList = list;
     s_hiddenAt = NowMs();
     Log(L"藏起桌面图标，任务栏回来、图标排回原位以后再显示");
+}
+
+// 打开自动隐藏之前：有照片的话先把照片盖上、等它上屏再藏图标（这时最大化动画可能还露着一部分桌面，先藏会看到图标闪没）。
+// 图标还藏着（上一轮没显示回来）的话照片重新贴一下
+void CoverAndHide() {
+    if (s_hiddenList) {
+        ShowCover();
+        return;
+    }
+    if (!IsWindow(s_savedList) || !WillHide(s_savedList)) return;
+    if (ShowCover()) WaitForVBlank();
+    HideIcons();
+    if (!s_hiddenList) HideCover();
 }
 
 // 上次关掉以后还没摆完又要打开自动隐藏（kCmdRehide），打开之前做：图标还藏着的话照片也接着用；已经显示回来的话，
@@ -274,19 +306,32 @@ void Reshoot() {
     }
 }
 
-// 显示图标；盖着照片的话等资源管理器把图标画出来再撤掉
+// 图标窗口刚显示出来：等资源管理器把它画完（最多 300 毫秒，不会卡住），再等两帧让 DWM 合成上屏
+void WaitPainted(HWND list) {
+    for (double start = NowMs(); IsWindow(list) && GetUpdateRect(list, nullptr, FALSE) && NowMs() - start < 300;) Pause(5);
+    DWORD_PTR result;
+    SendMessageTimeoutW(list, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 200, &result);  // 处理到它说明画图的消息已经处理完了
+    WaitForVBlank();
+    WaitForVBlank();
+}
+
+// 显示图标；盖着照片的话等资源管理器把图标画出来、上了屏，再淡出照片
 void ShowIcons() {
     if (!s_hiddenList) return;
-    if (IsWindow(s_hiddenList)) ShowWindow(s_hiddenList, SW_SHOWNA);
+    HWND list = s_hiddenList;
+    if (IsWindow(list)) ShowWindow(list, SW_SHOWNA);
     s_hiddenList = nullptr;
     SaveHidden(false);
     if (s_coverShown) {
-        Pause(100);
-        HideCover();
-        Log(L"显示桌面图标，撤掉照片（照片盖了 %.0f 毫秒）", NowMs() - s_coverAt);
+        double start = NowMs();
+        WaitPainted(list);
+        double painted = NowMs() - start;
+        FadeOutCover();
+        Log(L"显示桌面图标，等图标画好用了 %.0f 毫秒，淡出照片（照片盖了 %.0f 毫秒）", painted, NowMs() - s_coverAt);
     } else {
         Log(L"显示桌面图标");
     }
+    ReleaseShot();  // 下一轮重新拍
 }
 
 // 上次藏起、没来得及显示回来的
@@ -494,6 +539,7 @@ void RevealWhenBack(UINT session) {
         stable = changed && Same(now, last) ? stable + 1 : 0;
         last = std::move(now);
     }
+    if (!Current(session)) return;  // 又打开了自动隐藏：图标接着藏着
     Log(L"关掉自动隐藏后 %.0f 毫秒图标排回原位", NowMs() - start);
     ShowIcons();
 }
@@ -522,26 +568,26 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
         switch (msg.message) {
             case kCmdSave: {
                 Save();
-                SetEvent(s_savedEvent);  // 记完、拍完就让动画线程去开自动隐藏，藏图标不耽误它
-                HideIcons();
-                ShowCover();  // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面
+                // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面。藏好了再让动画线程去开自动隐藏，
+                // 免得资源管理器在图标还露着时就挪它们
+                CoverAndHide();
+                SetEvent(s_savedEvent);
                 break;
             }
             case kCmdRehide:
                 Reshoot();
+                CoverAndHide();
                 SetEvent(s_savedEvent);
-                HideIcons();
-                ShowCover();
                 break;
             case kCmdCover:
-                if (Current(static_cast<UINT>(msg.wParam))) ShowCover();
+                if (Current(static_cast<UINT>(msg.wParam)) && s_hiddenList) ShowCover();
                 break;
             case kCmdRestore: {
                 UINT session = static_cast<UINT>(msg.wParam);
                 // 资源管理器有时过一会儿又排一次，1 秒后再查一遍。
                 // 这期间用户在桌面上按过鼠标的话，只摆还停在资源管理器排的位置上的，别的可能是用户拖过的
                 bool pressed = false;
-                if (!RestoreWhenSettled(session, pressed)) {
+                if (!RestoreWhenSettled(session, pressed) || !Current(session)) {
                     Done(session);  // 又打开了自动隐藏：图标接着藏着
                     break;
                 }
