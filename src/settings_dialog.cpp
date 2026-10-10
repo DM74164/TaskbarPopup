@@ -1,7 +1,7 @@
 // 设置窗口：和迷你任务栏一样的液态玻璃面板，开关、滑块、名单都是自己画的。
 //
-// 分层窗口贴的是“玻璃 + 内容”的整张图：玻璃按窗口后面的屏幕内容折射，所以打开时、拖动以后、
-// 重新回到前台时都截一遍后面的屏幕（截的时候让本窗口暂时不进截图），再画一遍。
+// 分层窗口贴的是“玻璃 + 内容”的整张图：玻璃按窗口后面的屏幕内容折射。后面的画面定时截一遍
+// （截的时候让本窗口暂时不进截图），变了就重画；拖动时按新位置去截好的背景里取色，玻璃跟着实时变。
 #include "common.h"
 #include "version.h"
 
@@ -18,6 +18,7 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"TaskbarPopupSettings";
 constexpr UINT_PTR kTimerAnim = 1;  // 淡入、开关滑块的动画
+constexpr UINT_PTR kTimerLive = 2;  // 定时刷新玻璃后面的背景
 constexpr double kFadeMs = 180.0 * TP_ANIM_SCALE;
 constexpr double kKnobMs = 150.0 * TP_ANIM_SCALE;
 
@@ -560,24 +561,111 @@ void Render() {
     UpdateLayeredWindow(s_hwnd, nullptr, &s_pos, &size, s_canvasDC, &src, 0, &blend, ULW_ALPHA);
 }
 
-// 截下窗口后面的屏幕内容做玻璃的背景。窗口已经显示着的话先让它不进截图（Win10 2004 起支持），
-// 不支持时只好沿用上次截的
-void CaptureBehind() {
-    bool visible = IsWindowVisible(s_hwnd) && !IsIconic(s_hwnd);
-    bool excluded = false;
-    if (visible) {
-        excluded = SetWindowDisplayAffinity(s_hwnd, WDA_EXCLUDEFROMCAPTURE) != FALSE;
-        if (!excluded) return;
-        DwmFlush();
-        DwmFlush();
+// ---- 玻璃的背景 ----
+//
+// 截窗口后面的屏幕时让本窗口暂时不进截图（Win10 2004 起支持），屏幕上照常显示。
+// 不支持的系统上截到的会是自己，一叠加就越来越花，这时只用打开窗口那一刻截的背景
+
+int s_excludeWorks = 0;  // 0 = 还不知道，1 = 管用，-1 = 不管用
+bool s_moving = false;   // 正在拖动窗口
+int s_still = 0;         // 定时刷新时背景连续几次没变
+
+RECT PanelOnScreen() {
+    return {s_pos.x + static_cast<LONG>(s_panel.X), s_pos.y + static_cast<LONG>(s_panel.Y),
+            s_pos.x + static_cast<LONG>(s_panel.X + s_panel.Width), s_pos.y + static_cast<LONG>(s_panel.Y + s_panel.Height)};
+}
+
+bool BeginExclude() {
+    if (s_excludeWorks < 0) return false;
+    if (!SetWindowDisplayAffinity(s_hwnd, WDA_EXCLUDEFROMCAPTURE)) {  // Win10 2004 以前没有这个功能
+        s_excludeWorks = -1;
+        Log(L"设置窗口：系统不支持截图时排除本窗口（错误 %lu），玻璃背景不再实时刷新", GetLastError());
+        return false;
     }
-    RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
-    RECT panel = {s_pos.x + static_cast<LONG>(s_panel.X), s_pos.y + static_cast<LONG>(s_panel.Y),
-                  s_pos.x + static_cast<LONG>(s_panel.X + s_panel.Width), s_pos.y + static_cast<LONG>(s_panel.Y + s_panel.Height)};
-    s_glass.Capture(window, panel, s_scale);
-    if (excluded) SetWindowDisplayAffinity(s_hwnd, WDA_NONE);
+    DwmFlush();  // 等新的设置在下一次合成里生效
+    DwmFlush();
+    return true;
+}
+
+void EndExclude() { SetWindowDisplayAffinity(s_hwnd, WDA_NONE); }
+
+// 窗口显示着、第一次排除后截图时核对一下：面板中间一小块截到的和刚画上去的一模一样，说明排除不管用
+bool ExcludeWorks() {
+    if (s_excludeWorks) return s_excludeWorks > 0;
+    if (!s_bits || s_alpha != 255 || s_canvasW != s_width || s_canvasH != s_height) return true;  // 还判断不了，先当管用
+    int size = static_cast<int>(Px(40));
+    int x0 = static_cast<int>(s_panel.X + s_panel.Width / 2) - size / 2;
+    int y0 = static_cast<int>(s_panel.Y + s_panel.Height / 2) - size / 2;
+    RECT r = {s_pos.x + x0, s_pos.y + y0, s_pos.x + x0 + size, s_pos.y + y0 + size};
+    std::vector<DWORD> shot;
+    if (!CaptureScreen(r, shot)) return true;
+    int same = 0;
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x)
+            if ((shot[static_cast<size_t>(y) * size + x] & 0xFFFFFF) ==
+                (s_bits[static_cast<size_t>(y0 + y) * s_width + x0 + x] & 0xFFFFFF))
+                ++same;
+    s_excludeWorks = same * 10 >= size * size * 9 ? -1 : 1;
+    if (s_excludeWorks < 0) Log(L"设置窗口：截图时排除本窗口不管用，玻璃背景不再实时刷新");
+    return s_excludeWorks > 0;
+}
+
+// 截下窗口后面的屏幕内容做玻璃的背景；extra：四周再多截这么多像素（拖动时用，挪一段距离内不用重新截）
+void CaptureBehind(int extra = 0) {
+    bool visible = IsWindowVisible(s_hwnd) && !IsIconic(s_hwnd);
+    if (visible) {
+        if (!BeginExclude()) return;
+        if (!ExcludeWorks()) {
+            EndExclude();
+            return;
+        }
+    }
+    RECT window = {s_pos.x - extra, s_pos.y - extra, s_pos.x + s_width + extra, s_pos.y + s_height + extra};
+    s_glass.Capture(window, PanelOnScreen(), s_scale);
+    if (visible) EndExclude();
     s_baseValid = false;
     s_capturedAt = NowMs();
+}
+
+// 拖动中：窗口挪出了已经截好的范围才重新截（窗口四周再留 400 像素）
+void FollowMove() {
+    int pad = static_cast<int>(std::lround(Px(28)));
+    RECT need = {s_pos.x - pad, s_pos.y - pad, s_pos.x + s_width + pad, s_pos.y + s_height + pad};
+    MONITORINFO mi = {sizeof(mi)};
+    if (GetMonitorInfoW(MonitorFromRect(&need, MONITOR_DEFAULTTONEAREST), &mi)) IntersectRect(&need, &need, &mi.rcMonitor);
+    const RECT& have = s_glass.Area();
+    if (need.left < have.left || need.top < have.top || need.right > have.right || need.bottom > have.bottom)
+        CaptureBehind(static_cast<int>(Px(400)));
+    s_baseValid = false;  // 玻璃按新位置去背景里取色
+    Render();
+}
+
+// 定时看看后面的画面变了没有（视频、动画、别的窗口挪动）：变了就重画，一直不变就放慢
+void LiveTick() {
+    UINT next = 400;
+    if (!s_moving && IsWindowVisible(s_hwnd) && !IsIconic(s_hwnd) && s_alpha == 255 && s_excludeWorks >= 0) {
+        if (!BeginExclude()) {
+            KillTimer(s_hwnd, kTimerLive);
+            return;
+        }
+        if (!ExcludeWorks()) {
+            EndExclude();
+            KillTimer(s_hwnd, kTimerLive);
+            return;
+        }
+        bool changed = s_glass.Refresh(PanelOnScreen());
+        EndExclude();
+        if (changed) {
+            s_baseValid = false;
+            Render();
+            s_still = 0;
+        } else {
+            ++s_still;
+        }
+        next = changed ? 60 : (s_still < 15 ? 120 : 400);
+        if (GetForegroundWindow() != s_hwnd) next = std::max<UINT>(next, 150);
+    }
+    SetTimer(s_hwnd, kTimerLive, next, nullptr);
 }
 
 // 布局变了（名单增删、换了显示器）：上边缘不动，大小跟着变，背景重新截
@@ -602,8 +690,8 @@ void Relayout(bool keepTop) {
 
 // ---- 动画 ----
 
-bool Animating() {
-    if (NowMs() - s_openedAt < kFadeMs) return true;
+bool Animating(double now) {
+    if (now - s_openedAt < kFadeMs) return true;
     for (int i = 0; i < kToggleCount; ++i)
         if (s_knob[i] != (s_v.on[i] ? 1.0f : 0.0f)) return true;
     return false;
@@ -622,7 +710,7 @@ void StepAnimation() {
         if (t >= 1) s_knob[i] = target;
     }
     Render();
-    if (!Animating()) KillTimer(s_hwnd, kTimerAnim);
+    if (!Animating(now)) KillTimer(s_hwnd, kTimerAnim);
 }
 
 void StartAnimation() { SetTimer(s_hwnd, kTimerAnim, 15, nullptr); }
@@ -858,6 +946,8 @@ void SetHover(const Item& it) {
 
 void ReleaseAll() {
     KillTimer(s_hwnd, kTimerAnim);
+    KillTimer(s_hwnd, kTimerLive);
+    s_moving = false;
     ReleaseCanvas();
     s_base.clear();
     s_base.shrink_to_fit();
@@ -882,7 +972,14 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return HTCLIENT;
         }
 
+        case WM_ENTERSIZEMOVE:
+            // 拖动时玻璃跟着位置实时重画：先把窗口四周一大片背景截好
+            s_moving = true;
+            CaptureBehind(static_cast<int>(Px(400)));
+            return 0;
+
         case WM_EXITSIZEMOVE: {
+            s_moving = false;
             RECT r;
             GetWindowRect(hwnd, &r);
             s_pos = {r.left, r.top};
@@ -895,6 +992,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             RECT r;
             GetWindowRect(hwnd, &r);
             s_pos = {r.left, r.top};
+            if (s_moving && s_excludeWorks >= 0) FollowMove();
             return 0;
         }
 
@@ -992,6 +1090,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case WM_TIMER:
             if (wParam == kTimerAnim) StepAnimation();
+            else if (wParam == kTimerLive) LiveTick();
             return 0;
 
         case WM_DPICHANGED: {
@@ -1066,6 +1165,7 @@ void SettingsDialog_Show() {
     s_hover = s_press = s_focus = {};
     s_showFocus = false;
     s_drag = -1;
+    s_still = 0;
 
     // 居中到鼠标所在的显示器
     POINT pt;
@@ -1096,6 +1196,7 @@ void SettingsDialog_Show() {
     ForceForeground(s_hwnd);
     SetFocus(s_hwnd);
     StartAnimation();
+    SetTimer(s_hwnd, kTimerLive, static_cast<UINT>(kFadeMs) + 100, nullptr);  // 淡入完了再开始跟着背景刷新
 }
 
 }  // namespace app
