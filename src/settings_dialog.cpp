@@ -758,10 +758,11 @@ bool StartShot() {
     return true;
 }
 
-// 等后台截完（关窗口时），没处理的结果扔掉
+// 等后台截完（关窗口时），没处理的结果扔掉。截图卡住时最多等 1 秒：线程截完发消息时窗口已经没了，
+// 发不出去就自己释放
 void StopShot() {
     if (!s_shotThread) return;
-    WaitForSingleObject(s_shotThread, INFINITE);
+    if (WaitForSingleObject(s_shotThread, 1000) == WAIT_TIMEOUT) Log(L"设置窗口：后台截图没有及时结束");
     CloseHandle(s_shotThread);
     s_shotThread = nullptr;
     MSG msg;
