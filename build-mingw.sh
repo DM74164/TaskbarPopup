@@ -17,5 +17,5 @@ x86_64-w64-mingw32-g++ -std=c++17 -O2 -s -Wall -Wextra -Wno-missing-field-initia
     -DUNICODE -D_UNICODE -DNOMINMAX -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 \
     src/*.cpp build-app.res -o TaskbarPopup.exe \
     -mwindows -municode -static -static-libgcc -static-libstdc++ \
-    -luser32 -lgdi32 -lgdiplus -lshell32 -lcomctl32 -ldwmapi -lshcore -ladvapi32 -lole32 -luuid -loleaut32 -ldxva2
+    -luser32 -lgdi32 -lgdiplus -lshell32 -lcomctl32 -ldwmapi -lshcore -ladvapi32 -lole32 -luuid -loleaut32 -ldxva2 -lwinhttp
 rm -f build-app.res

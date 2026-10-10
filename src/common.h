@@ -45,6 +45,7 @@ struct Settings {
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
+    bool checkUpdates = false;   // 自动检查更新
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
 };
 
@@ -86,12 +87,14 @@ constexpr UINT_PTR kTimerFullscreen = 2;
 constexpr UINT_PTR kTimerShowPopup = 3;
 constexpr UINT_PTR kTimerAfterAutoHide = 4;  // 关掉自动隐藏以后收拾窗口和桌面图标
 constexpr UINT_PTR kTimerRetryOff = 5;       // 没能关掉自动隐藏，过一会儿再试
+constexpr UINT_PTR kTimerUpdate = 6;         // 自动检查更新
 
 // 主窗口消息
 constexpr UINT WM_APP_TRAY = WM_APP + 1;       // 托盘图标的鼠标事件
 constexpr UINT WM_APP_LONGPRESS = WM_APP + 2;  // 钩子线程通知：Win 键长按了
 constexpr UINT WM_APP_AUTOHIDE_OFF = WM_APP + 3;  // 动画线程通知：关自动隐藏的结果，wParam 是请求编号，lParam 非 0 = 关掉了
 constexpr UINT WM_APP_AUTOHIDE_ON = WM_APP + 4;   // 动画线程通知：开自动隐藏的结果，wParam 是请求编号，lParam 非 0 = 开了
+constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // 检查更新的线程通知：结果出来了，交给 Update_OnResult
 
 // ---------------- 最大化 / 全屏时隐藏任务栏 ----------------
 void Fullscreen_SetEnabled(bool enabled);
@@ -177,8 +180,16 @@ bool AdminTask_Exists();      // 以管理员身份开机自启的计划任务
 bool AdminTask_Set(bool enabled);
 bool AdminTask_Run();
 bool AdminTask_MatchesExe();  // 计划任务是用现在这个 exe 的路径建的
-bool ShowTrayBalloon(const wchar_t* title, const wchar_t* text);  // 资源管理器没在运行时显示不了，返回 false
+// 资源管理器没在运行时显示不了，返回 false。clickUrl 不为空：点气泡时以普通权限打开这个网址
+bool ShowTrayBalloon(const wchar_t* title, const wchar_t* text, const wchar_t* clickUrl = nullptr);
 void Pinned_ClearCache();
+
+// ---------------- 检查更新（update.cpp，默认关闭）----------------
+// 向 GitHub Releases 要最新版本，有新版本时弹托盘气泡，点了打开下载页面（只打开网页，不下载、不安装）
+void Update_Configure();             // 按 g_settings.checkUpdates 开关自动检查：启动后 15 秒一次，之后每天一次
+void Update_CheckNow(bool manual);   // 在后台线程上检查，同时只有一次；manual：结果不管怎样都告诉用户
+void Update_OnResult();              // 主窗口收到 WM_APP_UPDATE
+void Update_Stop();                  // 退出时：停掉计时器，稍等后台线程结束
 
 // ---------------- 所有应用：打字筛选时搜索用（apps.cpp）----------------
 constexpr UINT WM_APP_APPS = WM_APP + 31;  // 后台读完了，发给 Apps_Refresh 的 notify
