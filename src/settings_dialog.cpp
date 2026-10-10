@@ -36,13 +36,14 @@ constexpr float kRowPad = 14;  // 卡片里左右的边距
 constexpr float kChipH = 28;
 
 // 开关
-enum Toggle { kAutoHide, kLongPress, kPinned, kLevels, kAutoStart, kUpdates, kToggleCount };
+enum Toggle { kAutoHide, kKeepFloats, kLongPress, kPinned, kLevels, kAutoStart, kUpdates, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
 };
 const ToggleText kToggleText[kToggleCount] = {
     {L"最大化或全屏时隐藏任务栏", L"窗口铺满整块屏幕，要用任务栏时长按 Win"},
+    {L"点全屏窗口时小窗口留在上面", L"浮在全屏窗口上的小窗口不会被盖住"},
     {L"长按 Win 键弹出迷你任务栏", L"左键单击托盘图标也能弹出"},
     {L"显示固定在任务栏的应用", nullptr},
     {L"显示音量和亮度调节", nullptr},
@@ -267,7 +268,8 @@ void BuildLayout() {
     s_items.push_back({kClose, 0, RectF(margin + panelW - Px(12) - Px(32), margin + Px(10), Px(32), Px(32))});
 
     float left =
-        AddGroup(px0, top, L"任务栏", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); }});
+        AddGroup(px0, top, L"任务栏", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
+                                        [](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }});
     left = AddGroup(px0, left, L"迷你任务栏",
                     {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); },
                      [](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); },
@@ -1027,6 +1029,7 @@ void Apply() {
     // 只改窗口里动过的项，其余的保持现在的值（窗口开着的时候可能在别处改过）
     auto changed = [](int t) { return s_v.on[t] != s_initial.on[t]; };
     if (changed(kAutoHide)) g_settings.autoHideOnFullscreen = s_v.on[kAutoHide];
+    if (changed(kKeepFloats)) g_settings.keepFloatsOnTop = s_v.on[kKeepFloats];
     if (changed(kLongPress)) g_settings.longPressPopup = s_v.on[kLongPress];
     if (changed(kPinned)) g_settings.showPinnedApps = s_v.on[kPinned];
     if (changed(kLevels)) g_settings.showLevels = s_v.on[kLevels];
@@ -1388,6 +1391,7 @@ void SettingsDialog_Show() {
     if (!s_fontFamily) s_fontFamily.reset(FontFamily::GenericSansSerif()->Clone());
 
     s_initial.on[kAutoHide] = g_settings.autoHideOnFullscreen;
+    s_initial.on[kKeepFloats] = g_settings.keepFloatsOnTop;
     s_initial.on[kLongPress] = g_settings.longPressPopup;
     s_initial.on[kPinned] = g_settings.showPinnedApps;
     s_initial.on[kLevels] = g_settings.showLevels;

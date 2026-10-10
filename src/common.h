@@ -48,6 +48,7 @@ struct Settings {
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
+    bool keepFloatsOnTop = true; // 点全屏（最大化）的窗口时，浮在上面的小窗口不被盖住
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
@@ -264,6 +265,9 @@ void Brightness_Stop();                              // 退出前结束后台线
 
 // ---------------- 设置窗口 ----------------
 void SettingsDialog_Show();
+
+// ---------------- 小窗口留在全屏窗口上面 ----------------
+void FloatWindows_Configure(bool enabled);
 HWND SettingsDialog_Hwnd();
 
 // ---------------- 液态玻璃材质 ----------------
