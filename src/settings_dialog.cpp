@@ -905,6 +905,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 CaptureBehind();
                 Render();
             }
+            // 每次回到前台都把键盘焦点放回来（DefWindowProc 本来会做），不然按键会变成系统键、按一下响一声
+            if (LOWORD(wParam) != WA_INACTIVE && !HIWORD(wParam)) SetFocus(hwnd);
             return 0;
 
         case WM_KEYDOWN:
@@ -935,10 +937,13 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             s_press = it;
             s_showFocus = false;
-            if (it.kind != kNoItem) s_focus = it;
-            if (it.kind == kSliderRow) {
+            if (it.kind != kNoItem) {
+                s_focus = it;
+                SetCapture(hwnd);  // 按下后拖到窗口外松开也能收到 WM_LBUTTONUP
+            }
+            // 滑块只有点在槽附近才跳过去，点标题和数值只是选中它
+            if (it.kind == kSliderRow && std::fabs(GET_Y_LPARAM(lParam) - s_sliderGeom[it.index].cy) <= Px(12)) {
                 s_drag = it.index;
-                SetCapture(hwnd);
                 SetSliderFromX(s_drag, GET_X_LPARAM(lParam));
             }
             Render();
@@ -948,10 +953,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_LBUTTONUP: {
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             Item pressed = s_press;
+            bool dragged = s_drag >= 0;
             s_press = {};
-            if (s_drag >= 0) {
-                s_drag = -1;
-                ReleaseCapture();
+            s_drag = -1;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            if (dragged || pressed.kind == kSliderRow) {
                 Render();
                 return 0;
             }
@@ -961,8 +967,9 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         case WM_CAPTURECHANGED:
-            if (s_drag >= 0 && reinterpret_cast<HWND>(lParam) != hwnd) {
+            if ((s_drag >= 0 || s_press.kind != kNoItem) && reinterpret_cast<HWND>(lParam) != hwnd) {
                 s_drag = -1;
+                s_press = {};
                 Render();
             }
             return 0;
@@ -971,7 +978,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd, &pt);
             Item it = HitTest(pt.x, pt.y);
-            int steps = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
+            // 触控板、高精度滚轮一次只给零点几格，攒够一格再动
+            static int rest = 0;
+            rest += GET_WHEEL_DELTA_WPARAM(wParam);
+            int steps = rest / WHEEL_DELTA;
+            rest -= steps * WHEEL_DELTA;
             if (it.kind == kSliderRow && steps) {
                 NudgeSlider(it.index, steps);
                 Render();
