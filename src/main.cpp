@@ -354,6 +354,9 @@ void LoadSettings() {
         g_settings.hotkey[id] = ParseHotkey(buf.data());
         std::wstring hold = std::wstring(kHotkeyKeys[id]) + L"Hold";
         g_settings.hotkeyHold[id] = GetPrivateProfileIntW(L"General", hold.c_str(), 0, f.c_str()) != 0;
+        // 没设过的话用长按 Win 的时长（以前长按的快捷键和它共用）
+        int holdMs = static_cast<int>(GetPrivateProfileIntW(L"General", (hold + L"Ms").c_str(), g_settings.longPressMs, f.c_str()));
+        g_settings.hotkeyHoldMs[id] = std::max(kMinLongPressMs, std::min(holdMs, kMaxLongPressMs));
     }
     GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.excludeApps.clear();
@@ -386,6 +389,8 @@ void SaveSettings() {
         WritePrivateProfileStringW(L"General", kHotkeyKeys[id], HotkeyText(g_settings.hotkey[id]).c_str(), f.c_str());
         std::wstring hold = std::wstring(kHotkeyKeys[id]) + L"Hold";
         WritePrivateProfileStringW(L"General", hold.c_str(), g_settings.hotkeyHold[id] ? L"1" : L"0", f.c_str());
+        WritePrivateProfileStringW(L"General", (hold + L"Ms").c_str(), std::to_wstring(g_settings.hotkeyHoldMs[id]).c_str(),
+                                   f.c_str());
     }
     std::wstring exclude;
     for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;

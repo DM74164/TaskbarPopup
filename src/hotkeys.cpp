@@ -151,8 +151,12 @@ void Hotkeys_Apply() {
             });
             if (same == bindings.end()) same = bindings.insert(bindings.end(), {HotkeyMods(want), HotkeyVk(want)});
             (hold ? same->hold : same->tap) = id;
+            if (hold) same->holdMs = g_settings.hotkeyHoldMs[id];
             if (!s_suspended && (s_logged[id] != want || s_loggedHold[id] != hold)) {
-                Log(L"快捷键 %ls（%ls）：%ls", HotkeyText(want).c_str(), hold ? L"长按" : L"单按", ActionName(id));
+                if (hold)
+                    Log(L"快捷键 %ls（长按 %d 毫秒）：%ls", HotkeyText(want).c_str(), g_settings.hotkeyHoldMs[id], ActionName(id));
+                else
+                    Log(L"快捷键 %ls（单按）：%ls", HotkeyText(want).c_str(), ActionName(id));
                 s_logged[id] = want;
                 s_loggedHold[id] = hold;
             }
