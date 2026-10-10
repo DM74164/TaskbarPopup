@@ -5,7 +5,7 @@
 // 工作区一变，资源管理器就把桌面上所有图标按比例挪一小段（关掉网格对齐也一样）。打开自动隐藏时桌面被全屏窗口挡着，
 // 看不见；关掉时桌面正露着，图标挪回去那一下看得清清楚楚。所以打开自动隐藏前把桌面图标藏起来，
 // 关掉以后等图标都排回原位再显示（只有一块屏幕时这么做：多块屏幕的话别的屏上的桌面一直露着，不能藏）。
-// 资源管理器排图标要几百毫秒，所以藏之前先给桌面拍张照（被窗口挡着也拍得到），藏起图标的同时把照片垫在桌面上面、
+// 资源管理器排图标要几百毫秒，所以打开自动隐藏之前先给桌面拍张照（被窗口挡着也拍得到），藏起图标的同时把照片垫在桌面上面、
 // 所有窗口下面（被全屏窗口挡着），回到桌面那一刻看到的就是照片；图标排好、显示出来以后再撤掉照片：
 // 看上去图标一直在原处。
 // 桌面的 IFolderView 通过 IShellWindows 找到（Raymond Chen 介绍过的办法），调用都跨进程到资源管理器，
@@ -67,7 +67,8 @@ HWND s_desktopRoot = nullptr;    // 放图标的顶层窗口（Progman / WorkerW
 HWND s_cover = nullptr;
 bool s_coverShown = false;
 double s_coverAt = 0;
-// 记位置时（打开自动隐藏之前）图标窗口的位置大小和工作区：拍照、藏图标在开自动隐藏之后做，那时这些可能已经变了
+// 记位置时（打开自动隐藏之前）的图标窗口、它的位置大小和工作区：藏图标在开自动隐藏之后做，那时位置大小和工作区可能已经变了
+HWND s_savedList = nullptr;
 RECT s_savedListRect = {};
 RECT s_savedWork = {};
 
@@ -233,25 +234,15 @@ void ShowCover() {
     s_coverShown = true;
 }
 
-// 藏起桌面图标（这时桌面被全屏窗口挡着，藏了也看不出来）。藏之前先拍照
-void HideIcons(IFolderView* view) {
-    if (s_hiddenList || GetSystemMetrics(SM_CMONITORS) > 1) return;
-    HWND list = IconList(view);
-    if (!list) {
-        Log(L"找不到放桌面图标的窗口，不藏图标");
-        return;
-    }
-    if (!IsWindowVisible(list)) return;  // 用户本来就关了“显示桌面图标”
-    RECT rect = s_savedListRect;
-    Capture(list);
-    // 资源管理器已经按新的工作区挪图标了（图标的位置是相对图标窗口左上角的，它挪了也算）：照片不能用
-    RECT now;
-    if (s_shot && (!AtSaved(Read()) || !GetWindowRect(list, &now) || now.left != rect.left || now.top != rect.top)) {
-        ReleaseShot();
-        Log(L"拍照时图标已经在挪了，照片不用");
-    }
+// 要藏这个图标窗口：只有一块屏幕，用户也没关“显示桌面图标”
+bool WillHide(HWND list) { return list && GetSystemMetrics(SM_CMONITORS) == 1 && IsWindowVisible(list); }
+
+// 藏起记位置时找到的桌面图标窗口（这时桌面被全屏窗口挡着，藏了也看不出来）。照片在记位置时已经拍好了
+void HideIcons() {
+    HWND list = s_savedList;
+    if (s_hiddenList || !IsWindow(list) || !WillHide(list)) return;
     SaveHidden(true);  // 先记下再藏，藏的这一刻被强行结束也能找回来
-    s_hiddenRect = rect;
+    s_hiddenRect = s_savedListRect;
     ShowWindow(list, SW_HIDE);
     s_hiddenList = list;
     s_hiddenAt = NowMs();
@@ -308,6 +299,7 @@ bool DesktopPressed() {
 
 void Save() {
     Clear();
+    s_savedList = nullptr;
     double start = NowMs();
     Recover();
     Ref<IFolderView> view;
@@ -328,16 +320,22 @@ void Save() {
         Log(L"记下 %d 个桌面图标的位置，用了 %.0f 毫秒", static_cast<int>(s_icons.size()), NowMs() - start);
         SetRectEmpty(&s_savedListRect);
         SetRectEmpty(&s_savedWork);
-        if (HWND list = IconList(view.p)) {
+        s_savedList = IconList(view.p);
+        if (s_savedList) {
             MONITORINFO mi = {sizeof(mi)};
-            GetWindowRect(list, &s_savedListRect);
-            if (GetMonitorInfoW(MonitorFromWindow(list, MONITOR_DEFAULTTONEAREST), &mi)) s_savedWork = mi.rcWork;
+            GetWindowRect(s_savedList, &s_savedListRect);
+            if (GetMonitorInfoW(MonitorFromWindow(s_savedList, MONITOR_DEFAULTTONEAREST), &mi)) s_savedWork = mi.rcWork;
+            // 照片也要在打开自动隐藏之前拍：一打开资源管理器就开始挪图标，这时再找桌面、拍照都要排队等它，拍到的已经挪了
+            if (WillHide(s_savedList)) Capture(s_savedList);
+        } else if (GetSystemMetrics(SM_CMONITORS) == 1) {
+            Log(L"找不到放桌面图标的窗口，不藏图标");
         }
     }
-    // 等的一方已经不等了：自动隐藏可能已经打开，读到的也许是重新排过的位置
+    // 等的一方已经不等了：自动隐藏可能已经打开，读到的也许是重新排过的位置，照片也许拍到了挪动中的图标
     if (s_discard.exchange(false)) {
         Log(L"记图标位置太慢，这次不摆回去");
         Clear();
+        ReleaseShot();
     }
 }
 
@@ -499,9 +497,8 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
         switch (msg.message) {
             case kCmdSave: {
                 Save();
-                SetEvent(s_savedEvent);  // 记完就让动画线程去开自动隐藏，拍照、藏图标不耽误它（资源管理器过一会儿才挪图标）
-                Ref<IFolderView> view;
-                if (DesktopView(view)) HideIcons(view.p);
+                SetEvent(s_savedEvent);  // 记完、拍完就让动画线程去开自动隐藏，藏图标不耽误它
+                HideIcons();
                 ShowCover();  // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面
                 break;
             }
