@@ -476,8 +476,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        HWND dlg = SettingsDialog_Hwnd();
-        if (dlg && IsDialogMessageW(dlg, &msg)) continue;  // 设置窗口里的 Tab / 回车 / Esc
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
