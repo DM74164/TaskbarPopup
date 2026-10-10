@@ -20,6 +20,7 @@ add_executable(TaskbarPopup WIN32
     src/elevation.cpp
     src/apps.cpp
     src/thumbnail.cpp
+    src/update.cpp
     src/app.rc
 )
 
@@ -28,7 +29,7 @@ target_compile_definitions(TaskbarPopup PRIVATE
 
 target_link_libraries(TaskbarPopup PRIVATE
     user32 gdi32 gdiplus shell32 comctl32 dwmapi shcore advapi32 ole32 uuid
-    oleaut32 dxva2)
+    oleaut32 dxva2 winhttp)
 
 if(MSVC)
     target_compile_options(TaskbarPopup PRIVATE /utf-8 /W4)
