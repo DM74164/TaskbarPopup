@@ -5,6 +5,9 @@
 // 工作区一变，资源管理器就把桌面上所有图标按比例挪一小段（关掉网格对齐也一样）。打开自动隐藏时桌面被全屏窗口挡着，
 // 看不见；关掉时桌面正露着，图标挪回去那一下看得清清楚楚。所以打开自动隐藏前把桌面图标藏起来，
 // 关掉以后等图标都排回原位再显示（只有一块屏幕时这么做：多块屏幕的话别的屏上的桌面一直露着，不能藏）。
+// 资源管理器排图标要几百毫秒，所以藏之前先给桌面拍张照（被窗口挡着也拍得到），藏起图标的同时把照片垫在桌面上面、
+// 所有窗口下面（被全屏窗口挡着），回到桌面那一刻看到的就是照片；图标排好、显示出来以后再撤掉照片：
+// 看上去图标一直在原处。
 // 桌面的 IFolderView 通过 IShellWindows 找到（Raymond Chen 介绍过的办法），调用都跨进程到资源管理器，
 // 图标多的时候要几百毫秒，所以放在单独的线程上做，不耽误主线程和动画。
 #include "common.h"
@@ -29,6 +32,8 @@ constexpr UINT kCmdMark = WM_APP + 4;
 constexpr UINT kCmdUpdate = WM_APP + 5;
 constexpr UINT kCmdRecover = WM_APP + 6;  // 上次藏起的桌面图标没来得及显示回来（被强行结束、崩溃）
 constexpr UINT kCmdReveal = WM_APP + 7;   // 自动隐藏刚关掉：图标排回原位就显示。wParam：会话编号
+constexpr UINT kCmdCover = WM_APP + 8;    // 要回到桌面了：照片重新垫一下（资源管理器可能改过桌面窗口的层次）
+constexpr wchar_t kCoverClass[] = L"TaskbarPopupDesktopCover";
 
 struct IconPos {
     PITEMID_CHILD pidl;
@@ -52,6 +57,19 @@ std::vector<POINT> s_mark;     // Mark 时读到的位置，和 s_icons 一一�
 HWND s_hiddenList = nullptr;   // 藏起来的桌面图标窗口，只在图标线程上用
 RECT s_hiddenRect = {};        // 藏起时它的位置大小（工作区变了它可能跟着变）
 double s_hiddenAt = 0;
+// 桌面的照片，和盖在桌面上的照片窗口。只在图标线程上用
+HDC s_shotDC = nullptr;
+HBITMAP s_shot = nullptr;
+HGDIOBJ s_shotOld = nullptr;
+RECT s_shotWindow = {};          // 拍照时桌面窗口在屏幕上的范围（照片的原点）
+RECT s_shotArea = {};            // 要盖住的范围：拍照时的工作区
+HWND s_desktopRoot = nullptr;    // 放图标的顶层窗口（Progman / WorkerW），照片窗口紧贴在它上面
+HWND s_cover = nullptr;
+bool s_coverShown = false;
+double s_coverAt = 0;
+// 记位置时（打开自动隐藏之前）图标窗口的位置大小和工作区：拍照、藏图标在开自动隐藏之后做，那时这些可能已经变了
+RECT s_savedListRect = {};
+RECT s_savedWork = {};
 
 // 用完自动 Release 的接口指针
 template <class T>
@@ -106,25 +124,153 @@ HWND IconList(IFolderView* view) {
     return FindWindowExW(defView, nullptr, L"SysListView32", nullptr);
 }
 
-// 打开自动隐藏之前：藏起桌面图标（这时桌面被全屏窗口挡着，藏了也看不出来）
+std::vector<POINT> Read();
+bool AtSaved(const std::vector<POINT>& now);
+
+// 等 ms 毫秒，期间照样处理别的线程发来的消息：资源管理器广播工作区变化时要等每个顶层窗口（包括这个线程的照片窗口
+// 和 COM 的隐藏窗口）处理完，这里干睡会拖慢它
+void Pause(DWORD ms) {
+    for (DWORD start = GetTickCount(), elapsed = 0; elapsed < ms; elapsed = GetTickCount() - start) {
+        if (MsgWaitForMultipleObjectsEx(0, nullptr, ms - elapsed, QS_SENDMESSAGE, 0) != WAIT_OBJECT_0) break;
+        MSG msg;
+        PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+    }
+}
+
+void ReleaseShot() {
+    if (s_shotDC) {
+        SelectObject(s_shotDC, s_shotOld);
+        DeleteDC(s_shotDC);
+    }
+    if (s_shot) DeleteObject(s_shot);
+    s_shotDC = nullptr;
+    s_shot = nullptr;
+    s_shotOld = nullptr;
+}
+
+LRESULT CALLBACK CoverProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_NCHITTEST: return HTTRANSPARENT;
+        case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void HideCover() {
+    if (!s_coverShown) return;
+    ShowWindow(s_cover, SW_HIDE);
+    s_coverShown = false;
+}
+
+// 给桌面拍照（被窗口挡着也拍得到），只要工作区那一块。拍到的是全黑（没拍成）就不要
+void Capture(HWND list) {
+    HideCover();
+    ReleaseShot();
+    HWND root = GetAncestor(list, GA_ROOT);
+    RECT rr;
+    RECT area;
+    if (!root || !GetWindowRect(root, &rr) || !IntersectRect(&area, &s_savedWork, &rr)) return;
+    int w = rr.right - rr.left, h = rr.bottom - rr.top;
+    BITMAPINFO bi = {};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    if (!bmp) {
+        if (dc) DeleteDC(dc);
+        return;
+    }
+    HGDIOBJ old = SelectObject(dc, bmp);
+    double start = NowMs();
+    bool ok = PrintWindow(root, dc, PW_RENDERFULLCONTENT) != FALSE;
+    GdiFlush();
+    if (ok) {
+        ok = false;
+        const DWORD* px = static_cast<const DWORD*>(bits);
+        for (int y = area.top - rr.top; y < area.bottom - rr.top && !ok; y += 37)
+            for (int x = area.left - rr.left; x < area.right - rr.left && !ok; x += 41)
+                ok = (px[static_cast<size_t>(y) * w + x] & 0xFFFFFF) != 0;
+    }
+    if (!ok) {
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+        Log(L"没拍到桌面的照片，回到桌面时图标会晚一下出现");
+        return;
+    }
+    s_shotDC = dc;
+    s_shot = bmp;
+    s_shotOld = old;
+    s_shotWindow = rr;
+    s_shotArea = area;
+    s_desktopRoot = root;
+    Log(L"给桌面拍了照，用了 %.0f 毫秒", NowMs() - start);
+}
+
+// 要回到桌面了，图标还藏着：把照片盖在桌面上。照片窗口紧贴在桌面窗口上面，别的窗口都在它上面，鼠标点得穿
+void ShowCover() {
+    if (!s_shot || !s_hiddenList || !IsWindow(s_desktopRoot)) return;
+    if (!s_cover) {
+        WNDCLASSEXW wc = {sizeof(wc)};
+        wc.lpfnWndProc = CoverProc;
+        wc.hInstance = g_instance;
+        wc.lpszClassName = kCoverClass;
+        RegisterClassExW(&wc);
+        s_cover = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kCoverClass, L"",
+                                  WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, g_instance, nullptr);
+        if (!s_cover) return;
+        BOOL disable = TRUE;  // 不要系统给弹出窗口加的淡入淡出
+        DwmSetWindowAttribute(s_cover, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
+    }
+    POINT dst = {s_shotArea.left, s_shotArea.top};
+    SIZE size = {s_shotArea.right - s_shotArea.left, s_shotArea.bottom - s_shotArea.top};
+    POINT src = {s_shotArea.left - s_shotWindow.left, s_shotArea.top - s_shotWindow.top};
+    if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, s_shotDC, &src, 0, nullptr, ULW_OPAQUE)) return;
+    HWND above = GetWindow(s_desktopRoot, GW_HWNDPREV);  // 紧挨在桌面窗口上面的那个，照片放在它下面
+    if (above == s_cover) above = GetWindow(s_cover, GW_HWNDPREV);
+    SetWindowPos(s_cover, above ? above : HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (!s_coverShown) s_coverAt = NowMs();
+    s_coverShown = true;
+}
+
+// 藏起桌面图标（这时桌面被全屏窗口挡着，藏了也看不出来）。藏之前先拍照
 void HideIcons(IFolderView* view) {
     if (s_hiddenList || GetSystemMetrics(SM_CMONITORS) > 1) return;
     HWND list = IconList(view);
-    if (!list || !IsWindowVisible(list)) return;  // 用户本来就关了“显示桌面图标”
+    if (!list) {
+        Log(L"找不到放桌面图标的窗口，不藏图标");
+        return;
+    }
+    if (!IsWindowVisible(list)) return;  // 用户本来就关了“显示桌面图标”
+    RECT rect = s_savedListRect;
+    Capture(list);
+    // 资源管理器已经按新的工作区挪图标了（图标的位置是相对图标窗口左上角的，它挪了也算）：照片不能用
+    RECT now;
+    if (s_shot && (!AtSaved(Read()) || !GetWindowRect(list, &now) || now.left != rect.left || now.top != rect.top)) {
+        ReleaseShot();
+        Log(L"拍照时图标已经在挪了，照片不用");
+    }
     SaveHidden(true);  // 先记下再藏，藏的这一刻被强行结束也能找回来
-    GetWindowRect(list, &s_hiddenRect);
+    s_hiddenRect = rect;
     ShowWindow(list, SW_HIDE);
     s_hiddenList = list;
     s_hiddenAt = NowMs();
     Log(L"藏起桌面图标，任务栏回来、图标排回原位以后再显示");
 }
 
+// 显示图标；盖着照片的话等资源管理器把图标画出来再撤掉
 void ShowIcons() {
     if (!s_hiddenList) return;
     if (IsWindow(s_hiddenList)) ShowWindow(s_hiddenList, SW_SHOWNA);
     s_hiddenList = nullptr;
     SaveHidden(false);
-    Log(L"显示桌面图标（藏了 %.1f 秒）", (NowMs() - s_hiddenAt) / 1000);
+    if (s_coverShown) {
+        Pause(100);
+        HideCover();
+        Log(L"显示桌面图标，撤掉照片（照片盖了 %.0f 毫秒）", NowMs() - s_coverAt);
+    } else {
+        Log(L"显示桌面图标");
+    }
 }
 
 // 上次藏起、没来得及显示回来的
@@ -180,7 +326,13 @@ void Save() {
             }
         }
         Log(L"记下 %d 个桌面图标的位置，用了 %.0f 毫秒", static_cast<int>(s_icons.size()), NowMs() - start);
-        HideIcons(view.p);
+        SetRectEmpty(&s_savedListRect);
+        SetRectEmpty(&s_savedWork);
+        if (HWND list = IconList(view.p)) {
+            MONITORINFO mi = {sizeof(mi)};
+            GetWindowRect(list, &s_savedListRect);
+            if (GetMonitorInfoW(MonitorFromWindow(list, MONITOR_DEFAULTTONEAREST), &mi)) s_savedWork = mi.rcWork;
+        }
     }
     // 等的一方已经不等了：自动隐藏可能已经打开，读到的也许是重新排过的位置
     if (s_discard.exchange(false)) {
@@ -242,7 +394,7 @@ bool Wait(DWORD ms, UINT session, bool* pressed = nullptr) {
     for (DWORD start = GetTickCount(); GetTickCount() - start < ms;) {
         if (!Current(session)) return false;
         if (pressed && DesktopPressed()) *pressed = true;
-        Sleep(50);
+        Pause(50);
     }
     return Current(session);
 }
@@ -304,19 +456,22 @@ bool ListBack() {
 // 或者挪完不再动了（用户挪过的图标不会回到记下的位置），就把图标显示出来，最多等 1.5 秒。又打开了自动隐藏的话接着藏着
 void RevealWhenBack(UINT session) {
     if (!s_hiddenList) return;
+    ShowCover();  // 万一前面没盖上
+    double start = NowMs();
     std::vector<POINT> first = Read();
     std::vector<POINT> last = first;
     bool changed = false;
     int stable = 0;
     for (DWORD start = GetTickCount(); GetTickCount() - start < 1500;) {
         if (ListBack() && (AtSaved(last) || stable >= 2)) break;
-        Sleep(15);
+        Pause(15);
         if (!Current(session)) return;
         std::vector<POINT> now = Read();
         if (!Same(now, first)) changed = true;
         stable = changed && Same(now, last) ? stable + 1 : 0;
         last = std::move(now);
     }
+    Log(L"关掉自动隐藏后 %.0f 毫秒图标排回原位", NowMs() - start);
     ShowIcons();
 }
 
@@ -336,11 +491,22 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
     PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);  // 建好消息队列以后才能收 PostThreadMessage
     SetEvent(static_cast<HANDLE>(ready));
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.hwnd) {  // 照片窗口的消息
+            DispatchMessageW(&msg);
+            continue;
+        }
         if (s_quit) continue;
         switch (msg.message) {
-            case kCmdSave:
+            case kCmdSave: {
                 Save();
-                SetEvent(s_savedEvent);
+                SetEvent(s_savedEvent);  // 记完就让动画线程去开自动隐藏，拍照、藏图标不耽误它（资源管理器过一会儿才挪图标）
+                Ref<IFolderView> view;
+                if (DesktopView(view)) HideIcons(view.p);
+                ShowCover();  // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面
+                break;
+            }
+            case kCmdCover:
+                if (Current(static_cast<UINT>(msg.wParam))) ShowCover();
                 break;
             case kCmdRestore: {
                 UINT session = static_cast<UINT>(msg.wParam);
@@ -401,6 +567,10 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
         }
     }
     if (!s_quit) ShowIcons();  // 超时退出的留给下次启动
+    HideCover();
+    if (s_cover) DestroyWindow(s_cover);
+    s_cover = nullptr;
+    ReleaseShot();
     Clear();
     CoUninitialize();
     return 0;
@@ -468,6 +638,11 @@ void DesktopIcons_AbandonUpdates() {
 void DesktopIcons_RestoreLater() {
     std::lock_guard<std::mutex> guard(s_lock);
     if (s_thread && s_snapshot) PostThreadMessageW(s_threadId, kCmdRestore, s_session, 0);
+}
+
+void DesktopIcons_Cover() {
+    std::lock_guard<std::mutex> guard(s_lock);
+    if (s_thread && s_snapshot) PostThreadMessageW(s_threadId, kCmdCover, s_session, 0);
 }
 
 void DesktopIcons_RevealLater() {

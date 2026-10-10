@@ -49,6 +49,8 @@ struct Settings {
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
     bool keepFloatsOnTop = true; // 点全屏（最大化）的窗口时，浮在上面的小窗口不被盖住
+    UINT popupHotkey = 0;        // 弹出迷你任务栏的快捷键（见 MakeHotkey），0 = 没设
+    UINT pinHotkey = 0;          // 固定 / 取消固定前台小窗口的快捷键
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
@@ -140,6 +142,7 @@ bool DesktopIcons_Mark();               // 主线程，自动隐藏开着期间�
 void DesktopIcons_UpdateMoved();        // 主线程，离开桌面或要关自动隐藏前：Mark 以后挪过的图标按新位置记
 void DesktopIcons_WaitUpdated(DWORD ms);  // 关自动隐藏之前：等上面那次读完
 void DesktopIcons_AbandonUpdates();       // 马上要关自动隐藏：还没读完的不用了（读到的可能是重新排过的位置）
+void DesktopIcons_Cover();             // 主线程，要回到桌面了（要关自动隐藏）：图标还藏着的话把桌面的照片重新垫好
 void DesktopIcons_RevealLater();       // 主线程，自动隐藏刚关掉：图标排回原位就显示出来（打开前藏起来了的话）
 void DesktopIcons_Recover();           // 上次藏起的桌面图标没显示回来（被强行结束）：现在显示
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
@@ -270,6 +273,21 @@ void SettingsDialog_Show();
 
 // ---------------- 小窗口留在全屏窗口上面 ----------------
 void FloatWindows_Configure(bool enabled);
+void FloatWindows_TogglePin();  // 固定前台的小窗口（和双击一样），已经固定的取消，在窗口上方提示一下
+
+// ---------------- 快捷键（hotkeys.cpp）----------------
+// 一个快捷键存成 (修饰键 MOD_CONTROL / MOD_SHIFT / MOD_ALT << 16) | 虚拟键码，0 = 没设
+constexpr UINT MakeHotkey(UINT mods, UINT vk) { return (mods << 16) | vk; }
+constexpr UINT HotkeyMods(UINT hotkey) { return hotkey >> 16; }
+constexpr UINT HotkeyVk(UINT hotkey) { return hotkey & 0xFFFF; }
+enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };
+std::wstring KeyName(UINT vk);             // 空 = 不能用在快捷键里的键
+std::wstring HotkeyText(UINT hotkey);      // 如 Ctrl+Alt+Z；0 时为空
+UINT ParseHotkey(const std::wstring& text);  // 反过来，认不出时为 0
+void Hotkeys_Apply();                // 按 g_settings 注册；注册不上的（被别的程序占用）弹托盘气泡说一次
+void Hotkeys_Suspend(bool suspend);  // 设置窗口录快捷键时先全部注销，不然按下已经设的组合键录不到
+bool Hotkeys_Failed(int id);         // 现在设的这个注册不上
+void Hotkeys_OnHotkey(WPARAM id);    // 主窗口收到 WM_HOTKEY
 HWND SettingsDialog_Hwnd();
 
 // ---------------- 液态玻璃材质 ----------------

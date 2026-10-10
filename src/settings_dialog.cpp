@@ -43,7 +43,7 @@ struct ToggleText {
 };
 const ToggleText kToggleText[kToggleCount] = {
     {L"最大化或全屏时隐藏任务栏", L"窗口铺满整块屏幕，要用任务栏时长按 Win"},
-    {L"点全屏窗口时小窗口留在上面", L"双击小窗口后生效，最小化它就取消"},
+    {L"点全屏窗口时小窗口留在上面", L"双击小窗口或按快捷键固定它，最小化就取消"},
     {L"长按 Win 键弹出迷你任务栏", L"左键单击托盘图标也能弹出"},
     {L"显示固定在任务栏的应用", nullptr},
     {L"显示音量和亮度调节", nullptr},
@@ -74,8 +74,16 @@ const SegSpec kSegSpec[kSegCount] = {
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
+// 快捷键：下标是 HotkeyId
+const ToggleText kHotkeyText[kHotkeyCount] = {
+    {L"弹出迷你任务栏", L"再按一次收起"},
+    {L"固定前台的小窗口", L"再按一次取消固定"},
+};
+
 // 能点的东西
-enum Kind { kNoItem, kToggleRow, kSliderRow, kSegment, kCheckNow, kChip, kAddChip, kOk, kCancel, kClose };
+enum Kind {
+    kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kCheckNow, kChip, kAddChip, kOk, kCancel, kClose
+};
 struct Item {
     Kind kind = kNoItem;
     int index = 0;  // 第几个开关 / 滑块 / 程序；分段按钮见 kSegStride
@@ -88,23 +96,25 @@ struct Values {
     bool on[kToggleCount] = {};
     int slider[kSliderCount] = {};
     int seg[kSegCount] = {};
+    UINT hotkey[kHotkeyCount] = {};
     std::vector<std::wstring> exclude;
 };
 Values s_v, s_initial;
 
 struct Palette {
-    Color text, subtle, card, cardRim, separator, accent, onAccent, trackOff, knob, button, buttonHot, textShadow, hover;
+    Color text, subtle, card, cardRim, separator, accent, onAccent, trackOff, knob, button, buttonHot, textShadow, hover,
+        warn;
 };
 const Palette kDark = {Color(240, 255, 255, 255), Color(165, 255, 255, 255), Color(20, 255, 255, 255),
                        Color(46, 255, 255, 255),  Color(32, 255, 255, 255),  Color(255, 96, 205, 255),
                        Color(255, 16, 22, 30),    Color(60, 255, 255, 255),  Color(255, 255, 255, 255),
                        Color(30, 255, 255, 255),  Color(56, 255, 255, 255),  Color(90, 0, 0, 0),
-                       Color(22, 255, 255, 255)};
+                       Color(22, 255, 255, 255),  Color(255, 255, 150, 120)};
 const Palette kLight = {Color(235, 18, 18, 22),    Color(160, 18, 18, 22),    Color(105, 255, 255, 255),
                         Color(210, 255, 255, 255), Color(30, 0, 0, 0),        Color(255, 0, 95, 184),
                         Color(255, 255, 255, 255), Color(50, 0, 0, 0),        Color(255, 255, 255, 255),
                         Color(120, 255, 255, 255), Color(190, 255, 255, 255), Color(110, 255, 255, 255),
-                        Color(16, 0, 0, 0)};
+                        Color(16, 0, 0, 0),        Color(255, 196, 43, 28)};
 
 HWND s_hwnd = nullptr;
 float s_scale = 1;
@@ -128,6 +138,10 @@ struct SliderGeom {
 SliderGeom s_sliderGeom[kSliderCount];
 std::vector<float> s_rowLines;  // 卡片里两行之间的分隔线：每条 x0, x1, y 三个数
 RectF s_segTrack[kSegCount];    // 分段按钮的底槽
+RectF s_hotkeyBox[kHotkeyCount];  // 快捷键那一行右边显示按键的框
+int s_capture = -1;               // 正在录哪个快捷键，-1 = 没在录
+std::wstring s_captureError;      // 刚按的组合键为什么不能用
+bool s_eatChar = false;           // 录快捷键用掉了这次按键，接下来的 WM_SYSCHAR 别交给系统（会响一声）
 
 Item s_hover, s_press, s_focus;
 bool s_showFocus = false;  // 用键盘切换过焦点才画焦点框
@@ -155,6 +169,7 @@ float Px(float dip) { return dip * s_scale; }
 const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 
 bool SliderEnabled(int which) { return which != kLongPressMs || s_v.on[kLongPress]; }
+bool HotkeyEnabled(int which) { return which != kHotkeyPin || s_v.on[kKeepFloats]; }  // 固定了也要它开着才有用
 
 std::wstring SliderText(int which) {
     wchar_t text[32];
@@ -228,6 +243,16 @@ float SegRow(int which, float x, float y, float w) {
     return h;
 }
 
+// 快捷键：左边名字和说明，右边一个框显示按键（设了的话框里右边有个小叉，点了清掉）。点这一行开始录
+float HotkeyRow(int which, float x, float y, float w) {
+    float h = Px(54), bw = Px(140), bh = Px(30);
+    s_items.push_back({kHotkeyRow, which, RectF(x, y, w, h)});
+    RectF box(x + w - Px(kRowPad) - bw, y + (h - bh) / 2, bw, bh);
+    s_hotkeyBox[which] = box;
+    s_items.push_back({kHotkeyClear, which, RectF(box.X + box.Width - bh, box.Y, bh, bh)});
+    return h;
+}
+
 // 名单：每个程序一个小胶囊（点一下去掉），最后是“添加程序”，排不下就换行
 float ChipsRow(float x, float y, float w) {
     float cx = x + Px(kRowPad), cy = y + Px(12);
@@ -282,6 +307,9 @@ void BuildLayout() {
     right = AddGroup(px1, right, L"外观",
                      {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
                       [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
+    right = AddGroup(px1, right, L"快捷键",
+                     {[](float x, float y, float w) { return HotkeyRow(kHotkeyPopup, x, y, w); },
+                      [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); }});
     right = AddGroup(px1, right, L"最大化时不隐藏任务栏的程序", {ChipsRow});
 
     // “立即检查”放在“自动检查更新”那一行的开关左边
@@ -332,15 +360,22 @@ const Item* FindItem(const Item& key) {
     return nullptr;
 }
 
-bool Enabled(const Item& it) { return it.kind != kSliderRow || SliderEnabled(it.index); }
+bool Enabled(const Item& it) {
+    if (it.kind == kSliderRow) return SliderEnabled(it.index);
+    if (it.kind == kHotkeyRow) return HotkeyEnabled(it.index);
+    // 小叉：设了快捷键、没在录的时候才有
+    if (it.kind == kHotkeyClear) return HotkeyEnabled(it.index) && s_v.hotkey[it.index] && s_capture != it.index;
+    return true;
+}
 
 Item HitTest(int x, int y) {
     PointF pt(static_cast<float>(x), static_cast<float>(y));
-    // “立即检查”在开关那一行上面，先看它
+    // “立即检查”、快捷键的小叉在一整行上面，先看它们
+    auto onTop = [](const Item& it) { return it.kind == kCheckNow || it.kind == kHotkeyClear; };
     for (const Item& it : s_items)
-        if (it.kind == kCheckNow && it.rect.Contains(pt)) return it;
+        if (onTop(it) && it.rect.Contains(pt) && Enabled(it)) return it;
     for (const Item& it : s_items)
-        if (it.kind != kCheckNow && it.rect.Contains(pt) && Enabled(it)) return it;
+        if (!onTop(it) && it.rect.Contains(pt) && Enabled(it)) return it;
     return {};
 }
 
@@ -471,6 +506,72 @@ void DrawSegment(Graphics& g, const Item& it) {
              StringAlignmentCenter);
 }
 
+// 录快捷键时框里显示已经按着的修饰键
+std::wstring HeldModifiers() {
+    std::wstring text;
+    if (GetKeyState(VK_CONTROL) < 0) text += L"Ctrl+";
+    if (GetKeyState(VK_SHIFT) < 0) text += L"Shift+";
+    if (GetKeyState(VK_MENU) < 0) text += L"Alt+";
+    return text;
+}
+
+void DrawHotkeyRow(Graphics& g, const Item& it) {
+    const Palette& pal = Colors();
+    const ToggleText& t = kHotkeyText[it.index];
+    const RectF& r = it.rect;
+    const RectF& box = s_hotkeyBox[it.index];
+    bool enabled = HotkeyEnabled(it.index);
+    bool capturing = s_capture == it.index;
+    UINT hotkey = s_v.hotkey[it.index];
+    if (enabled && (s_hover == it || s_press == it))
+        FillRound(g, RectF(r.X + Px(4), r.Y + Px(3), r.Width - Px(8), r.Height - Px(6)), Px(9), pal.hover);
+
+    // 说明：录的时候说怎么取消；刚按的不能用时说为什么；设的被别的程序占了也说一声
+    std::wstring sub = t.sub;
+    Color subColor = enabled ? pal.subtle : pal.separator;
+    if (capturing) {
+        sub = s_captureError.empty() ? L"Esc 取消，Backspace 清除" : s_captureError;
+        if (!s_captureError.empty()) subColor = pal.warn;
+    } else if (enabled && hotkey && hotkey == s_initial.hotkey[it.index] && Hotkeys_Failed(it.index)) {
+        sub = L"被别的程序占用了，换一个吧";
+        subColor = pal.warn;
+    }
+    float x = r.X + Px(kRowPad), textW = box.X - x - Px(8);
+    DrawText(g, t.label, Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(8), textW, Px(20)), enabled ? pal.text : pal.subtle);
+    DrawText(g, sub, Px(11.5f), FontStyleRegular, RectF(x, r.Y + Px(29), textW, Px(17)), subColor);
+
+    // 框：录的时候是强调色的边
+    FillRound(g, box, Px(8), capturing ? pal.button : pal.trackOff);
+    if (capturing) StrokeRound(g, box, Px(8), pal.accent, std::max(1.0f, Px(1.5f)));
+    std::wstring text;
+    Color color = enabled ? pal.text : pal.subtle;
+    RectF textRect(box.X + Px(10), box.Y, box.Width - Px(20), box.Height);
+    if (capturing) {
+        std::wstring held = HeldModifiers();
+        text = held.empty() ? L"按下组合键…" : held + L"…";
+        color = held.empty() ? pal.subtle : pal.text;
+    } else if (hotkey) {
+        text = HotkeyText(hotkey);
+        textRect.Width -= box.Height - Px(10);  // 右边留给小叉
+    } else {
+        text = L"未设置";
+        color = enabled ? pal.subtle : pal.separator;
+    }
+    DrawText(g, text, Px(12.5f), FontStyleRegular, textRect, color);
+
+    if (!capturing && hotkey && enabled) {
+        // 小叉：鼠标放上去时变成强调色
+        bool hot = s_hover == Item{kHotkeyClear, it.index, {}} || s_press == Item{kHotkeyClear, it.index, {}};
+        float cx = box.X + box.Width - box.Height / 2, cy = box.Y + box.Height / 2, a = Px(3.5f);
+        if (hot) FillRound(g, RectF(cx - Px(10), cy - Px(10), Px(20), Px(20)), Px(10), pal.hover);
+        Pen pen(hot ? pal.accent : pal.subtle, Px(1.4f));
+        pen.SetStartCap(LineCapRound);
+        pen.SetEndCap(LineCapRound);
+        g.DrawLine(&pen, cx - a, cy - a, cx + a, cy + a);
+        g.DrawLine(&pen, cx - a, cy + a, cx + a, cy - a);
+    }
+}
+
 void DrawChip(Graphics& g, const Item& it) {
     const Palette& pal = Colors();
     const RectF& r = it.rect;
@@ -548,6 +649,8 @@ void DrawContent(Graphics& g) {
             case kToggleRow: DrawToggleRow(g, it); break;
             case kSliderRow: DrawSliderRow(g, it); break;
             case kSegment: DrawSegment(g, it); break;
+            case kHotkeyRow: DrawHotkeyRow(g, it); break;
+            case kHotkeyClear: break;  // 和那一行一起画
             case kChip:
             case kAddChip: DrawChip(g, it); break;
             default: DrawButton(g, it); break;
@@ -557,7 +660,7 @@ void DrawContent(Graphics& g) {
         if (const Item* f = FindItem(s_focus)) {
             RectF r = f->rect;
             r.Inflate(Px(2), Px(2));
-            float radius = f->kind == kToggleRow || f->kind == kSliderRow ? Px(10) : r.Height / 2;
+            float radius = f->kind == kToggleRow || f->kind == kSliderRow || f->kind == kHotkeyRow ? Px(10) : r.Height / 2;
             StrokeRound(g, r, radius, pal.accent, Px(2));
         }
 }
@@ -936,6 +1039,71 @@ void NudgeSlider(int which, int steps) {
     SetSlider(which, s_v.slider[which] + steps * kSliderSpec[which].step);
 }
 
+// ---- 录快捷键 ----
+// 录的时候先注销本程序已经设的快捷键（不然按下它们会被系统拿走，这里收不到）
+
+void StartCapture(int which) {
+    s_capture = which;
+    s_captureError.clear();
+    s_focus = {kHotkeyRow, which, {}};
+    Hotkeys_Suspend(true);
+}
+
+void EndCapture() {
+    if (s_capture < 0) return;
+    s_capture = -1;
+    s_captureError.clear();
+    Hotkeys_Suspend(false);
+}
+
+void SetHotkey(int which, UINT hotkey) {
+    s_v.hotkey[which] = hotkey;
+    // 和小叉一起消失的悬停状态清掉
+    if (s_hover.kind == kHotkeyClear) s_hover = {};
+}
+
+// 录的时候按了键（WM_KEYDOWN / WM_SYSKEYDOWN）
+void CaptureKey(UINT vk) {
+    if (vk == VK_PROCESSKEY || vk == VK_PACKET) return;  // 输入法、模拟输入的字符，不是真的按键
+    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
+    switch (vk) {
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+        case VK_MENU: case VK_LMENU: case VK_RMENU:
+        case VK_LWIN: case VK_RWIN:
+            return;  // 只按了修饰键：框里跟着显示，等主键
+    }
+    s_eatChar = true;
+    if (!ctrl && !shift && !alt) {
+        if (vk == VK_ESCAPE) {
+            EndCapture();
+            return;
+        }
+        if (vk == VK_BACK || vk == VK_DELETE) {
+            SetHotkey(s_capture, 0);
+            EndCapture();
+            return;
+        }
+    }
+    UINT mods = (ctrl ? MOD_CONTROL : 0) | (shift ? MOD_SHIFT : 0) | (alt ? MOD_ALT : 0);
+    // 不带 Ctrl、Alt 的话平常打字就会被它拿走；只有 F1~F24（F12 留给调试器）可以单按或配 Shift
+    bool fkey = vk >= VK_F1 && vk <= VK_F24 && vk != VK_F12;
+    UINT hotkey = MakeHotkey(mods, vk);
+    if (KeyName(vk).empty()) {
+        s_captureError = L"这个键不能用，换一个";
+    } else if (!ctrl && !alt && !fkey) {
+        s_captureError = L"要带上 Ctrl 或 Alt";
+    } else if (hotkey == s_v.hotkey[1 - s_capture]) {
+        s_captureError = L"和另一个快捷键重复了";
+    } else if (!RegisterHotKey(s_hwnd, 0xBFFF, mods | MOD_NOREPEAT, vk)) {
+        s_captureError = L"被别的程序占用了，换一个";
+    } else {
+        UnregisterHotKey(s_hwnd, 0xBFFF);
+        SetHotkey(s_capture, hotkey);
+        EndCapture();
+    }
+}
+
 void AddExclude(const std::wstring& path) {
     std::wstring name = NormalizeExeName(path);
     if (name.empty() || std::find(s_v.exclude.begin(), s_v.exclude.end(), name) != s_v.exclude.end()) return;
@@ -1038,6 +1206,8 @@ void Apply() {
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
+    if (s_v.hotkey[kHotkeyPopup] != s_initial.hotkey[kHotkeyPopup]) g_settings.popupHotkey = s_v.hotkey[kHotkeyPopup];
+    if (s_v.hotkey[kHotkeyPin] != s_initial.hotkey[kHotkeyPin]) g_settings.pinHotkey = s_v.hotkey[kHotkeyPin];
 
     // 名单按增删合并到现在的名单上，不整个替换
     auto contains = [](const std::vector<std::wstring>& list, const std::wstring& name) {
@@ -1061,6 +1231,11 @@ void Activate(const Item& it) {
             s_v.seg[it.index / kSegStride] = it.index % kSegStride;
             ApplyLook();  // 马上换上看看效果，取消时不保存
             break;
+        case kHotkeyRow:
+            if (s_capture == it.index) EndCapture();  // 再点一下不录了
+            else StartCapture(it.index);
+            break;
+        case kHotkeyClear: SetHotkey(it.index, 0); break;
         case kCheckNow: Update_CheckNow(true); break;
         case kChip: RemoveExclude(it.index); return;
         case kAddChip: ShowAddMenu(it.rect); return;
@@ -1079,7 +1254,7 @@ void Activate(const Item& it) {
 std::vector<Item> FocusOrder() {
     std::vector<Item> list;
     for (const Item& it : s_items)
-        if (it.kind != kClose && Enabled(it)) list.push_back(it);
+        if (it.kind != kClose && it.kind != kHotkeyClear && Enabled(it)) list.push_back(it);
     // 确定、取消在布局里是先确定后取消，Tab 时先取消再确定
     auto ok = std::find_if(list.begin(), list.end(), [](const Item& i) { return i.kind == kOk; });
     auto cancel = std::find_if(list.begin(), list.end(), [](const Item& i) { return i.kind == kCancel; });
@@ -1127,6 +1302,10 @@ void OnKey(WPARAM vk) {
         case VK_DELETE:
         case VK_BACK:
             if (f && f->kind == kChip) RemoveExclude(f->index);
+            if (f && f->kind == kHotkeyRow && s_v.hotkey[f->index]) {
+                SetHotkey(f->index, 0);
+                Render();
+            }
             return;
         case VK_SPACE:
             if (f && f->kind != kSliderRow) Activate(*f);
@@ -1146,6 +1325,7 @@ void SetHover(const Item& it) {
 }
 
 void ReleaseAll() {
+    EndCapture();
     Popup_EndPreview();
     KillTimer(s_hwnd, kTimerAnim);
     KillTimer(s_hwnd, kTimerLive);
@@ -1203,12 +1383,33 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_ACTIVATE:
             // 每次回到前台都把键盘焦点放回来（DefWindowProc 本来会做），不然按键会变成系统键、按一下响一声
             if (LOWORD(wParam) != WA_INACTIVE && !HIWORD(wParam)) SetFocus(hwnd);
+            if (LOWORD(wParam) == WA_INACTIVE && s_capture >= 0) {  // 切走了就不录了
+                EndCapture();
+                Render();
+            }
             return 0;
 
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
             if (wParam == VK_F4 && msg == WM_SYSKEYDOWN) break;  // Alt+F4 照常关闭
+            s_eatChar = false;
+            if (s_capture >= 0) {
+                CaptureKey(static_cast<UINT>(wParam));
+                Render();
+                return 0;
+            }
             OnKey(wParam);
+            return 0;
+
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+            if (s_capture < 0) break;
+            Render();  // 松开了修饰键，框里跟着变
+            return 0;
+
+        case WM_SYSCHAR:
+            if (!s_eatChar) break;
+            s_eatChar = false;
             return 0;
 
         case WM_MOUSEMOVE: {
@@ -1241,6 +1442,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case WM_LBUTTONDOWN: {
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            if (s_capture >= 0 && !(it.kind == kHotkeyRow && it.index == s_capture)) EndCapture();  // 点了别处就不录了
             if (it.kind == kNoItem &&
                 RectF(s_panel.X, s_panel.Y, s_panel.Width, Px(kHeaderH))
                     .Contains(PointF(static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam))))) {
@@ -1401,6 +1603,8 @@ void SettingsDialog_Show() {
     s_initial.slider[kScale] = g_settings.popupScale;
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;
+    s_initial.hotkey[kHotkeyPopup] = g_settings.popupHotkey;
+    s_initial.hotkey[kHotkeyPin] = g_settings.pinHotkey;
     s_initial.exclude = g_settings.excludeApps;
     s_v = s_initial;
     for (int i = 0; i < kToggleCount; ++i) s_knob[i] = s_v.on[i] ? 1.0f : 0.0f;
@@ -1408,6 +1612,8 @@ void SettingsDialog_Show() {
     s_showFocus = false;
     s_drag = -1;
     s_still = 0;
+    s_capture = -1;
+    s_captureError.clear();
 
     // 居中到鼠标所在的显示器
     POINT pt;
