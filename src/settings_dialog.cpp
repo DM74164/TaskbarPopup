@@ -1,11 +1,13 @@
 // 设置窗口：和迷你任务栏一样的液态玻璃面板，开关、滑块、名单都是自己画的。
 //
-// 分层窗口贴的是“玻璃 + 内容”的整张图：玻璃按窗口后面的屏幕内容折射。后面的画面定时截一遍
-// （截的时候让本窗口暂时不进截图），变了就重画；拖动时按新位置去截好的背景里取色，玻璃跟着实时变。
+// 分层窗口贴的是“玻璃 + 内容”的整张图：玻璃按窗口后面的屏幕内容折射。后面的画面在后台线程里
+// 一遍遍截（截图时排除本窗口），变了就重画；拖动时按新位置去截好的背景里取色，并不停地截窗口四周
+// 一大片，玻璃跟着实时变。界面线程只管画，不等截图。
 #include "common.h"
 #include "version.h"
 
 #include <cmath>
+#include <memory>
 
 using namespace Gdiplus;
 
@@ -19,6 +21,7 @@ namespace {
 constexpr wchar_t kClassName[] = L"TaskbarPopupSettings";
 constexpr UINT_PTR kTimerAnim = 1;  // 淡入、开关滑块的动画
 constexpr UINT_PTR kTimerLive = 2;  // 定时刷新玻璃后面的背景
+constexpr UINT WM_APP_SHOT = WM_APP + 40;  // 后台截好背景了，lParam 是 ShotJob*
 constexpr double kFadeMs = 180.0 * TP_ANIM_SCALE;
 constexpr double kKnobMs = 150.0 * TP_ANIM_SCALE;
 
@@ -118,7 +121,6 @@ float s_knob[kToggleCount] = {};  // 开关滑块的位置 0~1，动画用
 double s_knobFrom[kToggleCount] = {}, s_knobStart[kToggleCount] = {};
 double s_openedAt = 0;
 BYTE s_alpha = 255;
-double s_capturedAt = 0;
 
 Glass s_glass;
 std::vector<DWORD> s_base;  // 玻璃，悬停等重画直接复用
@@ -563,31 +565,56 @@ void Render() {
 
 // ---- 玻璃的背景 ----
 //
-// 截窗口后面的屏幕时让本窗口暂时不进截图（Win10 2004 起支持），屏幕上照常显示。
+// 截窗口后面的屏幕时让本窗口不进截图（Win10 2004 起支持），屏幕上照常显示。打开排除要等合成两帧才生效，
+// 所以背景在变、正在拖动时一直开着，背景一段时间不动就关掉，之后隔一会儿开一下截一张看看。
 // 不支持的系统上截到的会是自己，一叠加就越来越花，这时只用打开窗口那一刻截的背景
 
-int s_excludeWorks = 0;  // 0 = 还不知道，1 = 管用，-1 = 不管用
-bool s_moving = false;   // 正在拖动窗口
-int s_still = 0;         // 定时刷新时背景连续几次没变
+constexpr double kExcludeSettleMs = 50;  // 打开排除以后等这么久再截
+constexpr int kStillTicks = 30;          // 连续这么多次没变就算安静了
+
+int s_excludeWorks = 0;     // 0 = 还不知道，1 = 管用，-1 = 不管用
+bool s_excluded = false;    // 现在截图时排除着本窗口
+double s_excludedAt = 0;    // 什么时候打开的排除
+bool s_moving = false;      // 正在拖动窗口
+int s_still = 0;            // 背景连续几次没变
+UINT s_shotSeq = 0;         // 背景换过一次就加一，截到一半的旧结果不要
+HANDLE s_shotThread = nullptr;  // 后台正在截
+
+struct ShotJob {
+    HWND hwnd;
+    UINT seq;
+    RECT window;
+    float scale;
+    bool compare;    // 和 prev 比较，一样就不处理
+    GlassShot prev;  // 只有 area 和 raw
+    GlassShot shot;
+    bool changed = false;
+};
 
 RECT PanelOnScreen() {
     return {s_pos.x + static_cast<LONG>(s_panel.X), s_pos.y + static_cast<LONG>(s_panel.Y),
             s_pos.x + static_cast<LONG>(s_panel.X + s_panel.Width), s_pos.y + static_cast<LONG>(s_panel.Y + s_panel.Height)};
 }
 
-bool BeginExclude() {
+bool SetExclude(bool on) {
+    if (on == s_excluded) return true;
+    if (!on) {
+        SetWindowDisplayAffinity(s_hwnd, WDA_NONE);
+        s_excluded = false;
+        return true;
+    }
     if (s_excludeWorks < 0) return false;
     if (!SetWindowDisplayAffinity(s_hwnd, WDA_EXCLUDEFROMCAPTURE)) {  // Win10 2004 以前没有这个功能
         s_excludeWorks = -1;
         Log(L"设置窗口：系统不支持截图时排除本窗口（错误 %lu），玻璃背景不再实时刷新", GetLastError());
         return false;
     }
-    DwmFlush();  // 等新的设置在下一次合成里生效
-    DwmFlush();
+    s_excluded = true;
+    s_excludedAt = NowMs();
     return true;
 }
 
-void EndExclude() { SetWindowDisplayAffinity(s_hwnd, WDA_NONE); }
+double ExcludeWait() { return std::max(0.0, kExcludeSettleMs - (NowMs() - s_excludedAt)); }
 
 // 窗口显示着、第一次排除后截图时核对一下：面板中间一小块截到的和刚画上去的一模一样，说明排除不管用
 bool ExcludeWorks() {
@@ -610,62 +637,131 @@ bool ExcludeWorks() {
     return s_excludeWorks > 0;
 }
 
-// 截下窗口后面的屏幕内容做玻璃的背景；extra：四周再多截这么多像素（拖动时用，挪一段距离内不用重新截）
-void CaptureBehind(int extra = 0) {
+// 马上截下窗口后面的屏幕内容做玻璃的背景（打开窗口、换布局时用，会等排除生效）
+void CaptureBehind() {
+    ++s_shotSeq;  // 后台截到一半的作废
     bool visible = IsWindowVisible(s_hwnd) && !IsIconic(s_hwnd);
     if (visible) {
-        if (!BeginExclude()) return;
+        if (!SetExclude(true)) return;
+        if (ExcludeWait() > 0) {
+            DwmFlush();
+            DwmFlush();
+            s_excludedAt -= kExcludeSettleMs;
+        }
         if (!ExcludeWorks()) {
-            EndExclude();
+            SetExclude(false);
             return;
         }
     }
-    RECT window = {s_pos.x - extra, s_pos.y - extra, s_pos.x + s_width + extra, s_pos.y + s_height + extra};
+    RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
     s_glass.Capture(window, PanelOnScreen(), s_scale);
-    if (visible) EndExclude();
     s_baseValid = false;
-    s_capturedAt = NowMs();
+    s_still = 0;
 }
 
-// 拖动中：窗口挪出了已经截好的范围才重新截（窗口四周再留 400 像素）
-void FollowMove() {
-    int pad = static_cast<int>(std::lround(Px(28)));
-    RECT need = {s_pos.x - pad, s_pos.y - pad, s_pos.x + s_width + pad, s_pos.y + s_height + pad};
-    MONITORINFO mi = {sizeof(mi)};
-    if (GetMonitorInfoW(MonitorFromRect(&need, MONITOR_DEFAULTTONEAREST), &mi)) IntersectRect(&need, &need, &mi.rcMonitor);
-    const RECT& have = s_glass.Area();
-    if (need.left < have.left || need.top < have.top || need.right > have.right || need.bottom > have.bottom)
-        CaptureBehind(static_cast<int>(Px(400)));
-    s_baseValid = false;  // 玻璃按新位置去背景里取色
-    Render();
+DWORD WINAPI ShotThread(void* param) {
+    auto* job = static_cast<ShotJob*>(param);
+    job->changed = Glass::Shoot(job->window, job->scale, job->shot, job->compare ? &job->prev : nullptr);
+    if (!PostMessageW(job->hwnd, WM_APP_SHOT, 0, reinterpret_cast<LPARAM>(job))) delete job;
+    return 0;
 }
 
-// 定时看看后面的画面变了没有（视频、动画、别的窗口挪动）：变了就重画，一直不变就放慢
+// 后台截一张：拖动时截窗口四周一大片（挪一段都在范围里），平时只截窗口这么大，和上一张比较
+bool StartShot() {
+    auto job = std::make_unique<ShotJob>();
+    job->hwnd = s_hwnd;
+    job->seq = s_shotSeq;
+    LONG extra = s_moving ? static_cast<LONG>(std::lround(Px(320))) : 0;
+    job->window = {s_pos.x - extra, s_pos.y - extra, s_pos.x + s_width + extra, s_pos.y + s_height + extra};
+    job->scale = s_scale;
+    job->compare = !s_moving;
+    if (job->compare) {
+        job->prev.area = s_glass.Area();
+        job->prev.raw = s_glass.Raw();
+    }
+    HANDLE thread = CreateThread(nullptr, 0, ShotThread, job.get(), 0, nullptr);
+    if (!thread) return false;
+    job.release();
+    s_shotThread = thread;
+    return true;
+}
+
+// 等后台截完（关窗口时），没处理的结果扔掉
+void StopShot() {
+    if (!s_shotThread) return;
+    WaitForSingleObject(s_shotThread, INFINITE);
+    CloseHandle(s_shotThread);
+    s_shotThread = nullptr;
+    MSG msg;
+    while (PeekMessageW(&msg, s_hwnd, WM_APP_SHOT, WM_APP_SHOT, PM_REMOVE)) delete reinterpret_cast<ShotJob*>(msg.lParam);
+}
+
+// 该截下一张了：先打开排除、等它生效，再交给后台
 void LiveTick() {
-    UINT next = 400;
-    if (!s_moving && IsWindowVisible(s_hwnd) && !IsIconic(s_hwnd) && s_alpha == 255 && s_excludeWorks >= 0) {
-        if (!BeginExclude()) {
-            KillTimer(s_hwnd, kTimerLive);
-            return;
-        }
-        if (!ExcludeWorks()) {
-            EndExclude();
-            KillTimer(s_hwnd, kTimerLive);
-            return;
-        }
-        bool changed = s_glass.Refresh(PanelOnScreen());
-        EndExclude();
-        if (changed) {
+    KillTimer(s_hwnd, kTimerLive);
+    if (s_shotThread || s_excludeWorks < 0) return;  // 截完会再来；不支持就不再刷新
+    double sinceOpen = NowMs() - s_openedAt;
+    if (sinceOpen < kFadeMs) {  // 淡入完了再开始
+        SetTimer(s_hwnd, kTimerLive, static_cast<UINT>(kFadeMs - sinceOpen) + 20, nullptr);
+        return;
+    }
+    if (!IsWindowVisible(s_hwnd) || IsIconic(s_hwnd)) {
+        SetExclude(false);
+        SetTimer(s_hwnd, kTimerLive, 500, nullptr);
+        return;
+    }
+    if (!SetExclude(true)) return;
+    if (double wait = ExcludeWait(); wait > 0) {
+        SetTimer(s_hwnd, kTimerLive, static_cast<UINT>(std::ceil(wait)), nullptr);
+        return;
+    }
+    if (!ExcludeWorks()) {
+        SetExclude(false);
+        return;
+    }
+    if (!StartShot()) SetTimer(s_hwnd, kTimerLive, 500, nullptr);
+}
+
+// 后台截完了：变了就换上重画。拖动中接着截；背景在变就尽快再截（约每秒 60 次）；
+// 一直没变就关掉排除，隔一会儿再看
+void OnShot(ShotJob* raw) {
+    std::unique_ptr<ShotJob> job(raw);
+    if (s_shotThread) {
+        CloseHandle(s_shotThread);
+        s_shotThread = nullptr;
+    }
+    if (job->seq == s_shotSeq) {
+        if (job->changed) {
+            s_glass.Adopt(std::move(job->shot), PanelOnScreen(), job->scale, false);
             s_baseValid = false;
             Render();
             s_still = 0;
         } else {
             ++s_still;
         }
-        next = changed ? 60 : (s_still < 15 ? 120 : 400);
-        if (GetForegroundWindow() != s_hwnd) next = std::max<UINT>(next, 150);
+    }
+    if (s_moving) {
+        LiveTick();
+        return;
+    }
+    UINT next;
+    if (s_still == 0) {
+        next = 10;
+    } else if (s_still < kStillTicks) {
+        next = 30;
+    } else {
+        SetExclude(false);
+        next = GetForegroundWindow() == s_hwnd ? 250 : 400;
     }
     SetTimer(s_hwnd, kTimerLive, next, nullptr);
+}
+
+// 拖动中：按新位置重新判断明暗、去背景里取色；后台截不过来时边上先用截图边缘的颜色顶着
+void FollowMove() {
+    s_glass.UpdateLight(PanelOnScreen());
+    s_baseValid = false;
+    Render();
+    if (!s_shotThread) LiveTick();
 }
 
 // 布局变了（名单增删、换了显示器）：上边缘不动，大小跟着变，背景重新截
@@ -947,6 +1043,8 @@ void SetHover(const Item& it) {
 void ReleaseAll() {
     KillTimer(s_hwnd, kTimerAnim);
     KillTimer(s_hwnd, kTimerLive);
+    StopShot();
+    s_excluded = false;
     s_moving = false;
     ReleaseCanvas();
     s_base.clear();
@@ -973,18 +1071,23 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         case WM_ENTERSIZEMOVE:
-            // 拖动时玻璃跟着位置实时重画：先把窗口四周一大片背景截好
+            // 拖动时玻璃跟着位置实时重画：后台不停地截窗口四周一大片
             s_moving = true;
-            CaptureBehind(static_cast<int>(Px(400)));
+            s_still = 0;
+            LiveTick();
             return 0;
 
         case WM_EXITSIZEMOVE: {
             s_moving = false;
+            s_still = 0;
             RECT r;
             GetWindowRect(hwnd, &r);
             s_pos = {r.left, r.top};
-            CaptureBehind();
-            Render();
+            if (s_excludeWorks >= 0) {  // 不支持实时刷新时玻璃保持原样，跟着窗口走
+                if (s_glass.UpdateLight(PanelOnScreen())) s_baseValid = false;
+                Render();
+                LiveTick();
+            }
             return 0;
         }
 
@@ -997,12 +1100,6 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         case WM_ACTIVATE:
-            // 回到前台时后面的内容可能变了（换了壁纸、挪了窗口），重新截一遍
-            if (LOWORD(wParam) != WA_INACTIVE && !HIWORD(wParam) && s_capturedAt && NowMs() - s_capturedAt > 500 &&
-                NowMs() - s_openedAt > kFadeMs) {
-                CaptureBehind();
-                Render();
-            }
             // 每次回到前台都把键盘焦点放回来（DefWindowProc 本来会做），不然按键会变成系统键、按一下响一声
             if (LOWORD(wParam) != WA_INACTIVE && !HIWORD(wParam)) SetFocus(hwnd);
             return 0;
@@ -1091,6 +1188,10 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_TIMER:
             if (wParam == kTimerAnim) StepAnimation();
             else if (wParam == kTimerLive) LiveTick();
+            return 0;
+
+        case WM_APP_SHOT:
+            OnShot(reinterpret_cast<ShotJob*>(lParam));
             return 0;
 
         case WM_DPICHANGED: {

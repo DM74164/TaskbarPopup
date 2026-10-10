@@ -259,14 +259,28 @@ void SettingsDialog_Show();
 HWND SettingsDialog_Hwnd();
 
 // ---------------- 液态玻璃材质 ----------------
+// 截好、模糊好的一块背景
+struct GlassShot {
+    RECT area = {};  // 在屏幕上的范围
+    int w = 0, h = 0;
+    std::vector<DWORD> raw;   // 原图，用来比较背景变了没有
+    std::vector<DWORD> blur;  // 模糊、提高饱和度以后的
+};
+
 // 截下面板后面的屏幕内容，模糊并提高饱和度；按圆角矩形算出边缘的折射、色散、高光和阴影。
 // 画出来的玻璃是不透明的（背景已经画进去了），所以要和截图时的屏幕位置对齐。
 class Glass {
 public:
+    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度。不碰任何成员，可以在后台线程里调用。
+    // same 不为空、范围相同、截到的和它一模一样（或者截图失败）时不做后面的处理，返回 false
+    static bool Shoot(const RECT& window, float scale, GlassShot& out, const GlassShot* same = nullptr);
     // window：要画玻璃的窗口在屏幕上的位置；panel：面板静止时在屏幕上的位置（用来判断背景明暗）
     void Capture(const RECT& window, const RECT& panel, float scale);
-    // 用同一块区域重新截一次，和上次一模一样就什么都不做；返回背景变了没有（变了要重新 Render）
-    bool Refresh(const RECT& panel);
+    // 换上一张截好的背景。fresh：重新判断明暗；否则判断时留余量，不在临界亮度附近来回跳
+    void Adopt(GlassShot&& shot, const RECT& panel, float scale, bool fresh);
+    // 面板挪到 panel（屏幕坐标）以后重新判断明暗，返回明暗变了没有
+    bool UpdateLight(const RECT& panel, bool fresh = false);
+    const std::vector<DWORD>& Raw() const { return m_raw; }
     bool Light() const { return m_light; }  // 背景偏亮，用浅色玻璃配深色文字
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
@@ -281,14 +295,14 @@ private:
         float dx = 0, dy = 0;  // 折射：去背景的哪里取色（相对本像素，绿色通道的位移）
         BYTE cover = 0;        // 面板覆盖率
         BYTE shadow = 0;       // 阴影的不透明度
-        BYTE light = 0;        // 叠加的白光
+        BYTE light = 0;        // 叠加的白光（边缘高光）
+        BYTE gloss = 0;        // 顶部光泽的位置权重，乘上深浅色各自的强度
         BYTE bevel = 0;        // 1 = 在边缘弯曲的一圈里，要折射取样
     };
-    void Process(const RECT& panel);
     void SampleBevel(float x, float y, const Texel& t, float rgb[3]) const;
     DWORD Fetch(int x, int y) const;
 
-    std::vector<DWORD> m_raw;   // 截下来的原图，Refresh 时比较有没有变
+    std::vector<DWORD> m_raw;   // 截下来的原图，再截时比较有没有变
     std::vector<DWORD> m_blur;  // 模糊后的背景
     RECT m_area = {};           // 背景截图在屏幕上的范围
     int m_w = 0, m_h = 0;
@@ -299,6 +313,7 @@ private:
     int m_texW = 0, m_texH = 0;
     Gdiplus::RectF m_texPanel;
     float m_texRadius = 0;
+    float m_texScale = 0;
 };
 
 // ---------------- 工具函数 ----------------
