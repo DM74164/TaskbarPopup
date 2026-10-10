@@ -1441,9 +1441,9 @@ void Popup_Show() {
         WaitForVBlank();
     }
     RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
-    RECT panel = {s_pos.x + static_cast<LONG>(s_L.margin), s_pos.y + static_cast<LONG>(s_L.margin),
-                  s_pos.x + static_cast<LONG>(s_L.margin + s_L.panelW), s_pos.y + static_cast<LONG>(s_L.margin + s_L.panelH)};
-    s_glass.Capture(window, panel, s_scale);
+    s_glass.SetLight(ThemeIsLight(g_settings.theme, true));
+    s_glass.SetFrosted(g_settings.glassStyle == kGlassFrosted);
+    s_glass.Capture(window, s_scale);
 
     s_first = 0;
     s_hover = -1;
