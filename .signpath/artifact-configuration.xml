@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath 项目里的制品配置（Artifact configuration），内容和这里保持一致。
+     签的是自动构建上传的 TaskbarPopup 制品（压缩包根目录下有 TaskbarPopup.exe、README.md、LICENSE），
+     version 由 .github/workflows/build.yml 按标签传入，exe 里的 ProductVersion 必须和它一致。 -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="TaskbarPopup.exe" product-name="TaskbarPopup" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
