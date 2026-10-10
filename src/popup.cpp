@@ -28,6 +28,8 @@ constexpr double kRefocusMs = 500;     // 弹出后多久之内失去前台算�
 constexpr double kShowMs = 320.0 * TP_ANIM_SCALE;
 constexpr double kHideMs = 170.0 * TP_ANIM_SCALE;
 constexpr double kPillMs = 160.0 * TP_ANIM_SCALE;
+constexpr UINT_PTR kTimerPreview = 5;  // 预览：松开滑块后过一会儿收起
+constexpr UINT kPreviewHideMs = 1200;
 
 enum class Anim { None, Showing, Hiding };
 
@@ -99,6 +101,8 @@ int s_visible = 0;  // 一屏能放下几个
 int s_hover = -1;   // 鼠标下的格子：-1 无，0 开始按钮，i+1 第 i 个格子
 int s_sel = 0;      // 选中的格子（键盘焦点），编号同上
 bool s_open = false;
+bool s_preview = false;      // 设置窗口里调大小时的预览：不抢前台、鼠标点不到，过一会儿自己收起
+int s_previewPercent = 100;  // 预览用的大小，百分比
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
@@ -142,7 +146,9 @@ double s_pillStart = 0;
 float Px(float dip) { return dip * s_scale; }
 
 // 显示器的缩放比例再乘上设置里的迷你任务栏大小
-float PopupScale(HMONITOR monitor) { return MonitorScale(monitor) * g_settings.popupScale / 100.0f; }
+float PopupScale(HMONITOR monitor) {
+    return MonitorScale(monitor) * (s_preview ? s_previewPercent : g_settings.popupScale) / 100.0f;
+}
 
 const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 
@@ -712,6 +718,8 @@ bool MouseButtonDown() {
 void HideNow() {
     HideThumb();
     s_open = false;
+    s_preview = false;
+    KillTimer(s_hwnd, kTimerPreview);
     s_anim = Anim::None;
     s_drag = kNone;
     if (GetCapture() == s_hwnd) ReleaseCapture();
@@ -1090,6 +1098,14 @@ void ShowSelectedMenu() {
 
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+        case WM_NCHITTEST:
+            if (s_preview) return HTTRANSPARENT;  // 预览时鼠标穿过去，还是在设置窗口上拖滑块
+            break;
+
+        case WM_MOUSEACTIVATE:
+            if (s_preview) return MA_NOACTIVATEANDEAT;  // 预览时点到它也不抢前台
+            break;
+
         case WM_ACTIVATE:
             if (LOWORD(wParam) == WA_INACTIVE && s_open) {
                 HWND to = reinterpret_cast<HWND>(lParam);
@@ -1127,6 +1143,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         Popup_Hide();
                     }
                 }
+            } else if (wParam == kTimerPreview) {
+                KillTimer(hwnd, kTimerPreview);
+                if (s_preview) Popup_Hide();
             } else if (wParam == kTimerThumb) {
                 if (s_thumbWant) ShowThumbNow();
                 else HideThumb();
@@ -1395,8 +1414,13 @@ void Popup_Destroy() {
     s_hwnd = nullptr;
 }
 
-void Popup_Show() {
+namespace {
+
+// 弹出。preview：设置窗口里调大小时的预览，不抢前台
+void Open(bool preview) {
     if (!s_hwnd) return;
+    s_preview = preview;
+    KillTimer(s_hwnd, kTimerPreview);
     HWND fg = GetForegroundWindow();
     if (fg != s_hwnd) s_prevForeground = fg;
 
@@ -1431,7 +1455,7 @@ void Popup_Show() {
     s_keyNav = false;
     s_menuOpen = false;
     s_lastMouse = {INT_MIN, INT_MIN};
-    Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
+    if (!preview) Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
     ComputeLayout();
     UpdatePlacement();
 
@@ -1441,6 +1465,12 @@ void Popup_Show() {
         WaitForVBlank();
     }
     RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
+    if (preview) {
+        // 预览时大小会一直变：按最大的大小把底边一整条截下来，变大小时不用再截
+        float grow = static_cast<float>(kMaxPopupScale) / std::max(1, s_previewPercent);
+        window = {s_bounds.left, s_bounds.bottom - static_cast<LONG>(std::ceil(s_height * grow)), s_bounds.right,
+                  s_bounds.bottom};
+    }
     s_glass.SetLight(ThemeIsLight(g_settings.theme, true));
     s_glass.SetFrosted(g_settings.glassStyle == kGlassFrosted);
     s_glass.Capture(window, s_scale);
@@ -1457,14 +1487,44 @@ void Popup_Show() {
     s_anim = Anim::Showing;
     s_animStart = s_shownAt;
     Render(SlideDistance(), 0);
-    ShowWindow(s_hwnd, SW_SHOW);
-    ForceForeground(s_hwnd);
-    if (GetForegroundWindow() != s_hwnd)
-        Log(L"迷你任务栏没拿到前台，前台是 %ls %ls", GetClassNameStr(GetForegroundWindow()).c_str(),
-            GetProcessPath(GetForegroundWindow()).c_str());
-    SetFocus(s_hwnd);
+    if (preview) {
+        ShowWindow(s_hwnd, SW_SHOWNOACTIVATE);
+    } else {
+        ShowWindow(s_hwnd, SW_SHOW);
+        ForceForeground(s_hwnd);
+        if (GetForegroundWindow() != s_hwnd)
+            Log(L"迷你任务栏没拿到前台，前台是 %ls %ls", GetClassNameStr(GetForegroundWindow()).c_str(),
+                GetProcessPath(GetForegroundWindow()).c_str());
+        SetFocus(s_hwnd);
+    }
     RequestFrame();
     SetTimer(s_hwnd, kTimerClock, 1000, nullptr);
+}
+
+}  // namespace
+
+void Popup_Show() { Open(false); }
+
+void Popup_Preview(int percent, bool hold) {
+    if (!s_hwnd || (s_open && !s_preview)) return;  // 真的弹出着就不打扰
+    percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
+    if (!s_open) {
+        s_previewPercent = percent;
+        Open(true);
+    } else if (percent != s_previewPercent) {
+        s_previewPercent = percent;
+        s_scale = PopupScale(s_monitor);
+        ComputeLayout();
+        UpdatePlacement();
+        s_glass.SetScale(s_scale);
+        Redraw();
+    }
+    KillTimer(s_hwnd, kTimerPreview);
+    if (!hold) SetTimer(s_hwnd, kTimerPreview, kPreviewHideMs, nullptr);
+}
+
+void Popup_EndPreview() {
+    if (s_preview && s_open) Popup_Hide();
 }
 
 void Popup_Hide() {
