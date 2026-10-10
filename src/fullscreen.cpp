@@ -149,6 +149,7 @@ int AutoHideState() {
 // 上次运行打开了自动隐藏、没来得及关就退出了（被强行结束、崩溃、退出时资源管理器没在运行）。
 // 关不掉、或者不知道现在是什么状态的话记号留着，资源管理器回来以后、或者下次启动时再关
 void UndoSavedAutoHide() {
+    DesktopIcons_Recover();
     if (!GetRestoreAutoHideFlag()) return;
     int state = AutoHideState();
     if (state < 0) return;

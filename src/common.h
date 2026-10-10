@@ -140,6 +140,7 @@ bool DesktopIcons_Mark();               // 主线程，自动隐藏开着期间�
 void DesktopIcons_UpdateMoved();        // 主线程，离开桌面或要关自动隐藏前：Mark 以后挪过的图标按新位置记
 void DesktopIcons_WaitUpdated(DWORD ms);  // 关自动隐藏之前：等上面那次读完
 void DesktopIcons_AbandonUpdates();       // 马上要关自动隐藏：还没读完的不用了（读到的可能是重新排过的位置）
+void DesktopIcons_Recover();           // 上次临时关掉的桌面网格对齐没打开回来（被强行结束）：现在打开
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
 
 // ---------------- 键盘钩子（在单独的线程上运行）----------------
