@@ -7,9 +7,12 @@
 // 光在事后挪会闪一下（大窗口先盖住小窗口，再被挪下去）。所以还装了个鼠标钩子：在大窗口上按下鼠标、
 // 系统还没激活它之前，先把浮在上面的小窗口临时设成置顶，激活时大窗口怎么提也越不过它们，过一会儿再取消置顶。
 // 钩子和这里的一切都跑在单独的线程上，主线程忙着画玻璃时鼠标也不会卡。
+//
+// 也可以设一个快捷键：按一下固定前台的小窗口（和双击一样），已经固定的再按一下取消，窗口上方提示一下。
 #include "common.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace app {
@@ -18,6 +21,7 @@ namespace {
 // 主线程启停
 HANDLE s_thread = nullptr;
 DWORD s_threadId = 0;
+constexpr UINT kMsgTogglePin = WM_APP + 1;  // 发给小窗口线程：wParam 是按快捷键时的前台窗口
 
 // 以下只在小窗口线程里访问
 HWINEVENTHOOK s_hook = nullptr;
@@ -161,14 +165,14 @@ void BeforeClick(HWND big) {
     s_liftTimer = s_lifted.empty() ? 0 : SetTimer(nullptr, 0, kLiftMs, OnLiftTimer);
 }
 
-// 双击了一个小窗口：记下它，以后留在全屏窗口上面
-void Pin(HWND hwnd) {
+// 双击了一个小窗口（或者按了快捷键，how 说是哪种）：记下它，以后留在全屏窗口上面
+void Pin(HWND hwnd, const wchar_t* how) {
     if (!IsAppWindow(hwnd) || IsBigWindow(hwnd) || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) return;
     bool known = std::find(s_floats.begin(), s_floats.end(), hwnd) != s_floats.end();
     Forget(hwnd);
     s_floats.insert(s_floats.begin(), hwnd);
     if (s_floats.size() > 32) s_floats.resize(32);
-    if (!known) Log(L"小窗口留在上面：双击了 %ls，记下它（共 %d 个）", GetClassNameStr(hwnd).c_str(),
+    if (!known) Log(L"小窗口留在上面：%ls了 %ls，记下它（共 %d 个）", how, GetClassNameStr(hwnd).c_str(),
                     static_cast<int>(s_floats.size()));
 }
 
@@ -191,7 +195,7 @@ LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam) {
         (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN || wParam == WM_XBUTTONDOWN)) {
         const auto& m = *reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
         if (HWND root = GetAncestor(WindowFromPoint(m.pt), GA_ROOT)) {
-            if (wParam == WM_LBUTTONDOWN && IsDoubleClick(root, m)) Pin(root);
+            if (wParam == WM_LBUTTONDOWN && IsDoubleClick(root, m)) Pin(root, L"双击");
             BeforeClick(root);
         }
     }
@@ -221,6 +225,165 @@ void CALLBACK OnEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG
     s_big = nullptr;
 }
 
+// ---- 按快捷键固定 / 取消时的提示：窗口上方一个小胶囊，过一会儿淡出，点不到 ----
+constexpr wchar_t kToastClass[] = L"TaskbarPopupPinToast";
+constexpr UINT kToastHoldMs = 1100 * TP_ANIM_SCALE;
+constexpr UINT kToastFadeMs = 220 * TP_ANIM_SCALE;
+HWND s_toast = nullptr;
+UINT_PTR s_toastTimer = 0;
+double s_toastAt = 0;
+
+LRESULT CALLBACK ToastProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_NCHITTEST) return HTTRANSPARENT;
+    if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void HideToast() {
+    if (s_toastTimer) KillTimer(nullptr, s_toastTimer);
+    s_toastTimer = 0;
+    if (s_toast) ShowWindow(s_toast, SW_HIDE);
+}
+
+void CALLBACK OnToastTimer(HWND, UINT, UINT_PTR, DWORD) {
+    double t = NowMs() - s_toastAt - kToastHoldMs;
+    if (t < 0) return;
+    if (t >= kToastFadeMs || !s_toast) {
+        HideToast();
+        return;
+    }
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, static_cast<BYTE>(255 * (1 - t / kToastFadeMs)), AC_SRC_ALPHA};
+    UpdateLayeredWindow(s_toast, nullptr, nullptr, nullptr, nullptr, nullptr, 0, &blend, ULW_ALPHA);
+}
+
+// 在 target 上方居中（target 不像个窗口时在鼠标所在屏幕的上方）显示一行字
+void ShowToast(HWND target, const std::wstring& text) {
+    using namespace Gdiplus;
+    if (!s_toast) {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc = {sizeof(wc)};
+            wc.lpfnWndProc = ToastProc;
+            wc.hInstance = g_instance;
+            wc.lpszClassName = kToastClass;
+            registered = RegisterClassExW(&wc) != 0;
+        }
+        s_toast = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                  kToastClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, g_instance, nullptr);
+        if (!s_toast) return;
+    }
+    RECT anchor = {};
+    bool onWindow = target && IsWindowVisible(target) && !IsIconic(target) && GetWindowRect(target, &anchor) &&
+                    anchor.right - anchor.left >= 80 && anchor.bottom - anchor.top >= 40;
+    POINT cursor;
+    GetCursorPos(&cursor);
+    HMONITOR monitor = onWindow ? MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST)
+                                : MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(monitor, &mi);
+    const RECT& work = mi.rcWork;
+    if (!onWindow) anchor = work;
+
+    float scale = MonitorScale(monitor);
+    bool light = ThemeIsLight(g_settings.theme, true);
+    FontFamily family(L"Microsoft YaHei UI");
+    std::unique_ptr<FontFamily> fallback;
+    const FontFamily* fam = &family;
+    if (family.GetLastStatus() != Ok || !family.IsAvailable()) {
+        fallback.reset(FontFamily::GenericSansSerif()->Clone());
+        fam = fallback.get();
+    }
+    Font font(fam, 13.5f * scale, FontStyleRegular, UnitPixel);
+    RectF measured;
+    {
+        Bitmap probe(1, 1, PixelFormat32bppPARGB);
+        Graphics g(&probe);
+        g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+        StringFormat format(StringFormatFlagsNoWrap);
+        g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &format, &measured);
+    }
+    float shadow = 10 * scale, h = 36 * scale;
+    float w = std::min(measured.Width + 36 * scale, static_cast<float>(work.right - work.left) - 2 * shadow);
+    int width = static_cast<int>(std::ceil(w + 2 * shadow)), height = static_cast<int>(std::ceil(h + 2 * shadow));
+
+    BITMAPINFO bi = {};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), width, -height, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dib) return;
+    {
+        Bitmap canvas(width, height, width * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
+        Graphics g(&canvas);
+        g.SetSmoothingMode(SmoothingModeAntiAlias);
+        g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+        g.Clear(Color(0, 0, 0, 0));
+        RectF pill(shadow, shadow, w, h);
+        for (int i = 3; i >= 1; --i) {  // 一圈淡淡的阴影
+            RectF r = pill;
+            r.Inflate(i * 2.5f * scale, i * 2.5f * scale);
+            r.Offset(0, 2 * scale);
+            GraphicsPath p;
+            AddRoundRect(p, r, r.Height / 2);
+            SolidBrush b(Color(static_cast<BYTE>(light ? 10 : 18), 0, 0, 0));
+            g.FillPath(&b, &p);
+        }
+        GraphicsPath path;
+        AddRoundRect(path, pill, h / 2);
+        SolidBrush fill(light ? Color(245, 250, 250, 252) : Color(240, 38, 38, 42));
+        g.FillPath(&fill, &path);
+        Pen rim(light ? Color(40, 0, 0, 0) : Color(50, 255, 255, 255), std::max(1.0f, scale));
+        g.DrawPath(&rim, &path);
+        StringFormat format(StringFormatFlagsNoWrap);
+        format.SetAlignment(StringAlignmentCenter);
+        format.SetLineAlignment(StringAlignmentCenter);
+        format.SetTrimming(StringTrimmingEllipsisCharacter);
+        SolidBrush ink(light ? Color(240, 18, 18, 22) : Color(245, 255, 255, 255));
+        g.DrawString(text.c_str(), -1, &font, pill, &format, &ink);
+    }
+
+    // 窗口顶边往下一点、水平居中；别出屏幕
+    LONG x = (anchor.left + anchor.right) / 2 - width / 2;
+    LONG y = anchor.top + static_cast<LONG>(12 * scale);
+    x = std::max(work.left, std::min(x, work.right - width));
+    y = std::max(work.top, std::min(y, work.bottom - height));
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ old = SelectObject(dc, dib);
+    POINT pos = {x, y}, src = {0, 0};
+    SIZE size = {width, height};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(s_toast, nullptr, &pos, &size, dc, &src, 0, &blend, ULW_ALPHA);
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    DeleteObject(dib);
+    SetWindowPos(s_toast, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    s_toastAt = NowMs();
+    if (s_toastTimer) KillTimer(nullptr, s_toastTimer);
+    s_toastTimer = SetTimer(nullptr, 0, 15, OnToastTimer);
+}
+
+// 按了固定小窗口的快捷键
+void TogglePin(HWND hwnd) {
+    if (hwnd && std::find(s_floats.begin(), s_floats.end(), hwnd) != s_floats.end()) {
+        Forget(hwnd);
+        Log(L"小窗口留在上面：按快捷键取消固定 %ls（还有 %d 个）", GetClassNameStr(hwnd).c_str(),
+            static_cast<int>(s_floats.size()));
+        ShowToast(hwnd, L"已取消固定");
+        return;
+    }
+    const wchar_t* refuse = nullptr;
+    if (!IsAppWindow(hwnd)) refuse = L"这个窗口固定不了";
+    else if (IsBigWindow(hwnd)) refuse = L"最大化、全屏的窗口不用固定";
+    else if (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) refuse = L"这个窗口本来就在最上面";
+    if (refuse) {
+        Log(L"小窗口留在上面：按了快捷键，前台 %ls 不能固定（%ls）", hwnd ? GetClassNameStr(hwnd).c_str() : L"（没有）",
+            refuse);
+        ShowToast(hwnd, refuse);
+        return;
+    }
+    Pin(hwnd, L"按快捷键固定");
+    ShowToast(hwnd, L"已固定，点全屏窗口时它留在上面");
+}
+
 DWORD WINAPI FloatThread(LPVOID ready) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     MSG msg;
@@ -231,8 +394,14 @@ DWORD WINAPI FloatThread(LPVOID ready) {
     if (!s_mouseHook) Log(L"小窗口留在上面：鼠标钩子装不上（错误 %lu），点全屏窗口时会闪一下", GetLastError());
     SetEvent(static_cast<HANDLE>(ready));
 
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!msg.hwnd && msg.message == kMsgTogglePin) TogglePin(reinterpret_cast<HWND>(msg.wParam));
+        else DispatchMessageW(&msg);
+    }
 
+    HideToast();
+    if (s_toast) DestroyWindow(s_toast);
+    s_toast = nullptr;
     Restore();
     if (s_timer) KillTimer(nullptr, s_timer);
     s_timer = 0;
@@ -260,6 +429,10 @@ void FloatWindows_Configure(bool enabled) {
         CloseHandle(s_thread);
         s_thread = nullptr;
     }
+}
+
+void FloatWindows_TogglePin() {
+    if (s_thread) PostThreadMessageW(s_threadId, kMsgTogglePin, reinterpret_cast<WPARAM>(GetForegroundWindow()), 0);
 }
 
 }  // namespace app
