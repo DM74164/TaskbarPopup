@@ -265,7 +265,10 @@ class Glass {
 public:
     // window：要画玻璃的窗口在屏幕上的位置；panel：面板静止时在屏幕上的位置（用来判断背景明暗）
     void Capture(const RECT& window, const RECT& panel, float scale);
+    // 用同一块区域重新截一次，和上次一模一样就什么都不做；返回背景变了没有（变了要重新 Render）
+    bool Refresh(const RECT& panel);
     bool Light() const { return m_light; }  // 背景偏亮，用浅色玻璃配深色文字
+    const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
     // width×height：窗口像素大小；panel：面板在窗口里的位置；radius：圆角半径
     void Prepare(int width, int height, const Gdiplus::RectF& panel, float radius);
@@ -281,9 +284,11 @@ private:
         BYTE light = 0;        // 叠加的白光
         BYTE bevel = 0;        // 1 = 在边缘弯曲的一圈里，要折射取样
     };
+    void Process(const RECT& panel);
     void SampleBevel(float x, float y, const Texel& t, float rgb[3]) const;
     DWORD Fetch(int x, int y) const;
 
+    std::vector<DWORD> m_raw;   // 截下来的原图，Refresh 时比较有没有变
     std::vector<DWORD> m_blur;  // 模糊后的背景
     RECT m_area = {};           // 背景截图在屏幕上的范围
     int m_w = 0, m_h = 0;

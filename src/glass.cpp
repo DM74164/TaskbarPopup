@@ -9,6 +9,7 @@
 #include "common.h"
 
 #include <cmath>
+#include <cstring>
 
 namespace app {
 namespace {
@@ -110,17 +111,39 @@ void Glass::Capture(const RECT& window, const RECT& panel, float scale) {
     m_area = area;
     m_w = area.right - area.left;
     m_h = area.bottom - area.top;
+    m_raw.clear();
     if (m_w <= 0 || m_h <= 0) {
         m_blur.clear();
         m_w = m_h = 0;
         m_light = false;
         return;
     }
-    if (!CaptureScreen(area, m_blur)) m_blur.assign(static_cast<size_t>(m_w) * m_h, 0xFF202024);
-    Blur(m_blur, m_w, m_h, std::max(1, static_cast<int>(std::lround(7 * scale))));
+    if (!CaptureScreen(area, m_raw)) m_raw.assign(static_cast<size_t>(m_w) * m_h, 0xFF202024);
+    Process(panel);
+}
+
+bool Glass::Refresh(const RECT& panel) {
+    if (m_w <= 0 || m_h <= 0) return false;
+    std::vector<DWORD> now;
+    if (!CaptureScreen(m_area, now) || now.size() != m_raw.size()) return false;
+    if (memcmp(now.data(), m_raw.data(), now.size() * sizeof(DWORD)) == 0) return false;
+    m_raw.swap(now);
+    bool light = m_light;
+    Process(panel);
+    if (m_light != light) {
+        m_texels.clear();  // 阴影、光泽的强弱跟着明暗变
+        m_texW = m_texH = 0;
+    }
+    return true;
+}
+
+// 截图 → 模糊、提高饱和度，再按面板下面的平均亮度决定用浅色还是深色玻璃
+void Glass::Process(const RECT& panel) {
+    m_blur = m_raw;
+    Blur(m_blur, m_w, m_h, std::max(1, static_cast<int>(std::lround(7 * m_scale))));
     Saturate(m_blur, 1.45f);
 
-    // 面板下面的背景平均亮度决定用浅色还是深色玻璃
+    const RECT& area = m_area;
     double sum = 0;
     int count = 0;
     for (int y = std::max(panel.top, area.top); y < std::min(panel.bottom, area.bottom); y += 2) {
