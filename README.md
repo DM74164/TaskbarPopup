@@ -18,7 +18,7 @@ Windows 11 任务栏增强：窗口最大化时藏起任务栏、让窗口铺满
 
 ## 下载
 
-到 [Releases](../../releases) 下载最新的 `TaskbarPopup.zip`，解压后运行 `TaskbarPopup.exe`，托盘区会出现一个蓝色向上箭头图标。main 分支每次推送后的构建也能在 [Actions](../../actions) 里下载（需要登录 GitHub）。exe 的签名方式见[代码签名策略](#代码签名策略-code-signing-policy)。
+到 [Releases](../../releases) 下载最新的 `TaskbarPopup.zip`，解压后运行 `TaskbarPopup.exe`，托盘区会出现一个蓝色向上箭头图标。main 分支每次推送后的构建也能在 [Actions](../../actions) 里下载（需要登录 GitHub）。
 
 ## 迷你任务栏操作
 
@@ -70,7 +70,7 @@ ExcludeApps=notepad.exe;game.exe
 - **任务栏设置被锁住**（比如公司电脑用组策略禁止更改任务栏设置）：打不开自动隐藏，任务栏会照常显示。
 - **独占全屏的老游戏**：迷你任务栏会被盖住，把游戏改成“无边框窗口”即可。
 - **玻璃背景是弹出那一刻的画面**：后面播放的视频不会跟着动。
-- **杀毒软件可能误报**：exe 还没有数字签名（正在申请，见[代码签名策略](#代码签名策略-code-signing-policy)），又用了低级键盘钩子（只用来判断是不是长按 Win，不记录、不发送任何按键），Windows 安全中心等可能把它当成可疑程序。代码全部开源，Release 里的 exe 由 GitHub Actions 从源码直接编译。被拦下时到 Windows 安全中心 → 病毒和威胁防护 → 保护历史记录 里还原并允许，或者把程序所在的文件夹加入排除项。
+- **杀毒软件可能误报**：exe 没有数字签名，又用了低级键盘钩子（只用来判断是不是长按 Win，不记录、不发送任何按键），Windows 安全中心等可能把它当成可疑程序。代码全部开源，Release 里的 exe 由 GitHub Actions 从源码直接编译。被拦下时到 Windows 安全中心 → 病毒和威胁防护 → 保护历史记录 里还原并允许，或者把程序所在的文件夹加入排除项。
 - **强制结束本程序后任务栏没回来**：重新打开本程序就会恢复；或者重启“Windows 资源管理器”，再到 设置 → 个性化 → 任务栏 → 任务栏行为 里关掉“自动隐藏任务栏”。
 
 ## 从源码编译
@@ -101,19 +101,6 @@ ExcludeApps=notepad.exe;game.exe
 | `src/settings_dialog.cpp` | 设置窗口 |
 | `src/util.cpp` | 工具函数、诊断日志 |
 | `src/version.h` | 版本号（自动构建按标签覆盖） |
-
-## 代码签名策略 (Code signing policy)
-
-正在向 SignPath Foundation 申请免费的开源代码签名，通过之前发布的 exe 仍然没有签名。
-
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-- 提交者和审核者（Committers and reviewers）：[DM74164](https://github.com/DM74164)
-- 批准者（Approvers）：[DM74164](https://github.com/DM74164)
-
-只有 GitHub Actions 从本仓库源码自动构建出的正式版本才会签名，每个版本都由批准者人工确认后再签。
-
-隐私（Privacy policy）：This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. 本程序不联网，不会把任何信息发送到其他计算机。
 
 ## 许可
 
