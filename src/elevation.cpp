@@ -80,7 +80,7 @@ std::wstring XmlEscape(const std::wstring& s) {
 
 // 通过资源管理器（普通权限）调用 ShellExecute：
 // 桌面的 IShellView → IShellFolderViewDual → IShellDispatch2::ShellExecute
-bool ShellExecuteViaExplorer(const std::wstring& file, const std::wstring& args) {
+bool ShellExecuteViaExplorer(const std::wstring& file, const std::wstring& args, const std::wstring& dir = L"") {
     Ref<IShellWindows> windows;
     if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&windows.p)))) return false;
     VARIANT loc;
@@ -117,10 +117,15 @@ bool ShellExecuteViaExplorer(const std::wstring& file, const std::wstring& args)
         vArgs.vt = VT_BSTR;
         vArgs.bstrVal = SysAllocString(args.c_str());
     }
+    if (!dir.empty()) {
+        vDir.vt = VT_BSTR;
+        vDir.bstrVal = SysAllocString(dir.c_str());
+    }
     vShow.vt = VT_I4;
     vShow.lVal = SW_SHOWNORMAL;
     HRESULT hr = shell->ShellExecute(bFile, vArgs, vDir, vOp, vShow);
     VariantClear(&vArgs);
+    VariantClear(&vDir);
     SysFreeString(bFile);
     return SUCCEEDED(hr);
 }
@@ -197,10 +202,10 @@ bool RelaunchUnelevated() {
     return false;
 }
 
-void LaunchAsUser(const std::wstring& target) {
+void LaunchAsUser(const std::wstring& target, const std::wstring& args, const std::wstring& dir) {
     AllowSetForegroundWindow(ASFW_ANY);  // 让新启动的程序能拿到前台
     if (IsElevated()) {
-        if (ShellExecuteViaExplorer(target, L"")) return;
+        if (ShellExecuteViaExplorer(target, args, dir)) return;
         // 资源管理器没在运行（正在重启）时不能退回到自己启动：那样启动的程序也是管理员权限
         Log(L"通过资源管理器以普通权限启动失败：%ls", target.c_str());
         const wchar_t* text = L"资源管理器还没准备好，稍后再试一次。";
@@ -213,6 +218,8 @@ void LaunchAsUser(const std::wstring& target) {
     }
     SHELLEXECUTEINFOW sei = {sizeof(sei)};
     sei.lpFile = target.c_str();
+    sei.lpParameters = args.empty() ? nullptr : args.c_str();
+    sei.lpDirectory = dir.empty() ? nullptr : dir.c_str();
     sei.nShow = SW_SHOWNORMAL;
     ShellExecuteExW(&sei);
 }

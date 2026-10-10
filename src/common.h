@@ -142,6 +142,7 @@ bool Hook_Install();
 void Hook_Uninstall();
 void Hook_Configure(bool enabled, int thresholdMs);
 void SendStartMenu();
+void SendWinX();  // 打开 Win+X 菜单（右键开始按钮的那个）
 
 // ---------------- 窗口列表 ----------------
 struct WindowEntry {
@@ -166,6 +167,7 @@ struct PinnedApp {
 std::vector<PinnedApp> LoadPinnedApps(int iconPx);
 bool PinMatchesWindow(const PinnedApp& pin, const WindowEntry& window);
 void LaunchApp(const std::wstring& target);
+void ReadShortcut(const std::wstring& path, std::wstring& exePath, std::wstring& aumid);  // 读 .lnk，原样大小写
 
 // ---------------- 以管理员身份运行（elevation.cpp） ----------------
 constexpr wchar_t kRestartArg[] = L"--restart";  // 重新启动的新实例：等旧实例退出后再运行
@@ -175,7 +177,8 @@ void Elevation_Init();        // 前台换成权限更高的程序时提示一�
 void Elevation_Shutdown();
 bool RelaunchElevated();      // 弹 UAC，以管理员身份启动一个新实例（带 kRestartArg）
 bool RelaunchUnelevated();    // 通过资源管理器以普通权限启动一个新实例
-void LaunchAsUser(const std::wstring& target);  // 本程序是管理员时也以普通权限启动
+// 本程序是管理员时也以普通权限启动；args、dir 是参数和工作目录，可以为空
+void LaunchAsUser(const std::wstring& target, const std::wstring& args = L"", const std::wstring& dir = L"");
 bool AdminTask_Exists();      // 以管理员身份开机自启的计划任务
 bool AdminTask_Set(bool enabled);
 bool AdminTask_Run();
@@ -202,6 +205,27 @@ void Apps_Refresh(HWND notify);  // 没读过或者读过超过 5 分钟就在�
 std::vector<InstalledApp> Apps_Match(const std::wstring& filter, size_t max);  // filter 要小写，按匹配程度排序
 void Apps_Stop();                // 退出前等后台线程结束
 std::shared_ptr<Gdiplus::Bitmap> ShellItemIcon(const std::wstring& parsingName, int iconPx);  // pinned.cpp，带缓存
+
+// ---------------- 右键菜单用到的外壳操作（app_menu.cpp）----------------
+// 格子是哪个应用：从窗口、固定的应用（.lnk 或 shell:AppsFolder\<ID>）凑出来
+struct AppTarget {
+    std::wstring name;      // 应用名：固定的应用用它的名字，否则查开始菜单、程序的文件说明
+    std::wstring launch;    // 再开一个 / 打开：固定的应用的启动路径，应用商店应用的 shell:AppsFolder\<ID>，或者程序路径
+    std::wstring runAs;     // 以管理员身份运行的对象（.lnk 或程序）；应用商店应用为空
+    std::wstring location;  // 打开文件所在的位置时选中的文件；应用商店应用为空
+    std::vector<std::wstring> appIds;  // 读“最近”项用的 AppUserModelID，按顺序试：显式的在前，按程序路径算的在后
+};
+AppTarget ResolveAppTarget(HWND hwnd, const std::wstring& launch, const std::wstring& pinName);
+// 跳转列表里的“最近”项
+struct RecentItem {
+    std::wstring name;
+    std::shared_ptr<ITEMIDLIST> pidl;  // 外壳项：按 IDList 打开
+    std::wstring file, args, dir;      // 快捷方式：目标、参数、工作目录
+};
+std::vector<RecentItem> RecentItems(const std::vector<std::wstring>& appIds, size_t max);  // 第一个有结果的 ID 的
+void OpenRecentItem(const RecentItem& item);              // 本程序是管理员时也以普通权限打开
+void RunAsAdmin(HWND owner, const std::wstring& file);    // owner：UAC 提示框的父窗口，要在前台
+void OpenFileLocation(const std::wstring& path);          // 在资源管理器里打开所在文件夹并选中它
 
 // ---------------- 窗口缩略图（thumbnail.cpp）----------------
 // 在 (centerX, bottomY) 上方居中显示 source 的实时缩略图，不超出 bounds；DWM 不给缩略图时返回 false
@@ -279,7 +303,7 @@ std::wstring GetWindowTitle(HWND hwnd);
 std::wstring GetProcessPath(HWND hwnd);
 HWND AppWindowTarget(HWND hwnd);  // UWP 应用返回承载它的 CoreWindow，其余原样返回
 std::wstring WindowExeName(HWND hwnd);  // 窗口所属程序的小写文件名（UWP 应用取应用自己的进程）
-std::wstring GetWindowAumid(HWND hwnd);
+std::wstring GetWindowAumid(HWND hwnd, bool keepCase = false);  // 默认转成小写
 bool IsCloaked(HWND hwnd);
 bool IsOwnProcess(HWND hwnd);
 void ForceForeground(HWND hwnd);
