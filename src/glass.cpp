@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 namespace app {
 namespace {
@@ -175,7 +176,7 @@ float SampleChannel(const std::vector<DWORD>& px, int w, int h, float x, float y
 
 }  // namespace
 
-bool Glass::Shoot(const RECT& window, float scale, GlassShot& out, const GlassShot* same) {
+bool Glass::Shoot(const RECT& window, float scale, bool frosted, GlassShot& out, const GlassShot* same) {
     // 多截一圈，模糊和边缘折射取样都不会碰到截图的边
     int pad = static_cast<int>(std::lround(28 * scale));
     RECT area = {window.left - pad, window.top - pad, window.right + pad, window.bottom + pad};
@@ -200,58 +201,33 @@ bool Glass::Shoot(const RECT& window, float scale, GlassShot& out, const GlassSh
     // 缩小一半再模糊、提高饱和度，再放大回来：模糊得很厉害，看不出区别，快好几倍
     int hw = (out.w + 1) / 2, hh = (out.h + 1) / 2;
     std::vector<DWORD> half = HalfSize(out.raw, out.w, out.h, hw, hh);
-    Blur(half, hw, hh, std::max(1, static_cast<int>(std::lround(3.5f * scale))));
+    Blur(half, hw, hh, std::max(1, static_cast<int>(std::lround((frosted ? 7.0f : 3.5f) * scale))));
     Saturate(half, 1.45f);
     DoubleSize(half, hw, hh, out.blur, out.w, out.h);
     return true;
 }
 
-void Glass::Capture(const RECT& window, const RECT& panel, float scale) {
+void Glass::Capture(const RECT& window, float scale) {
     GlassShot shot;
-    Shoot(window, scale, shot);
-    Adopt(std::move(shot), panel, scale, true);
+    Shoot(window, scale, m_frosted, shot);
+    Adopt(std::move(shot), scale);
 }
 
-void Glass::Adopt(GlassShot&& shot, const RECT& panel, float scale, bool fresh) {
+void Glass::Adopt(GlassShot&& shot, float scale) {
     m_scale = scale;
     m_area = shot.area;
     m_w = shot.w;
     m_h = shot.h;
     m_raw.swap(shot.raw);
     m_blur.swap(shot.blur);
-    UpdateLight(panel, fresh);
-}
-
-// 按面板下面背景的平均亮度决定用浅色还是深色玻璃。不是 fresh 时留一点余量，
-// 背景在临界亮度附近变来变去（视频、拖到明暗交界）时不会来回闪
-bool Glass::UpdateLight(const RECT& panel, bool fresh) {
-    const RECT& area = m_area;
-    double sum = 0;
-    int count = 0;
-    for (int y = std::max(panel.top, area.top); y < std::min(panel.bottom, area.bottom); y += 3) {
-        const DWORD* row = &m_blur[static_cast<size_t>(y - area.top) * m_w];
-        for (int x = std::max(panel.left, area.left); x < std::min(panel.right, area.right); x += 3) {
-            DWORD p = row[x - area.left];
-            sum += 0.299 * ((p >> 16) & 0xFF) + 0.587 * ((p >> 8) & 0xFF) + 0.114 * (p & 0xFF);
-            ++count;
-        }
-    }
-    bool old = m_light;
-    if (count == 0) {
-        if (fresh) m_light = false;
-    } else {
-        double level = sum / count / 255.0;
-        double threshold = fresh ? 0.62 : (m_light ? 0.58 : 0.66);
-        m_light = level > threshold;
-    }
-    return m_light != old;
 }
 
 void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float radius) {
     if (!m_texels.empty() && width == m_texW && height == m_texH && radius == m_texRadius && m_scale == m_texScale &&
-        panel.Equals(m_texPanel))
+        m_frosted == m_texFrosted && panel.Equals(m_texPanel))
         return;
     m_texScale = m_scale;
+    m_texFrosted = m_frosted;
     m_texW = std::max(0, width);
     m_texH = std::max(0, height);
     m_texPanel = panel;
@@ -294,6 +270,11 @@ void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float ra
             if (!t.cover) continue;
 
             float depth = std::max(0.0f, -d);
+            if (m_frosted) {  // 毛玻璃：平的，只有一圈淡淡的亮边
+                float rim = depth < 8 * rimWidth ? std::exp(-depth / rimWidth) : 0;
+                t.light = static_cast<BYTE>(std::lround(Clamp01(0.14f * rim) * 255));
+                continue;
+            }
             if (depth < bevel) {
                 // 沿法线往里取样：边缘像凸透镜一样把背景放大
                 float k = 1 - depth / bevel;
@@ -336,15 +317,30 @@ void Glass::SampleBevel(float x, float y, const Texel& t, float rgb[3]) const {
 }
 
 void Glass::Render(DWORD* pixels, POINT origin, int slide) const {
+    // 一行行互不相干，分几段交给几个线程一起画（拖动、动画时每帧都要画一整张）
+    const int h = m_texH;
+    int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 4);
+    if (static_cast<long long>(m_texW) * h < 200000) threads = 1;
+    std::vector<std::thread> pool;
+    for (int i = 1; i < threads; ++i)
+        pool.emplace_back([=] { RenderRows(pixels, origin, slide, h * i / threads, h * (i + 1) / threads); });
+    RenderRows(pixels, origin, slide, 0, h / threads);
+    for (std::thread& t : pool) t.join();
+}
+
+void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int rowBegin, int rowEnd) const {
     const int w = m_texW, h = m_texH;
-    const float tint[3] = {m_light ? 252.0f : 16.0f, m_light ? 252.0f : 16.0f, m_light ? 255.0f : 20.0f};
-    const float tintAlpha = m_light ? 0.36f : 0.38f;
+    const float tintL = m_light ? 252.0f : 16.0f;
+    const float tint[3] = {tintL, tintL, m_light ? 255.0f : 20.0f};
+    const float tintAlpha = m_frosted ? (m_light ? 0.58f : 0.62f) : (m_light ? 0.36f : 0.38f);
     const float shadowAlpha = m_light ? 0.22f : 0.32f;
     const float sheen = (m_light ? 0.12f : 0.07f) / 255.0f;
+    // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清
+    const float bound = m_light ? 0.72f * 255 : 0.30f * 255;
     // 窗口像素 → 背景截图里的坐标
     const int offX = origin.x - m_area.left, offY = origin.y - m_area.top;
 
-    for (int y = 0; y < h; ++y) {
+    for (int y = rowBegin; y < rowEnd; ++y) {
         DWORD* row = pixels + static_cast<size_t>(y) * w;
         int ty = y - slide;  // 面板往下挪了 slide 行，材质跟着挪，背景不动
         if (ty < 0 || ty >= h) {
@@ -367,11 +363,14 @@ void Glass::Render(DWORD* pixels, POINT origin, int slide) const {
                 c[1] = static_cast<float>((p >> 8) & 0xFF);
                 c[2] = static_cast<float>(p & 0xFF);
             }
+            float lum = 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
+            float ta = tintAlpha;
+            if (m_light ? lum < bound : lum > bound) ta = std::min(0.94f, std::max(ta, (bound - lum) / (tintL - lum)));
             float light = std::min(1.0f, t.light / 255.0f + t.gloss * sheen), cover = t.cover / 255.0f;
             float a = cover + t.shadow * shadowAlpha / 255.0f * (1 - cover);
             DWORD out = static_cast<DWORD>(a * 255 + 0.5f) << 24;
             for (int k = 0; k < 3; ++k) {
-                float col = c[k] + (tint[k] - c[k]) * tintAlpha;
+                float col = c[k] + (tint[k] - c[k]) * ta;
                 col += (255 - col) * light;
                 out |= static_cast<DWORD>(std::clamp(col * cover, 0.0f, 255.0f) + 0.5f) << (16 - 8 * k);
             }

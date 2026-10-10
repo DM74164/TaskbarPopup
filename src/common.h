@@ -36,6 +36,8 @@ using std::min;
 namespace app {
 
 // ---------------- 设置 ----------------
+enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / 毛玻璃
+enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool longPressPopup = true;
@@ -46,6 +48,8 @@ struct Settings {
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
+    int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
+    int theme = kThemeSystem;       // 深色还是浅色
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
 };
 
@@ -271,17 +275,19 @@ struct GlassShot {
 // 画出来的玻璃是不透明的（背景已经画进去了），所以要和截图时的屏幕位置对齐。
 class Glass {
 public:
-    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度。不碰任何成员，可以在后台线程里调用。
+    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度（frosted：毛玻璃，模糊得更厉害）。
+    // 不碰任何成员，可以在后台线程里调用。
     // same 不为空、范围相同、截到的和它一模一样（或者截图失败）时不做后面的处理，返回 false
-    static bool Shoot(const RECT& window, float scale, GlassShot& out, const GlassShot* same = nullptr);
-    // window：要画玻璃的窗口在屏幕上的位置；panel：面板静止时在屏幕上的位置（用来判断背景明暗）
-    void Capture(const RECT& window, const RECT& panel, float scale);
-    // 换上一张截好的背景。fresh：重新判断明暗；否则判断时留余量，不在临界亮度附近来回跳
-    void Adopt(GlassShot&& shot, const RECT& panel, float scale, bool fresh);
-    // 面板挪到 panel（屏幕坐标）以后重新判断明暗，返回明暗变了没有
-    bool UpdateLight(const RECT& panel, bool fresh = false);
+    static bool Shoot(const RECT& window, float scale, bool frosted, GlassShot& out, const GlassShot* same = nullptr);
+    // 截下 window（要画玻璃的窗口在屏幕上的位置）后面的背景，按现在的材质处理
+    void Capture(const RECT& window, float scale);
+    // 换上一张截好的背景
+    void Adopt(GlassShot&& shot, float scale);
     const std::vector<DWORD>& Raw() const { return m_raw; }
-    bool Light() const { return m_light; }  // 背景偏亮，用浅色玻璃配深色文字
+    void SetLight(bool light) { m_light = light; }        // 浅色玻璃配深色文字，深色玻璃配浅色文字
+    bool Light() const { return m_light; }
+    void SetFrosted(bool frosted) { m_frosted = frosted; }  // 毛玻璃：没有边缘折射和高光，着色更浓
+    bool Frosted() const { return m_frosted; }
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
     // width×height：窗口像素大小；panel：面板在窗口里的位置；radius：圆角半径
@@ -299,6 +305,7 @@ private:
         BYTE gloss = 0;        // 顶部光泽的位置权重，乘上深浅色各自的强度
         BYTE bevel = 0;        // 1 = 在边缘弯曲的一圈里，要折射取样
     };
+    void RenderRows(DWORD* pixels, POINT origin, int slide, int rowBegin, int rowEnd) const;
     void SampleBevel(float x, float y, const Texel& t, float rgb[3]) const;
     DWORD Fetch(int x, int y) const;
 
@@ -308,13 +315,19 @@ private:
     int m_w = 0, m_h = 0;
     float m_scale = 1;
     bool m_light = false;
+    bool m_frosted = false;
 
     std::vector<Texel> m_texels;  // 面板静止时窗口里每个像素的材质
     int m_texW = 0, m_texH = 0;
     Gdiplus::RectF m_texPanel;
     float m_texRadius = 0;
     float m_texScale = 0;
+    bool m_texFrosted = false;
 };
+
+// 按颜色选项（Theme）决定用不用浅色玻璃。taskbar：跟随系统时看“Windows 模式”（任务栏、开始菜单），
+// 否则看“应用模式”
+bool ThemeIsLight(int theme, bool taskbar);
 
 // ---------------- 工具函数 ----------------
 std::wstring ToLower(std::wstring s);

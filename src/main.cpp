@@ -322,6 +322,10 @@ void LoadSettings() {
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
     g_settings.checkUpdates = GetPrivateProfileIntW(L"General", L"CheckUpdates", 0, f.c_str()) != 0;
+    int style = static_cast<int>(GetPrivateProfileIntW(L"General", L"GlassStyle", kGlassLiquid, f.c_str()));
+    g_settings.glassStyle = style == kGlassFrosted ? kGlassFrosted : kGlassLiquid;
+    int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
+    g_settings.theme = theme == kThemeLight || theme == kThemeDark ? theme : kThemeSystem;
     std::vector<wchar_t> buf(32768);
     GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.excludeApps.clear();
@@ -347,6 +351,8 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"CheckUpdates", g_settings.checkUpdates ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
     std::wstring exclude;
     for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;
     WritePrivateProfileStringW(L"General", L"ExcludeApps", exclude.c_str(), f.c_str());
