@@ -81,7 +81,7 @@ void SetExcluded(const std::wstring& exeName, bool excluded) {
     ApplySettings();
 }
 
-std::wstring GetWindowAumid(HWND hwnd) {
+std::wstring GetWindowAumid(HWND hwnd, bool keepCase) {
     std::wstring id;
     IPropertyStore* store = nullptr;
     if (SUCCEEDED(SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&store)))) {
@@ -91,7 +91,7 @@ std::wstring GetWindowAumid(HWND hwnd) {
         PropVariantClear(&pv);
         store->Release();
     }
-    if (!id.empty()) return ToLower(id);
+    if (!id.empty()) return keepCase ? id : ToLower(id);
 
     // 应用商店应用、打包的桌面应用：从进程本身取
     using GetAumidFn = LONG(WINAPI*)(HANDLE, UINT32*, PWSTR);
@@ -107,7 +107,7 @@ std::wstring GetWindowAumid(HWND hwnd) {
     UINT32 len = ARRAYSIZE(buf);
     if (getAumid(proc, &len, buf) == ERROR_SUCCESS) id = buf;
     CloseHandle(proc);
-    return ToLower(id);
+    return keepCase ? id : ToLower(id);
 }
 
 bool IsCloaked(HWND hwnd) {

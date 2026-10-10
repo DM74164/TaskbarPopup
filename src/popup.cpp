@@ -1,7 +1,7 @@
 // 迷你任务栏：液态玻璃质感的分层窗口，从屏幕底部中央弹上来。
 // 先按任务栏上的顺序列出固定的应用（已经打开的换成它的窗口），再列出其余打开的窗口。
 // 单击切换窗口（再点当前窗口则最小化）或启动应用，Shift+单击再开一个，中键关闭窗口，
-// 方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
+// 右键弹出和系统任务栏差不多的菜单（开始按钮上是 Win+X 菜单），方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
 // 鼠标停在窗口图标上时在上方显示它的实时缩略图。
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音（可以在设置里关掉）。
 #include "common.h"
@@ -903,36 +903,137 @@ void CloseItem(int idx) {
     Redraw();
 }
 
-// 右键运行中的格子：小菜单，关闭这个窗口；同一个程序开着好几个窗口时还能一次全关；
-// 把这个程序加进 / 移出“最大化时不隐藏任务栏”的名单
+// 右键菜单的命令
+enum MenuCmd : UINT {
+    kCmdClose = 1,
+    kCmdCloseAll,
+    kCmdExclude,
+    kCmdLaunch,  // 再开一个（运行中）/ 打开（没运行）
+    kCmdRunAs,
+    kCmdLocation,
+    kCmdRestore,
+    kCmdMinimize,
+    kCmdMaximize,
+    kCmdRecent = 100,  // 最近项：kCmdRecent + 序号
+};
+constexpr size_t kMaxRecent = 10;
+constexpr size_t kMaxMenuText = 40;
+
+// 菜单文字：太长的截断加省略号；& 在菜单里是快捷键标记，要写成 &&
+std::wstring MenuText(std::wstring text) {
+    if (text.size() > kMaxMenuText) {
+        size_t cut = kMaxMenuText - 1;
+        if (IS_HIGH_SURROGATE(text[cut - 1])) --cut;  // 别把一个字劈成两半
+        text = text.substr(0, cut) + L"…";
+    }
+    std::wstring out;
+    for (wchar_t c : text) {
+        out += c;
+        if (c == L'&') out += L'&';
+    }
+    return out;
+}
+
+// 还原 / 最小化 / 最大化：和系统的窗口菜单一样发 WM_SYSCOMMAND，自己画标题栏的程序也能照自己的方式处理。
+// 发不进去（权限比本程序高）时退回 ShowWindowAsync。还原、最大化后和点格子一样切到这个窗口
+void WindowCommand(HWND h, WPARAM command) {
+    if (!IsWindow(h)) {
+        HideNow();
+        return;
+    }
+    if (command == SC_MINIMIZE) {
+        HideNow();
+        if (!PostMessageW(h, WM_SYSCOMMAND, command, 0)) ShowWindowAsync(h, SW_MINIMIZE);
+        return;
+    }
+    s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
+    if (!PostMessageW(h, WM_SYSCOMMAND, command, 0))
+        ShowWindowAsync(h, command == SC_MAXIMIZE ? SW_SHOWMAXIMIZED : SW_RESTORE);
+    ForceForeground(h);
+    HideNow();
+}
+
+// 开始按钮：和右键系统的开始按钮一样，打开 Win+X 菜单
+void ShowStartContextMenu() {
+    HideNow();
+    Fullscreen_QuietStartMenu();  // 藏着的系统任务栏别因为它弹出来
+    SendWinX();
+}
+
+// 右键格子：尽量和系统任务栏的右键菜单一样。
+// 运行中的窗口：跳转列表的“最近”项；应用名（再开一个）、以管理员身份运行、打开文件所在的位置；
+// 还原 / 最小化 / 最大化；“最大化时不隐藏任务栏”；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
+// 没运行的固定应用、打字筛选出来的应用：“最近”项；打开、以管理员身份运行、打开文件所在的位置。
+// at：菜单的位置（客户区坐标），菜单底边对着它
 void ShowItemMenu(int idx, POINT at) {
-    if (idx <= 0 || idx > ItemCount() || !s_items[idx - 1].hwnd) return;
+    if (idx == 0) {
+        ShowStartContextMenu();
+        return;
+    }
+    if (idx < 0 || idx > ItemCount()) return;
+    // 菜单开着时格子可能重排（比如应用列表读完了重新筛选），先抄一份，之后按窗口句柄找
+    const Tile item = s_items[idx - 1];
+    HWND hwnd = item.hwnd;
+    if (!hwnd && item.launch.empty()) return;
+
+    AppTarget app = ResolveAppTarget(hwnd, item.launch, item.pinName);
+    std::vector<RecentItem> recent = RecentItems(app.appIds, kMaxRecent);
+    if (!s_open) return;  // 读外壳时可能处理了别的消息，期间已经收起了
+
     // 同一个程序：有 AppUserModelID 的按它比（应用商店应用的窗口都属于同一个 ApplicationFrameHost 进程），
     // 没有的按程序路径比
-    auto appKey = [](HWND h) {
-        std::wstring id = GetWindowAumid(h);
-        return id.empty() ? ToLower(GetProcessPath(AppWindowTarget(h))) : id;
-    };
-    std::wstring key = appKey(s_items[idx - 1].hwnd);
     std::vector<HWND> same;
-    for (const Tile& t : s_items)
-        if (t.hwnd && !key.empty() && appKey(t.hwnd) == key) same.push_back(t.hwnd);
-    // 应用商店应用最小化时偶尔找不到它自己的进程，别把 ApplicationFrameHost 当成它加进排除名单
-    std::wstring exeName = WindowExeName(s_items[idx - 1].hwnd);
-    if (exeName == L"applicationframehost.exe") exeName.clear();
+    std::wstring exeName;
+    if (hwnd) {
+        auto appKey = [](HWND h) {
+            std::wstring id = GetWindowAumid(h);
+            return id.empty() ? ToLower(GetProcessPath(AppWindowTarget(h))) : id;
+        };
+        std::wstring key = appKey(hwnd);
+        for (const Tile& t : s_items)
+            if (t.hwnd && !key.empty() && appKey(t.hwnd) == key) same.push_back(t.hwnd);
+        // 应用商店应用最小化时偶尔找不到它自己的进程，别把 ApplicationFrameHost 当成它加进排除名单
+        exeName = WindowExeName(hwnd);
+        if (exeName == L"applicationframehost.exe") exeName.clear();
+    }
 
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"关闭窗口");
-    if (same.size() > 1) {
-        wchar_t text[64];
-        swprintf(text, 64, L"关闭全部 %d 个窗口", static_cast<int>(same.size()));
-        AppendMenuW(menu, MF_STRING, 2, text);
+    // 两组之间的分隔线：前面有东西、最后一项又不是分隔线时才加
+    auto separate = [&] {
+        int n = GetMenuItemCount(menu);
+        if (n > 0 && !(GetMenuState(menu, n - 1, MF_BYPOSITION) & MF_SEPARATOR))
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    };
+    if (!recent.empty()) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"最近");
+        for (size_t i = 0; i < recent.size(); ++i)
+            AppendMenuW(menu, MF_STRING, kCmdRecent + i, MenuText(recent[i].name).c_str());
     }
-    if (!exeName.empty()) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING | (IsExcludedExe(exeName) ? MF_CHECKED : 0), 3, L"最大化时不隐藏任务栏");
+    separate();
+    if (!app.launch.empty()) AppendMenuW(menu, MF_STRING, kCmdLaunch, hwnd ? MenuText(app.name).c_str() : L"打开");
+    if (!app.runAs.empty()) AppendMenuW(menu, MF_STRING, kCmdRunAs, L"以管理员身份运行");
+    if (!app.location.empty()) AppendMenuW(menu, MF_STRING, kCmdLocation, L"打开文件所在的位置");
+    if (hwnd) {
+        separate();
+        bool iconic = IsIconic(hwnd), zoomed = IsZoomed(hwnd);
+        bool canMaximize = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_MAXIMIZEBOX) != 0;
+        AppendMenuW(menu, MF_STRING | (iconic || zoomed ? 0 : MF_GRAYED), kCmdRestore, L"还原");
+        AppendMenuW(menu, MF_STRING | (iconic ? MF_GRAYED : 0), kCmdMinimize, L"最小化");
+        AppendMenuW(menu, MF_STRING | (!zoomed && canMaximize ? 0 : MF_GRAYED), kCmdMaximize, L"最大化");
+        if (!exeName.empty())
+            AppendMenuW(menu, MF_STRING | (IsExcludedExe(exeName) ? MF_CHECKED : 0), kCmdExclude, L"最大化时不隐藏任务栏");
+        separate();
+        AppendMenuW(menu, MF_STRING, kCmdClose, L"关闭窗口");
+        if (same.size() > 1) {
+            wchar_t text[64];
+            swprintf(text, 64, L"关闭全部 %d 个窗口", static_cast<int>(same.size()));
+            AppendMenuW(menu, MF_STRING, kCmdCloseAll, text);
+        }
+        SetMenuDefaultItem(menu, kCmdClose, FALSE);
+    } else {
+        SetMenuDefaultItem(menu, kCmdLaunch, FALSE);
     }
-    SetMenuDefaultItem(menu, 1, FALSE);
+
     s_sel = idx;
     s_menuOpen = true;  // 缩略图会挡住菜单
     HideThumb();
@@ -942,22 +1043,49 @@ void ShowItemMenu(int idx, POINT at) {
                               s_hwnd, nullptr);
     DestroyMenu(menu);
     s_menuOpen = false;
-    if (cmd == 3) {
-        SetExcluded(exeName, !IsExcludedExe(exeName));
+
+    // 下面这些只用上面抄下来的东西，不碰格子；趁本窗口还在前台时启动，新程序才能顺利拿到前台
+    if (cmd >= kCmdRecent && cmd < kCmdRecent + recent.size()) {
+        OpenRecentItem(recent[cmd - kCmdRecent]);
+        HideNow();
         return;
     }
-    if (!s_open) return;
-    if (cmd == 1) {
-        CloseItem(idx);
-    } else if (cmd == 2) {
-        // CloseItem 会去掉格子、后面的序号跟着变，每次重新找
-        for (HWND h : same)
-            for (int i = 0; i < ItemCount(); ++i)
-                if (s_items[i].hwnd == h) {
-                    CloseItem(i + 1);
-                    break;
-                }
+    switch (cmd) {
+        case kCmdExclude: SetExcluded(exeName, !IsExcludedExe(exeName)); return;
+        case kCmdLaunch: Launch(app.launch); return;
+        case kCmdRunAs:
+            RunAsAdmin(s_hwnd, app.runAs);
+            HideNow();
+            return;
+        case kCmdLocation:
+            OpenFileLocation(app.location);
+            HideNow();
+            return;
+        case kCmdRestore: WindowCommand(hwnd, SC_RESTORE); return;
+        case kCmdMinimize: WindowCommand(hwnd, SC_MINIMIZE); return;
+        case kCmdMaximize: WindowCommand(hwnd, SC_MAXIMIZE); return;
     }
+    if (!s_open) return;
+    // CloseItem 会去掉格子、后面的序号跟着变，每次按窗口句柄重新找
+    auto closeWindow = [](HWND h) {
+        for (int i = 0; i < ItemCount(); ++i)
+            if (s_items[i].hwnd == h) {
+                CloseItem(i + 1);
+                return;
+            }
+    };
+    if (cmd == kCmdClose) {
+        closeWindow(hwnd);
+    } else if (cmd == kCmdCloseAll) {
+        for (HWND h : same) closeWindow(h);
+    }
+}
+
+// 用键盘（菜单键、Shift+F10）打开选中格子的右键菜单，菜单从格子上方弹出
+void ShowSelectedMenu() {
+    if (s_sel < 0 || s_sel > ItemCount() || !IsTileVisible(s_sel)) return;
+    RectF r = TileRect(s_sel);
+    ShowItemMenu(s_sel, POINT{static_cast<LONG>(r.X + r.Width / 2), static_cast<LONG>(r.Y)});
 }
 
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1097,8 +1225,22 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_RBUTTONUP: {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ShowItemMenu(HitTest(pt.x, pt.y), pt);
-            return 0;
+            return 0;  // 不交给 DefWindowProc，免得它再发一次 WM_CONTEXTMENU
         }
+
+        case WM_CONTEXTMENU:
+            // 鼠标右键在上面处理了；这里是菜单键（DefWindowProc 在它松开时发来，坐标是 -1, -1）
+            if (GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1 && s_open) ShowSelectedMenu();
+            return 0;
+
+        case WM_SYSKEYDOWN:
+            // Shift+F10 和菜单键一样（F10 是系统键，不走 WM_KEYDOWN）。自己处理掉，不让 DefWindowProc 再发 WM_CONTEXTMENU、
+            // 松开 F10 时进菜单模式
+            if (wParam == VK_F10 && (GetKeyState(VK_SHIFT) & 0x8000)) {
+                if (s_open) ShowSelectedMenu();
+                return 0;
+            }
+            break;
 
         case WM_MOUSEWHEEL: {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // 滚轮消息给的是屏幕坐标

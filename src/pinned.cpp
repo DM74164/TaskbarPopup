@@ -120,30 +120,6 @@ std::vector<std::pair<size_t, std::wstring>> FindAumids(const std::vector<BYTE>&
     return result;
 }
 
-// 读 .lnk 的目标程序和 AppUserModelID
-void ReadLink(const std::wstring& path, std::wstring& exePath, std::wstring& aumid) {
-    IShellLinkW* link = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) return;
-    IPersistFile* file = nullptr;
-    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
-        if (SUCCEEDED(file->Load(path.c_str(), STGM_READ))) {
-            wchar_t target[MAX_PATH * 2] = {};
-            if (SUCCEEDED(link->GetPath(target, ARRAYSIZE(target), nullptr, 0)) && target[0]) exePath = ToLower(target);
-            IPropertyStore* store = nullptr;
-            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&store)))) {
-                PROPVARIANT pv;
-                PropVariantInit(&pv);
-                if (SUCCEEDED(store->GetValue(kPkeyAppUserModelId, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal)
-                    aumid = ToLower(pv.pwszVal);
-                PropVariantClear(&pv);
-                store->Release();
-            }
-        }
-        file->Release();
-    }
-    link->Release();
-}
-
 // IShellItemImageFactory 给的 32 位 DIB（预乘 alpha）→ GDI+ 位图
 std::shared_ptr<Gdiplus::Bitmap> BitmapFromDib(HBITMAP hbmp) {
     DIBSECTION ds = {};
@@ -249,7 +225,9 @@ std::vector<PinnedApp> Load(const std::wstring& folder, const std::vector<BYTE>&
             e.sortName = ToLower(fd.cFileName);
             e.order = FindUtf16(favorites, fd.cFileName);
             e.app.launch = folder + L"\\" + fd.cFileName;
-            ReadLink(e.app.launch, e.app.exePath, e.app.aumid);
+            ReadShortcut(e.app.launch, e.app.exePath, e.app.aumid);
+            e.app.exePath = ToLower(e.app.exePath);
+            e.app.aumid = ToLower(e.app.aumid);
             if (!DescribeItem(e.app.launch, iconPx, e.app.name, e.app.icon) || e.app.name.empty()) {
                 e.app.name = fd.cFileName;
                 e.app.name.resize(e.app.name.size() - 4);  // 去掉 .lnk
@@ -310,6 +288,30 @@ bool PinMatchesWindow(const PinnedApp& pin, const WindowEntry& window) {
 }
 
 void LaunchApp(const std::wstring& target) { LaunchAsUser(target); }
+
+// 读 .lnk 的目标程序和 AppUserModelID，原样大小写（和窗口比较时由调用方转小写）
+void ReadShortcut(const std::wstring& path, std::wstring& exePath, std::wstring& aumid) {
+    IShellLinkW* link = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) return;
+    IPersistFile* file = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+        if (SUCCEEDED(file->Load(path.c_str(), STGM_READ))) {
+            wchar_t target[MAX_PATH * 2] = {};
+            if (SUCCEEDED(link->GetPath(target, ARRAYSIZE(target), nullptr, 0)) && target[0]) exePath = target;
+            IPropertyStore* store = nullptr;
+            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&store)))) {
+                PROPVARIANT pv;
+                PropVariantInit(&pv);
+                if (SUCCEEDED(store->GetValue(kPkeyAppUserModelId, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal)
+                    aumid = pv.pwszVal;
+                PropVariantClear(&pv);
+                store->Release();
+            }
+        }
+        file->Release();
+    }
+    link->Release();
+}
 
 std::shared_ptr<Gdiplus::Bitmap> ShellItemIcon(const std::wstring& parsingName, int iconPx) {
     // 打字筛选时每打一个字都要取一遍，取过的（包括没取到的）直接用缓存，不再创建外壳对象

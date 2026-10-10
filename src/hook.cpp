@@ -196,4 +196,16 @@ void Hook_Configure(bool enabled, int thresholdMs) {
 
 void SendStartMenu() { SendWinTap(VK_LWIN); }
 
+void SendWinX() {
+    // Shift+F10 打开的菜单：Shift 还按着，先松开，不然成了 Win+Shift+X
+    std::vector<INPUT> in;
+    for (DWORD vk : {VK_LSHIFT, VK_RSHIFT})
+        if (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) in.push_back(KeyInput(vk, 0, true, false));
+    in.push_back(KeyInput(VK_LWIN, 0, false, true));
+    in.push_back(KeyInput('X', 0, false, false));
+    in.push_back(KeyInput('X', 0, true, false));
+    in.push_back(KeyInput(VK_LWIN, 0, true, true));
+    SendInput(static_cast<UINT>(in.size()), in.data(), sizeof(INPUT));
+}
+
 }  // namespace app
