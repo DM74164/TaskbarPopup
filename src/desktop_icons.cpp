@@ -310,7 +310,8 @@ void RevealWhenBack(UINT session) {
     int stable = 0;
     for (DWORD start = GetTickCount(); GetTickCount() - start < 1500;) {
         if (ListBack() && (AtSaved(last) || stable >= 2)) break;
-        if (!Wait(30, session)) return;
+        Sleep(15);
+        if (!Current(session)) return;
         std::vector<POINT> now = Read();
         if (!Same(now, first)) changed = true;
         stable = changed && Same(now, last) ? stable + 1 : 0;
