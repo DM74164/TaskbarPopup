@@ -105,33 +105,4 @@ std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx) {
 
 void Windows_ClearCache() { s_exeIconCache.clear(); }
 
-std::vector<HWND> TaskbarWindowHandles() {
-    std::vector<HWND> handles;
-    EnumWindows(
-        [](HWND h, LPARAM lp) -> BOOL {
-            if (IsTaskbarWindow(h)) reinterpret_cast<std::vector<HWND>*>(lp)->push_back(h);
-            return TRUE;
-        },
-        reinterpret_cast<LPARAM>(&handles));
-    return handles;
-}
-
-bool AppWindowShownOn(HMONITOR monitor, HWND except) {
-    struct Context {
-        HMONITOR monitor;
-        HWND except;
-        bool found;
-    } c = {monitor, except, false};
-    EnumWindows(
-        [](HWND h, LPARAM lp) -> BOOL {
-            auto& c = *reinterpret_cast<Context*>(lp);
-            if (h == c.except || !IsWindowVisible(h) || IsIconic(h)) return TRUE;
-            if (MonitorFromWindow(h, MONITOR_DEFAULTTONULL) != c.monitor || !IsTaskbarWindow(h)) return TRUE;
-            c.found = true;
-            return FALSE;
-        },
-        reinterpret_cast<LPARAM>(&c));
-    return c.found;
-}
-
 }  // namespace app

@@ -10,7 +10,6 @@ constexpr DWORD kExStyle = WS_EX_DLGMODALFRAME;
 
 enum {
     IDC_AUTOHIDE = 1001,
-    IDC_DESKTOPDOCK,
     IDC_LONGPRESS,
     IDC_MS_LABEL,
     IDC_MS_EDIT,
@@ -33,14 +32,14 @@ struct Place {
     int id, x, y, w, h;
 };
 constexpr Place kLayout[] = {
-    {IDC_AUTOHIDE, 16, 14, 320, 22},       {IDC_DESKTOPDOCK, 16, 42, 320, 22},    {IDC_LONGPRESS, 16, 70, 300, 22},
-    {IDC_MS_LABEL, 36, 100, 128, 24},      {IDC_MS_EDIT, 166, 100, 90, 24},       {IDC_MS_HINT, 36, 128, 280, 20},
-    {IDC_SCALE_LABEL, 16, 160, 148, 24},   {IDC_SCALE_EDIT, 166, 160, 90, 24},    {IDC_SCALE_HINT, 36, 188, 280, 20},
-    {IDC_PINNED, 16, 212, 300, 22},        {IDC_LEVELS, 16, 238, 300, 22},        {IDC_AUTOSTART, 16, 270, 300, 22},
-    {IDC_EXCLUDE_LABEL, 16, 304, 330, 20}, {IDC_EXCLUDE, 16, 326, 320, 76},       {IDC_EXCLUDE_HINT, 16, 406, 330, 20},
-    {IDOK, 160, 436, 84, 28},              {IDCANCEL, 252, 436, 84, 28},
+    {IDC_AUTOHIDE, 16, 14, 320, 22},       {IDC_LONGPRESS, 16, 42, 300, 22},      {IDC_MS_LABEL, 36, 72, 128, 24},
+    {IDC_MS_EDIT, 166, 72, 90, 24},        {IDC_MS_HINT, 36, 100, 280, 20},       {IDC_SCALE_LABEL, 16, 132, 148, 24},
+    {IDC_SCALE_EDIT, 166, 132, 90, 24},    {IDC_SCALE_HINT, 36, 160, 280, 20},    {IDC_PINNED, 16, 184, 300, 22},
+    {IDC_LEVELS, 16, 210, 300, 22},        {IDC_AUTOSTART, 16, 242, 300, 22},     {IDC_EXCLUDE_LABEL, 16, 276, 330, 20},
+    {IDC_EXCLUDE, 16, 298, 320, 76},       {IDC_EXCLUDE_HINT, 16, 378, 330, 20},  {IDOK, 160, 408, 84, 28},
+    {IDCANCEL, 252, 408, 84, 28},
 };
-constexpr int kClientW = 352, kClientH = 480;
+constexpr int kClientW = 352, kClientH = 452;
 
 HWND s_dlg = nullptr;
 HFONT s_font = nullptr;
@@ -48,7 +47,7 @@ UINT s_dpi = 96;
 
 // 打开窗口时各项的值。确定时只改用户在窗口里动过的项：窗口开着的时候在迷你任务栏或托盘菜单里改的设置不会被盖掉
 struct Initial {
-    bool autoHide = false, desktopDock = false, longPress = false, pinned = false, levels = false, autoStart = false;
+    bool autoHide = false, longPress = false, pinned = false, levels = false, autoStart = false;
     int ms = 0, scale = 0;
     std::vector<std::wstring> exclude;
 } s_initial;
@@ -159,7 +158,6 @@ void CreateControls() {
 
     AddControl(L"BUTTON", L"窗口最大化或全屏时隐藏任务栏，窗口铺满屏幕", BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP,
                IDC_AUTOHIDE);
-    AddControl(L"BUTTON", L"在桌面上用迷你任务栏代替系统任务栏", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_DESKTOPDOCK);
     AddControl(L"BUTTON", L"长按 Win 键弹出迷你任务栏", BS_AUTOCHECKBOX | WS_TABSTOP, IDC_LONGPRESS);
     AddControl(L"STATIC", L"长按时长（毫秒）：", SS_LEFT | SS_CENTERIMAGE, IDC_MS_LABEL);
     AddNumberBox(IDC_MS_EDIT, IDC_MS_SPIN, kMinLongPressMs, kMaxLongPressMs, 100, g_settings.longPressMs);
@@ -184,7 +182,6 @@ void CreateControls() {
     AddControl(L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, IDCANCEL);
 
     s_initial.autoHide = g_settings.autoHideOnFullscreen;
-    s_initial.desktopDock = g_settings.desktopDock;
     s_initial.longPress = g_settings.longPressPopup;
     s_initial.pinned = g_settings.showPinnedApps;
     s_initial.levels = g_settings.showLevels;
@@ -193,7 +190,6 @@ void CreateControls() {
     s_initial.scale = g_settings.popupScale;
     s_initial.exclude = g_settings.excludeApps;
     CheckDlgButton(s_dlg, IDC_AUTOHIDE, s_initial.autoHide ? BST_CHECKED : BST_UNCHECKED);
-    CheckDlgButton(s_dlg, IDC_DESKTOPDOCK, s_initial.desktopDock ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_LONGPRESS, s_initial.longPress ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_PINNED, s_initial.pinned ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(s_dlg, IDC_LEVELS, s_initial.levels ? BST_CHECKED : BST_UNCHECKED);
@@ -220,7 +216,6 @@ bool Apply() {
 
     // 只改窗口里动过的项，其余的保持现在的值（窗口开着的时候可能在别处改过）
     if (Checked(IDC_AUTOHIDE) != s_initial.autoHide) g_settings.autoHideOnFullscreen = Checked(IDC_AUTOHIDE);
-    if (Checked(IDC_DESKTOPDOCK) != s_initial.desktopDock) g_settings.desktopDock = Checked(IDC_DESKTOPDOCK);
     if (Checked(IDC_LONGPRESS) != s_initial.longPress) g_settings.longPressPopup = Checked(IDC_LONGPRESS);
     if (Checked(IDC_PINNED) != s_initial.pinned) g_settings.showPinnedApps = Checked(IDC_PINNED);
     if (Checked(IDC_LEVELS) != s_initial.levels) g_settings.showLevels = Checked(IDC_LEVELS);
