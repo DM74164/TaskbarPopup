@@ -19,11 +19,15 @@ constexpr wchar_t kMainClass[] = L"TaskbarPopupMain";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"TaskbarPopup";
 
-enum MenuId { ID_SHOW = 100, ID_SETTINGS, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG, ID_RUNASADMIN, ID_EXIT };
+enum MenuId {
+    ID_SHOW = 100, ID_SETTINGS, ID_CHECKUPDATE, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG,
+    ID_RUNASADMIN, ID_EXIT
+};
 
 NOTIFYICONDATAW s_nid = {};
 HICON s_trayIcon = nullptr;
 UINT s_msgTaskbarCreated = 0;
+std::wstring s_balloonUrl;  // 最近一次弹出的气泡被点时要打开的网址，空 = 点了不做什么
 
 // 运行时画托盘图标：底部一条任务栏 + 向上的箭头
 HICON CreateAppIcon() {
@@ -92,6 +96,9 @@ void HandleCommand(UINT id) {
         case ID_SETTINGS:
             SettingsDialog_Show();
             break;
+        case ID_CHECKUPDATE:
+            Update_CheckNow(true);
+            break;
         case ID_AUTOHIDE:
             g_settings.autoHideOnFullscreen = !g_settings.autoHideOnFullscreen;
             SaveSettings();
@@ -136,6 +143,7 @@ void ShowTrayMenu() {
 
     AppendMenuW(menu, MF_STRING, ID_SHOW, L"显示迷你任务栏");
     AppendMenuW(menu, MF_STRING, ID_SETTINGS, L"设置...");
+    AppendMenuW(menu, MF_STRING, ID_CHECKUPDATE, L"检查更新");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | check(g_settings.autoHideOnFullscreen), ID_AUTOHIDE, L"窗口最大化或全屏时隐藏任务栏");
     AppendMenuW(menu, MF_STRING | check(g_settings.longPressPopup), ID_LONGPRESS, longPressText);
@@ -183,6 +191,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Fullscreen_OnAutoHideOn(static_cast<UINT>(wParam), lParam != 0);
             return 0;
 
+        case WM_APP_UPDATE:
+            Update_OnResult();
+            return 0;
+
         case WM_TIMER:
             if (wParam == kTimerFullscreen) {
                 Fullscreen_Check();
@@ -196,6 +208,13 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             switch (LOWORD(lParam)) {
                 case WM_LBUTTONUP: ShowPopupDeferred(); break;
                 case WM_RBUTTONUP: ShowTrayMenu(); break;
+                case NIN_BALLOONUSERCLICK:
+                    if (!s_balloonUrl.empty()) {
+                        std::wstring url;
+                        url.swap(s_balloonUrl);
+                        LaunchAsUser(url);  // 本程序是管理员时浏览器也以普通权限打开
+                    }
+                    break;
             }
             return 0;
 
@@ -230,13 +249,16 @@ LONG WINAPI OnCrash(EXCEPTION_POINTERS*) {
 
 }  // namespace
 
-bool ShowTrayBalloon(const wchar_t* title, const wchar_t* text) {
+bool ShowTrayBalloon(const wchar_t* title, const wchar_t* text, const wchar_t* clickUrl) {
     NOTIFYICONDATAW nid = s_nid;
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_INFO;
     lstrcpynW(nid.szInfoTitle, title, ARRAYSIZE(nid.szInfoTitle));
     lstrcpynW(nid.szInfo, text, ARRAYSIZE(nid.szInfo));
-    return Shell_NotifyIconW(NIM_MODIFY, &nid) != FALSE;
+    if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) return false;
+    // 新气泡顶替旧的：点击只对应最近弹出的那个（别的提示被点时不打开网页）
+    s_balloonUrl = clickUrl ? clickUrl : L"";
+    return true;
 }
 
 std::wstring SettingsDir() {
@@ -299,6 +321,7 @@ void LoadSettings() {
     g_settings.popupScale = std::max(kMinPopupScale, std::min(scale, kMaxPopupScale));
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
+    g_settings.checkUpdates = GetPrivateProfileIntW(L"General", L"CheckUpdates", 0, f.c_str()) != 0;
     std::vector<wchar_t> buf(32768);
     GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.excludeApps.clear();
@@ -323,6 +346,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"CheckUpdates", g_settings.checkUpdates ? L"1" : L"0", f.c_str());
     std::wstring exclude;
     for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;
     WritePrivateProfileStringW(L"General", L"ExcludeApps", exclude.c_str(), f.c_str());
@@ -372,6 +396,7 @@ void SetAutoStart(bool enabled) {
 void ApplySettings() {
     Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen);
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
+    Update_Configure();
 }
 
 }  // namespace app
@@ -458,6 +483,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     Elevation_Shutdown();
+    Update_Stop();
     Popup_Destroy();
     Apps_Stop();
     Volume_Release();

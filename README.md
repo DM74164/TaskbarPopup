@@ -42,6 +42,8 @@ Windows 11 任务栏增强：窗口最大化时藏起任务栏、让窗口铺满
 
 右键托盘图标 →“设置...”：开关“最大化时隐藏任务栏”和“长按 Win 弹出”、改长按时长（200 – 5000 毫秒）、迷你任务栏大小（50 – 200%，在系统缩放的基础上再放大缩小）、是否显示固定的应用和音量亮度调节、开机自动启动、编辑排除名单（每行一个程序名，如 `notepad.exe`）。托盘右键菜单里也能直接开关这两项功能、开机自启和“以管理员身份运行”；左键单击托盘图标弹出迷你任务栏。
 
+设置里的“自动检查更新”默认关闭；打开后每天到 GitHub Releases 查一次，有新版本时托盘弹出提示，点一下打开下载页面，不会自己下载或安装任何东西。不想常开的话，托盘右键菜单里的“检查更新”可以随时查一次。
+
 设置保存在 `%APPDATA%\TaskbarPopup\settings.ini`，可以用记事本直接改，改完重启程序：
 
 ```ini
@@ -54,6 +56,7 @@ ShowPinnedApps=1
 ShowLevels=1
 DebugLog=0
 RunAsAdmin=0
+CheckUpdates=0
 ExcludeApps=notepad.exe;game.exe
 ```
 
@@ -98,6 +101,7 @@ ExcludeApps=notepad.exe;game.exe
 | `src/windows.cpp` | 列出窗口、取图标 |
 | `src/levels.cpp` | 音量和亮度（Core Audio、DDC/CI、WMI） |
 | `src/elevation.cpp` | 以管理员身份运行 |
+| `src/update.cpp` | 检查更新（默认关闭） |
 | `src/settings_dialog.cpp` | 设置窗口 |
 | `src/util.cpp` | 工具函数、诊断日志 |
 | `src/version.h` | 版本号（自动构建按标签覆盖） |
