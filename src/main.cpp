@@ -185,6 +185,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Popup_Toggle();
             return 0;
 
+        case WM_HOTKEY:
+            Hotkeys_OnHotkey(wParam);
+            return 0;
+
         case WM_APP_AUTOHIDE_OFF:
             Fullscreen_OnAutoHideOff(static_cast<UINT>(wParam), lParam != 0);
             return 0;
@@ -340,6 +344,10 @@ void LoadSettings() {
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
     g_settings.theme = theme == kThemeLight || theme == kThemeDark ? theme : kThemeSystem;
     std::vector<wchar_t> buf(32768);
+    GetPrivateProfileStringW(L"General", L"PopupHotkey", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+    g_settings.popupHotkey = ParseHotkey(buf.data());
+    GetPrivateProfileStringW(L"General", L"PinHotkey", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+    g_settings.pinHotkey = ParseHotkey(buf.data());
     GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.excludeApps.clear();
     std::wstring list = buf.data();
@@ -367,6 +375,8 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"KeepFloatsOnTop", g_settings.keepFloatsOnTop ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupHotkey", HotkeyText(g_settings.popupHotkey).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PinHotkey", HotkeyText(g_settings.pinHotkey).c_str(), f.c_str());
     std::wstring exclude;
     for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;
     WritePrivateProfileStringW(L"General", L"ExcludeApps", exclude.c_str(), f.c_str());
@@ -418,6 +428,7 @@ void ApplySettings() {
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
     Update_Configure();
     FloatWindows_Configure(g_settings.keepFloatsOnTop);
+    Hotkeys_Apply();
 }
 
 }  // namespace app
@@ -494,6 +505,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (!Hook_Install())
         MessageBoxW(nullptr, L"无法安装键盘钩子，长按 Win 功能不可用。", L"TaskbarPopup", MB_ICONWARNING);
     AddTrayIcon();
+    Hotkeys_Apply();  // 快捷键注册不上时，上面那次托盘图标还没加上、气泡弹不出来，现在再试一次
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

@@ -641,6 +641,7 @@ void RequestAutoHideOff(HWND taskbar) {
         return;
     }
     FlushDesktopMark();
+    DesktopIcons_Cover();
     TaskbarAnim_WantAutoHide(0);
     SampleWorkAreas();
     s_offRequested = true;
