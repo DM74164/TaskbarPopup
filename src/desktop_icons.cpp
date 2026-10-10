@@ -2,6 +2,8 @@
 //
 // 打开 / 关闭自动隐藏任务栏会改变工作区，资源管理器接着让桌面按新的工作区重新排列图标，
 // 关回去以后图标不一定落回原来的格子。所以打开前记下每个图标的位置，关掉以后把挪了的摆回去。
+// 开着“将图标与网格对齐”（或“自动排列”）时，网格跟着工作区伸缩，任务栏回来那一下所有图标都会看得见地挪一小段。
+// 所以打开自动隐藏前临时关掉这两项，图标就停在原地不动；关掉自动隐藏、摆好以后再打开，图标正好在原来的格子上。
 // 桌面的 IFolderView 通过 IShellWindows 找到（Raymond Chen 介绍过的办法），调用都跨进程到资源管理器，
 // 图标多的时候要几百毫秒，所以放在单独的线程上做，不耽误主线程和动画。
 #include "common.h"
@@ -24,6 +26,10 @@ constexpr UINT kCmdFinish = WM_APP + 3;
 // 只记用户挪过的：其余的还按打开自动隐藏之前的位置摆回去。wParam：会话编号
 constexpr UINT kCmdMark = WM_APP + 4;
 constexpr UINT kCmdUpdate = WM_APP + 5;
+constexpr UINT kCmdRecover = WM_APP + 6;  // 上次没来得及把网格对齐打开回来（被强行结束、崩溃）
+
+// 临时关掉的桌面选项
+constexpr DWORD kGridFlags = static_cast<DWORD>(FWF_SNAPTOGRID) | static_cast<DWORD>(FWF_AUTOARRANGE);
 
 struct IconPos {
     PITEMID_CHILD pidl;
@@ -44,6 +50,7 @@ std::atomic<bool> s_quit{false};
 std::vector<IconPos> s_icons;  // 只在图标线程上用
 std::vector<POINT> s_layout;   // 关掉自动隐藏、桌面排好以后读到的位置（资源管理器排的），和 s_icons 一一对应
 std::vector<POINT> s_mark;     // Mark 时读到的位置，和 s_icons 一一对应
+DWORD s_cleared = 0;           // 临时关掉的桌面选项（FWF_*），只在图标线程上用
 
 // 用完自动 Release 的接口指针
 template <class T>
@@ -81,6 +88,72 @@ bool DesktopView(Ref<IFolderView>& view) {
     return SUCCEEDED(shellView->QueryInterface(IID_PPV_ARGS(&view.p)));
 }
 
+// 临时关掉的选项也记在设置文件里：被强行结束的话，下次启动时打开回来
+DWORD SavedClearedFlags() {
+    return static_cast<DWORD>(GetPrivateProfileIntW(L"State", L"DesktopFlags", 0, SettingsFile().c_str())) & kGridFlags;
+}
+
+void SaveClearedFlags(DWORD flags) {
+    EnsureUnicodeIni();
+    WritePrivateProfileStringW(L"State", L"DesktopFlags", flags ? std::to_wstring(flags).c_str() : nullptr,
+                               SettingsFile().c_str());
+}
+
+const wchar_t* FlagNames(DWORD flags) {
+    if (flags == kGridFlags) return L"“自动排列”和“将图标与网格对齐”";
+    return flags == FWF_AUTOARRANGE ? L"“自动排列”" : L"“将图标与网格对齐”";
+}
+
+// 把 flags 里的选项打开回来（只打开现在关着的，用户自己又打开过的不重复设）
+bool SetBack(IFolderView* view, DWORD flags) {
+    Ref<IFolderView2> view2;
+    DWORD now = 0;
+    if (FAILED(view->QueryInterface(IID_PPV_ARGS(&view2.p))) || FAILED(view2->GetCurrentFolderFlags(&now))) return false;
+    DWORD off = flags & ~now;
+    return !off || SUCCEEDED(view2->SetCurrentFolderFlags(off, off));
+}
+
+// 打开自动隐藏之前：临时关掉网格对齐和自动排列，工作区变了图标也停在原地
+void Freeze(IFolderView* view) {
+    if (s_cleared) return;  // 上次关掉以后还没打开回来，接着用
+    Ref<IFolderView2> view2;
+    DWORD now = 0;
+    if (FAILED(view->QueryInterface(IID_PPV_ARGS(&view2.p))) || FAILED(view2->GetCurrentFolderFlags(&now))) return;
+    DWORD clear = now & kGridFlags;
+    if (!clear) return;
+    SaveClearedFlags(clear);  // 先记下再关，关的这一刻被强行结束也能找回来
+    if (FAILED(view2->SetCurrentFolderFlags(clear, 0))) {
+        SaveClearedFlags(0);
+        return;
+    }
+    s_cleared = clear;
+    Log(L"临时关掉桌面的%ls，任务栏藏起 / 回来时图标不跟着挪", FlagNames(clear));
+}
+
+// 摆完了：把临时关掉的选项打开回来，图标落在原来的格子上
+void Thaw() {
+    if (!s_cleared) return;
+    Ref<IFolderView> view;
+    if (!DesktopView(view) || !SetBack(view.p, s_cleared)) {
+        Log(L"桌面的%ls没打开回来，下次启动时再试", FlagNames(s_cleared));
+        s_cleared = 0;
+        return;
+    }
+    Log(L"桌面的%ls打开回来了", FlagNames(s_cleared));
+    s_cleared = 0;
+    SaveClearedFlags(0);
+}
+
+// 上次临时关掉、没来得及打开回来的
+void Recover() {
+    DWORD flags = SavedClearedFlags();
+    if (!flags || s_cleared) return;  // 这次运行自己关的，摆完会打开
+    Ref<IFolderView> view;
+    if (!DesktopView(view) || !SetBack(view.p, flags)) return;
+    Log(L"上次没把桌面的%ls打开回来，现在打开", FlagNames(flags));
+    SaveClearedFlags(0);
+}
+
 void Clear() {
     for (IconPos& icon : s_icons) CoTaskMemFree(icon.pidl);
     s_icons.clear();
@@ -104,12 +177,14 @@ bool DesktopPressed() {
 void Save() {
     Clear();
     double start = NowMs();
+    Recover();
     Ref<IFolderView> view;
     if (!DesktopView(view)) {
         Log(L"找不到桌面，不记图标位置");
     } else if (view->GetAutoArrange() == S_OK) {
         // 自动排列时图标的位置由顺序决定，工作区变回来以后自己就排回去了
         Log(L"桌面图标是自动排列的，不用记位置");
+        Freeze(view.p);
     } else {
         Ref<IEnumIDList> items;
         if (SUCCEEDED(view->Items(SVGIO_ALLVIEW, IID_PPV_ARGS(&items.p))) && items) {
@@ -121,11 +196,13 @@ void Save() {
             }
         }
         Log(L"记下 %d 个桌面图标的位置，用了 %.0f 毫秒", static_cast<int>(s_icons.size()), NowMs() - start);
+        Freeze(view.p);
     }
     // 等的一方已经不等了：自动隐藏可能已经打开，读到的也许是重新排过的位置
     if (s_discard.exchange(false)) {
         Log(L"记图标位置太慢，这次不摆回去");
         Clear();
+        Thaw();  // 桌面可能已经按新工作区排过了，照常让它排
     }
 }
 
@@ -228,10 +305,13 @@ bool RestoreWhenSettled(UINT session, bool& pressed) {
 
 // 这一轮用完了：会话没变（没有又打开自动隐藏）就丢掉记下的位置，下次打开前重新记
 void Done(UINT session) {
-    std::lock_guard<std::mutex> guard(s_lock);
-    if (session != s_session) return;
-    Clear();
-    s_snapshot = false;
+    {
+        std::lock_guard<std::mutex> guard(s_lock);
+        if (session != s_session) return;
+        Clear();
+        s_snapshot = false;
+    }
+    Thaw();
 }
 
 DWORD WINAPI ThreadProc(LPVOID ready) {
@@ -290,8 +370,12 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 Done(session);
                 break;
             }
+            case kCmdRecover:
+                Recover();
+                break;
         }
     }
+    if (!s_quit) Thaw();  // 退出时还没摆完（会话又变了）：也打开回来。超时退出的留给下次启动
     Clear();
     CoUninitialize();
     return 0;
@@ -359,6 +443,12 @@ void DesktopIcons_AbandonUpdates() {
 void DesktopIcons_RestoreLater() {
     std::lock_guard<std::mutex> guard(s_lock);
     if (s_thread && s_snapshot) PostThreadMessageW(s_threadId, kCmdRestore, s_session, 0);
+}
+
+void DesktopIcons_Recover() {
+    if (!SavedClearedFlags()) return;
+    std::lock_guard<std::mutex> guard(s_lock);
+    if (EnsureThread()) PostThreadMessageW(s_threadId, kCmdRecover, 0, 0);
 }
 
 void DesktopIcons_Finish(DWORD ms) {
