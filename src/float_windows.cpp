@@ -1,15 +1,28 @@
 // 小窗口留在全屏窗口上面：最大化（或全屏）的窗口上浮着几个小窗口时，点一下大窗口，
-// 系统会把它提到最上面、小窗口全被盖住。这里在大窗口拿到前台（或者在它里面按了鼠标）后把它挪回这些小窗口下面（不抢焦点），
-// 大窗口照常能打字操作，小窗口一直看得见。小窗口最小化、最大化或关掉以后就不再管它。
+// 系统会把它提到最上面、小窗口全被盖住。在小窗口里双击一下，它就算“留在上面”的小窗口：
+// 之后大窗口拿到前台（或者在它里面按了鼠标），就把大窗口挪回这些小窗口下面（不抢焦点），
+// 大窗口照常能打字操作，小窗口一直看得见。没双击过的小窗口照系统原样被盖住；
+// 双击过的小窗口最小化、最大化或关掉以后就不再管它。
+//
+// 光在事后挪会闪一下（大窗口先盖住小窗口，再被挪下去）。所以还装了个鼠标钩子：在大窗口上按下鼠标、
+// 系统还没激活它之前，先把浮在上面的小窗口临时设成置顶，激活时大窗口怎么提也越不过它们，过一会儿再取消置顶。
+// 钩子和这里的一切都跑在单独的线程上，主线程忙着画玻璃时鼠标也不会卡。
 #include "common.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace app {
 namespace {
 
+// 主线程启停
+HANDLE s_thread = nullptr;
+DWORD s_threadId = 0;
+
+// 以下只在小窗口线程里访问
 HWINEVENTHOOK s_hook = nullptr;
-std::vector<HWND> s_floats;  // 当过前台的小窗口，按最近一次到前台的先后排
+HHOOK s_mouseHook = nullptr;
+std::vector<HWND> s_floats;  // 双击过的小窗口，最近双击的排前面
 
 bool MonitorRect(HWND hwnd, RECT& out) {
     MONITORINFO mi = {sizeof(mi)};
@@ -73,7 +86,7 @@ void CALLBACK OnCheck(HWND, UINT, UINT_PTR, DWORD) {
     if (!big || GetForegroundWindow() != big || !IsBigWindow(big)) return;
     std::vector<HWND> covered = CoveredFloats(big);
     if (covered.empty() && s_stage == 0)
-        Log(L"小窗口留在上面：%ls 在前台，记下的 %d 个小窗口都没被盖住", GetClassNameStr(big).c_str(),
+        Log(L"小窗口留在上面：%ls 在前台，双击过的 %d 个小窗口都没被盖住", GetClassNameStr(big).c_str(),
             static_cast<int>(s_floats.size()));
     if (!covered.empty()) {
         const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
@@ -102,6 +115,89 @@ void Watch(HWND big) {
     Schedule();
 }
 
+// 按下鼠标时临时置顶的小窗口（从下到上），多久以后取消置顶
+constexpr UINT kLiftMs = 400;
+std::vector<HWND> s_lifted;
+UINT_PTR s_liftTimer = 0;
+
+// 取消临时置顶。大窗口（或别的全屏窗口、或其中一个小窗口）在前台时放回普通窗口的最上面，正好还在大窗口上面；
+// 这期间换到了别的普通窗口，就放到它下面。异步，对方没响应也不会卡住鼠标
+void Restore() {
+    if (s_liftTimer) KillTimer(nullptr, s_liftTimer);
+    s_liftTimer = 0;
+    if (s_lifted.empty()) return;
+    HWND fg = GetForegroundWindow();
+    HWND after = HWND_NOTOPMOST;
+    if (fg && std::find(s_lifted.begin(), s_lifted.end(), fg) == s_lifted.end() && !IsBigWindow(fg) &&
+        !(GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST))
+        after = fg;
+    for (HWND h : s_lifted)  // 从下到上一个个放，彼此的上下顺序不变
+        if (IsWindow(h) && (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST))
+            SetWindowPos(h, after, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+    s_lifted.clear();
+}
+
+void CALLBACK OnLiftTimer(HWND, UINT, UINT_PTR, DWORD) { Restore(); }
+
+// 鼠标在大窗口上按下（还没交给它）：浮在它上面的小窗口临时置顶
+void BeforeClick(HWND big) {
+    static bool busy = false;  // 等对方响应时可能又收到钩子调用
+    if (busy || !IsBigWindow(big)) return;
+    std::vector<HWND> above;  // 从下到上
+    for (HWND h = GetWindow(big, GW_HWNDPREV); h; h = GetWindow(h, GW_HWNDPREV))
+        if (std::find(s_floats.begin(), s_floats.end(), h) != s_floats.end() && IsFloatOver(h, big))
+            above.push_back(h);
+    if (above.empty()) return;
+    busy = true;
+    for (HWND h : above) {
+        // 同步设置，保证在这次点击交给大窗口之前生效；对方卡住的话改成异步，最多耽误鼠标几十毫秒
+        UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+        if (!SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 50, nullptr)) flags |= SWP_ASYNCWINDOWPOS;
+        if (SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, flags)) s_lifted.push_back(h);
+    }
+    busy = false;
+    if (s_liftTimer) KillTimer(nullptr, s_liftTimer);
+    s_liftTimer = s_lifted.empty() ? 0 : SetTimer(nullptr, 0, kLiftMs, OnLiftTimer);
+}
+
+// 双击了一个小窗口：记下它，以后留在全屏窗口上面
+void Pin(HWND hwnd) {
+    if (!IsAppWindow(hwnd) || IsBigWindow(hwnd) || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) return;
+    bool known = std::find(s_floats.begin(), s_floats.end(), hwnd) != s_floats.end();
+    Forget(hwnd);
+    s_floats.insert(s_floats.begin(), hwnd);
+    if (s_floats.size() > 32) s_floats.resize(32);
+    if (!known) Log(L"小窗口留在上面：双击了 %ls，记下它（共 %d 个）", GetClassNameStr(hwnd).c_str(),
+                    static_cast<int>(s_floats.size()));
+}
+
+// 和系统判断双击的规则一样：同一个窗口上、双击时间内、位置挪得不多
+bool IsDoubleClick(HWND root, const MSLLHOOKSTRUCT& m) {
+    static HWND lastRoot = nullptr;
+    static DWORD lastTime = 0;
+    static POINT lastPt = {};
+    bool twice = root == lastRoot && m.time - lastTime <= GetDoubleClickTime() &&
+                 std::abs(m.pt.x - lastPt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) / 2 &&
+                 std::abs(m.pt.y - lastPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+    lastRoot = twice ? nullptr : root;  // 三击不算两次双击
+    lastTime = m.time;
+    lastPt = m.pt;
+    return twice;
+}
+
+LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION &&
+        (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN || wParam == WM_XBUTTONDOWN)) {
+        const auto& m = *reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+        if (HWND root = GetAncestor(WindowFromPoint(m.pt), GA_ROOT)) {
+            if (wParam == WM_LBUTTONDOWN && IsDoubleClick(root, m)) Pin(root);
+            BeforeClick(root);
+        }
+    }
+    return CallNextHookEx(s_mouseHook, code, wParam, lParam);
+}
+
 void CALLBACK OnEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
     if (!hwnd) return;
     if (event == EVENT_SYSTEM_CAPTURESTART || event == EVENT_SYSTEM_CAPTUREEND) {
@@ -119,30 +215,50 @@ void CALLBACK OnEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG
     if (IsBigWindow(hwnd)) {
         Forget(hwnd);  // 小窗口最大化了，就不再算小窗口
         Watch(hwnd);
-    } else if (IsAppWindow(hwnd) && !(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
-        Forget(hwnd);
-        s_floats.insert(s_floats.begin(), hwnd);
-        if (s_floats.size() > 32) s_floats.resize(32);
-        s_big = nullptr;
+        return;
     }
+    Restore();  // 换到了别的窗口，临时置顶的小窗口不用再护着
+    s_big = nullptr;
+}
+
+DWORD WINAPI FloatThread(LPVOID ready) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    MSG msg;
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // 先建好消息队列
+    s_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZESTART, nullptr, OnEvent, 0, 0,
+                             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    s_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, GetModuleHandleW(nullptr), 0);
+    if (!s_mouseHook) Log(L"小窗口留在上面：鼠标钩子装不上（错误 %lu），点全屏窗口时会闪一下", GetLastError());
+    SetEvent(static_cast<HANDLE>(ready));
+
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+
+    Restore();
+    if (s_timer) KillTimer(nullptr, s_timer);
+    s_timer = 0;
+    if (s_mouseHook) UnhookWindowsHookEx(s_mouseHook);
+    s_mouseHook = nullptr;
+    if (s_hook) UnhookWinEvent(s_hook);
+    s_hook = nullptr;
+    s_floats.clear();
+    s_big = nullptr;
+    return 0;
 }
 
 }  // namespace
 
 void FloatWindows_Configure(bool enabled) {
-    if (enabled == (s_hook != nullptr)) return;
+    if (enabled == (s_thread != nullptr)) return;
     if (enabled) {
-        s_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZESTART, nullptr, OnEvent, 0, 0,
-                                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-        HWND fg = GetForegroundWindow();
-        if (IsAppWindow(fg) && !IsBigWindow(fg)) s_floats.push_back(fg);
+        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        s_thread = CreateThread(nullptr, 0, FloatThread, ready, 0, &s_threadId);
+        if (s_thread) WaitForSingleObject(ready, INFINITE);
+        CloseHandle(ready);
     } else {
-        UnhookWinEvent(s_hook);
-        s_hook = nullptr;
-        s_floats.clear();
-        if (s_timer) KillTimer(nullptr, s_timer);
-        s_timer = 0;
-        s_big = nullptr;
+        PostThreadMessageW(s_threadId, WM_QUIT, 0, 0);
+        WaitForSingleObject(s_thread, 2000);
+        CloseHandle(s_thread);
+        s_thread = nullptr;
     }
 }
 
