@@ -257,6 +257,15 @@ void WaitForVBlank() {
     if (FAILED(DwmFlush()) || NowMs() - start < 0.3) Sleep(8);
 }
 
+bool ThemeIsLight(int theme, bool taskbar) {
+    if (theme == kThemeLight) return true;
+    if (theme == kThemeDark) return false;
+    DWORD value = taskbar ? 0 : 1, size = sizeof(value);  // 读不到时和 Windows 的默认一样：任务栏深色、应用浅色
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                 taskbar ? L"SystemUsesLightTheme" : L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return value != 0;
+}
+
 bool CaptureScreen(const RECT& area, std::vector<DWORD>& pixels) {
     int w = area.right - area.left, h = area.bottom - area.top;
     if (w <= 0 || h <= 0) return false;

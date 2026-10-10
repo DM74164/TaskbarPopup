@@ -61,11 +61,23 @@ const SliderSpec kSliderSpec[kSliderCount] = {
     {L"迷你任务栏大小", kMinPopupScale, kMaxPopupScale, 10},
 };
 
+// 几选一（分段按钮）
+enum SegId { kSegStyle, kSegTheme, kSegCount };
+struct SegSpec {
+    const wchar_t* label;
+    std::vector<const wchar_t*> options;  // 下标就是存进设置的值
+};
+const SegSpec kSegSpec[kSegCount] = {
+    {L"材质", {L"液态玻璃", L"毛玻璃"}},
+    {L"颜色", {L"跟随系统", L"浅色", L"深色"}},
+};
+constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
+
 // 能点的东西
-enum Kind { kNoItem, kToggleRow, kSliderRow, kCheckNow, kChip, kAddChip, kOk, kCancel, kClose };
+enum Kind { kNoItem, kToggleRow, kSliderRow, kSegment, kCheckNow, kChip, kAddChip, kOk, kCancel, kClose };
 struct Item {
     Kind kind = kNoItem;
-    int index = 0;  // 第几个开关 / 滑块 / 程序
+    int index = 0;  // 第几个开关 / 滑块 / 程序；分段按钮见 kSegStride
     RectF rect;     // 窗口里的位置（物理像素）
     bool operator==(const Item& o) const { return kind == o.kind && index == o.index; }
 };
@@ -74,6 +86,7 @@ struct Item {
 struct Values {
     bool on[kToggleCount] = {};
     int slider[kSliderCount] = {};
+    int seg[kSegCount] = {};
     std::vector<std::wstring> exclude;
 };
 Values s_v, s_initial;
@@ -104,7 +117,7 @@ std::vector<RectF> s_cards;  // 每组的卡片
 struct Text {
     std::wstring text;
     RectF rect;
-    int style;  // 0 组标题，1 提示，2 标题，3 版本号
+    int style;  // 0 组标题，1 提示，2 标题，3 版本号，4 一行的名字
 };
 std::vector<Text> s_texts;
 struct SliderGeom {
@@ -113,6 +126,7 @@ struct SliderGeom {
 };
 SliderGeom s_sliderGeom[kSliderCount];
 std::vector<float> s_rowLines;  // 卡片里两行之间的分隔线：每条 x0, x1, y 三个数
+RectF s_segTrack[kSegCount];    // 分段按钮的底槽
 
 Item s_hover, s_press, s_focus;
 bool s_showFocus = false;  // 用键盘切换过焦点才画焦点框
@@ -125,6 +139,10 @@ BYTE s_alpha = 255;
 Glass s_glass;
 std::vector<DWORD> s_base;  // 玻璃，悬停等重画直接复用
 bool s_baseValid = false;
+std::vector<DWORD> s_content;  // 玻璃上面的内容（透明底），拖动、背景变了只重画玻璃时直接复用
+bool s_contentValid = false;
+bool s_winDrag = false;  // 正在按住标题栏拖窗口
+POINT s_dragOffset = {};  // 鼠标相对窗口左上角的位置
 HDC s_canvasDC = nullptr;
 HBITMAP s_canvas = nullptr;
 HGDIOBJ s_canvasOld = nullptr;
@@ -187,6 +205,28 @@ float SliderRow(int which, float x, float y, float w) {
     return h;
 }
 
+// 几选一：左边名字，右边一排分段按钮
+float SegRow(int which, float x, float y, float w) {
+    float h = Px(50), bh = Px(30);
+    const SegSpec& spec = kSegSpec[which];
+    s_texts.push_back({spec.label, RectF(x + Px(kRowPad), y, Px(80), h), 4});
+    std::vector<float> widths;
+    float total = 0;
+    for (const wchar_t* option : spec.options) {
+        widths.push_back(MeasureWidth(option, Px(12.5f)) + Px(22));
+        total += widths.back();
+    }
+    float pad = Px(3);
+    RectF track(x + w - Px(kRowPad) - total - 2 * pad, y + (h - bh) / 2, total + 2 * pad, bh);
+    s_segTrack[which] = track;
+    float cx = track.X + pad;
+    for (size_t i = 0; i < widths.size(); ++i) {
+        s_items.push_back({kSegment, which * kSegStride + static_cast<int>(i), RectF(cx, track.Y + pad, widths[i], bh - 2 * pad)});
+        cx += widths[i];
+    }
+    return h;
+}
+
 // 名单：每个程序一个小胶囊（点一下去掉），最后是“添加程序”，排不下就换行
 float ChipsRow(float x, float y, float w) {
     float cx = x + Px(kRowPad), cy = y + Px(12);
@@ -237,6 +277,9 @@ void BuildLayout() {
     float right = AddGroup(px1, top, L"启动和更新",
                            {[](float x, float y, float w) { return ToggleRow(kAutoStart, x, y, w); },
                             [](float x, float y, float w) { return ToggleRow(kUpdates, x, y, w); }});
+    right = AddGroup(px1, right, L"外观",
+                     {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
+                      [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
     right = AddGroup(px1, right, L"最大化时不隐藏任务栏的程序", {ChipsRow});
 
     // “立即检查”放在“自动检查更新”那一行的开关左边
@@ -414,6 +457,18 @@ void DrawSliderRow(Graphics& g, const Item& it) {
     g.FillEllipse(&dot, x - core, sg.cy - core, 2 * core, 2 * core);
 }
 
+void DrawSegment(Graphics& g, const Item& it) {
+    const Palette& pal = Colors();
+    int which = it.index / kSegStride, option = it.index % kSegStride;
+    const RectF& r = it.rect;
+    bool selected = s_v.seg[which] == option;
+    if (option == 0) FillRound(g, s_segTrack[which], s_segTrack[which].Height / 2, pal.trackOff);
+    if (selected) DrawCard(g, r, r.Height / 2, pal.buttonHot, pal.cardRim);
+    else if (s_hover == it || s_press == it) FillRound(g, r, r.Height / 2, pal.hover);
+    DrawText(g, kSegSpec[which].options[option], Px(12.5f), FontStyleRegular, r, selected ? pal.text : pal.subtle,
+             StringAlignmentCenter);
+}
+
 void DrawChip(Graphics& g, const Item& it) {
     const Palette& pal = Colors();
     const RectF& r = it.rect;
@@ -482,6 +537,7 @@ void DrawContent(Graphics& g) {
                 DrawText(g, t.text, Px(11.5f), FontStyleRegular, t.rect, pal.subtle, StringAlignmentNear, true);
                 break;
             case 2: DrawText(g, t.text, Px(17), FontStyleBold, t.rect, pal.text); break;
+            case 4: DrawText(g, t.text, Px(13.5f), FontStyleRegular, t.rect, pal.text); break;
             default: DrawText(g, t.text, Px(11.5f), FontStyleRegular, t.rect, pal.subtle); break;
         }
     }
@@ -489,6 +545,7 @@ void DrawContent(Graphics& g) {
         switch (it.kind) {
             case kToggleRow: DrawToggleRow(g, it); break;
             case kSliderRow: DrawSliderRow(g, it); break;
+            case kSegment: DrawSegment(g, it); break;
             case kChip:
             case kAddChip: DrawChip(g, it); break;
             default: DrawButton(g, it); break;
@@ -537,8 +594,9 @@ bool EnsureCanvas() {
     return true;
 }
 
-// 先画玻璃（不变时用缓存），再用 GDI+ 画上面的内容，最后带逐像素透明度贴到屏幕
-void Render() {
+// 先画玻璃（不变时用缓存），再叠上内容（GDI+ 画在透明底上，没变时用缓存），最后带逐像素透明度贴到屏幕。
+// 窗口位置也在这里一起更新，拖动时位置和画面同一帧变。content：内容变了没有（只是玻璃变了时传 false）
+void Render(bool content = true) {
     if (!s_hwnd || s_width <= 0 || s_height <= 0 || !EnsureCanvas()) return;
     size_t count = static_cast<size_t>(s_width) * s_height;
     if (s_baseValid && s_base.size() == count) {
@@ -549,13 +607,30 @@ void Render() {
         s_base.assign(s_bits, s_bits + count);
         s_baseValid = true;
     }
-    {
-        Bitmap canvas(s_width, s_height, s_width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(s_bits));
+    if (content || !s_contentValid || s_content.size() != count) {
+        s_content.assign(count, 0);
+        Bitmap canvas(s_width, s_height, s_width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(s_content.data()));
         Graphics g(&canvas);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
         g.SetTextRenderingHint(TextRenderingHintAntiAlias);
         g.SetPixelOffsetMode(PixelOffsetModeHalf);
         DrawContent(g);
+        s_contentValid = true;
+    }
+    // 预乘颜色的“盖在上面”：结果 = 内容 + 玻璃 × (1 − 内容的不透明度)
+    for (size_t i = 0; i < count; ++i) {
+        DWORD c = s_content[i];
+        DWORD a = c >> 24;
+        if (a == 0) continue;
+        if (a == 255) {
+            s_bits[i] = c;
+            continue;
+        }
+        DWORD d = s_bits[i], k = 255 - a;
+        DWORD rb = (d & 0x00FF00FF) * k, ag = ((d >> 8) & 0x00FF00FF) * k;
+        rb = ((rb + 0x00800080 + ((rb >> 8) & 0x00FF00FF)) >> 8) & 0x00FF00FF;
+        ag = (ag + 0x00800080 + ((ag >> 8) & 0x00FF00FF)) & 0xFF00FF00;
+        s_bits[i] = c + (rb | ag);
     }
     SIZE size = {s_width, s_height};
     POINT src = {0, 0};
@@ -585,16 +660,12 @@ struct ShotJob {
     UINT seq;
     RECT window;
     float scale;
+    bool frosted;
     bool compare;    // 和 prev 比较，一样就不处理
     GlassShot prev;  // 只有 area 和 raw
     GlassShot shot;
     bool changed = false;
 };
-
-RECT PanelOnScreen() {
-    return {s_pos.x + static_cast<LONG>(s_panel.X), s_pos.y + static_cast<LONG>(s_panel.Y),
-            s_pos.x + static_cast<LONG>(s_panel.X + s_panel.Width), s_pos.y + static_cast<LONG>(s_panel.Y + s_panel.Height)};
-}
 
 bool SetExclude(bool on) {
     if (on == s_excluded) return true;
@@ -654,14 +725,14 @@ void CaptureBehind() {
         }
     }
     RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
-    s_glass.Capture(window, PanelOnScreen(), s_scale);
+    s_glass.Capture(window, s_scale);
     s_baseValid = false;
     s_still = 0;
 }
 
 DWORD WINAPI ShotThread(void* param) {
     auto* job = static_cast<ShotJob*>(param);
-    job->changed = Glass::Shoot(job->window, job->scale, job->shot, job->compare ? &job->prev : nullptr);
+    job->changed = Glass::Shoot(job->window, job->scale, job->frosted, job->shot, job->compare ? &job->prev : nullptr);
     if (!PostMessageW(job->hwnd, WM_APP_SHOT, 0, reinterpret_cast<LPARAM>(job))) delete job;
     return 0;
 }
@@ -674,6 +745,7 @@ bool StartShot() {
     LONG extra = s_moving ? static_cast<LONG>(std::lround(Px(320))) : 0;
     job->window = {s_pos.x - extra, s_pos.y - extra, s_pos.x + s_width + extra, s_pos.y + s_height + extra};
     job->scale = s_scale;
+    job->frosted = s_glass.Frosted();
     job->compare = !s_moving;
     if (job->compare) {
         job->prev.area = s_glass.Area();
@@ -730,11 +802,11 @@ void OnShot(ShotJob* raw) {
         CloseHandle(s_shotThread);
         s_shotThread = nullptr;
     }
-    if (job->seq == s_shotSeq) {
+    if (job->seq == s_shotSeq && job->frosted == s_glass.Frosted()) {
         if (job->changed) {
-            s_glass.Adopt(std::move(job->shot), PanelOnScreen(), job->scale, false);
+            s_glass.Adopt(std::move(job->shot), job->scale);
             s_baseValid = false;
-            Render();
+            Render(false);
             s_still = 0;
         } else {
             ++s_still;
@@ -756,12 +828,34 @@ void OnShot(ShotJob* raw) {
     SetTimer(s_hwnd, kTimerLive, next, nullptr);
 }
 
-// 拖动中：按新位置重新判断明暗、去背景里取色；后台截不过来时边上先用截图边缘的颜色顶着
+// 拖动中：按新位置去背景里取色（后台截不过来时边上先用截图边缘的颜色顶着）；
+// 不支持实时刷新时玻璃保持原样，跟着窗口走
 void FollowMove() {
-    s_glass.UpdateLight(PanelOnScreen());
+    if (s_excludeWorks < 0) {
+        Render(false);
+        return;
+    }
     s_baseValid = false;
-    Render();
+    Render(false);
     if (!s_shotThread) LiveTick();
+}
+
+// 拖完了：接着按平常的节奏刷新
+void EndMove() {
+    s_moving = false;
+    s_still = 0;
+    if (s_excludeWorks >= 0) LiveTick();
+}
+
+// 材质、颜色选项变了（或者系统换了深浅色）：换玻璃，毛玻璃模糊得更厉害，要重新截
+void ApplyLook() {
+    s_glass.SetLight(ThemeIsLight(s_v.seg[kSegTheme], false));
+    bool frosted = s_v.seg[kSegStyle] == kGlassFrosted;
+    if (frosted != s_glass.Frosted()) {
+        s_glass.SetFrosted(frosted);
+        if (s_hwnd && IsWindowVisible(s_hwnd)) CaptureBehind();  // 还没显示时打开窗口那里会截
+    }
+    s_baseValid = false;
 }
 
 // 布局变了（名单增删、换了显示器）：上边缘不动，大小跟着变，背景重新截
@@ -937,6 +1031,8 @@ void Apply() {
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
+    if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
+    if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
 
     // 名单按增删合并到现在的名单上，不整个替换
     auto contains = [](const std::vector<std::wstring>& list, const std::wstring& name) {
@@ -956,6 +1052,10 @@ void Apply() {
 void Activate(const Item& it) {
     switch (it.kind) {
         case kToggleRow: SetToggle(it.index, !s_v.on[it.index]); break;
+        case kSegment:
+            s_v.seg[it.index / kSegStride] = it.index % kSegStride;
+            ApplyLook();  // 马上换上看看效果，取消时不保存
+            break;
         case kCheckNow: Update_CheckNow(true); break;
         case kChip: RemoveExclude(it.index); return;
         case kAddChip: ShowAddMenu(it.rect); return;
@@ -1046,6 +1146,10 @@ void ReleaseAll() {
     StopShot();
     s_excluded = false;
     s_moving = false;
+    s_winDrag = false;
+    s_content.clear();
+    s_content.shrink_to_fit();
+    s_contentValid = false;
     ReleaseCanvas();
     s_base.clear();
     s_base.shrink_to_fit();
@@ -1059,45 +1163,36 @@ void ReleaseAll() {
 
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-        case WM_NCHITTEST: {
-            // 标题栏（关闭按钮除外）可以拖动窗口
-            POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            ScreenToClient(hwnd, &pt);
-            PointF p(static_cast<float>(pt.x), static_cast<float>(pt.y));
-            RectF header(s_panel.X, s_panel.Y, s_panel.Width, Px(kHeaderH));
-            const Item* close = FindItem({kClose, 0, {}});
-            if (header.Contains(p) && !(close && close->rect.Contains(p))) return HTCAPTION;
-            return HTCLIENT;
-        }
-
-        case WM_ENTERSIZEMOVE:
-            // 拖动时玻璃跟着位置实时重画：后台不停地截窗口四周一大片
+        // 标题栏拖动窗口自己做（不用系统的 HTCAPTION）：新位置和按新位置画好的玻璃用同一次
+        // UpdateLayeredWindow 贴上去，不会先挪窗口、下一帧玻璃才跟上
+        case WM_ENTERSIZEMOVE:  // Alt+空格菜单里的“移动”还是走系统的
             s_moving = true;
             s_still = 0;
-            LiveTick();
+            if (s_excludeWorks >= 0) LiveTick();
             return 0;
 
-        case WM_EXITSIZEMOVE: {
-            s_moving = false;
-            s_still = 0;
-            RECT r;
-            GetWindowRect(hwnd, &r);
-            s_pos = {r.left, r.top};
-            if (s_excludeWorks >= 0) {  // 不支持实时刷新时玻璃保持原样，跟着窗口走
-                if (s_glass.UpdateLight(PanelOnScreen())) s_baseValid = false;
-                Render();
-                LiveTick();
-            }
+        case WM_EXITSIZEMOVE:
+            EndMove();
             return 0;
-        }
 
         case WM_MOVE: {
             RECT r;
             GetWindowRect(hwnd, &r);
-            s_pos = {r.left, r.top};
-            if (s_moving && s_excludeWorks >= 0) FollowMove();
+            POINT pos = {r.left, r.top};
+            if (pos.x == s_pos.x && pos.y == s_pos.y) return 0;
+            s_pos = pos;
+            if (s_moving && !s_winDrag) FollowMove();
             return 0;
         }
+
+        case WM_SETTINGCHANGE:
+            // 系统换了深浅色
+            if (lParam && wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0 &&
+                s_v.seg[kSegTheme] == kThemeSystem) {
+                ApplyLook();
+                Render();
+            }
+            break;
 
         case WM_ACTIVATE:
             // 每次回到前台都把键盘焦点放回来（DefWindowProc 本来会做），不然按键会变成系统键、按一下响一声
@@ -1112,6 +1207,16 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case WM_MOUSEMOVE: {
             int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+            if (s_winDrag) {
+                POINT pt;
+                GetCursorPos(&pt);
+                POINT pos = {pt.x - s_dragOffset.x, pt.y - s_dragOffset.y};
+                if (pos.x != s_pos.x || pos.y != s_pos.y) {
+                    s_pos = pos;
+                    FollowMove();
+                }
+                return 0;
+            }
             if (s_drag >= 0) {
                 int before = s_v.slider[s_drag];
                 SetSliderFromX(s_drag, x);
@@ -1130,6 +1235,19 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         case WM_LBUTTONDOWN: {
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            if (it.kind == kNoItem &&
+                RectF(s_panel.X, s_panel.Y, s_panel.Width, Px(kHeaderH))
+                    .Contains(PointF(static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam))))) {
+                POINT pt;
+                GetCursorPos(&pt);
+                s_dragOffset = {pt.x - s_pos.x, pt.y - s_pos.y};
+                s_winDrag = true;
+                s_moving = true;
+                s_still = 0;
+                SetCapture(hwnd);
+                if (s_excludeWorks >= 0) LiveTick();  // 后台开始不停地截窗口四周一大片
+                return 0;
+            }
             s_press = it;
             s_showFocus = false;
             if (it.kind != kNoItem) {
@@ -1146,6 +1264,12 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         case WM_LBUTTONUP: {
+            if (s_winDrag) {
+                s_winDrag = false;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                EndMove();
+                return 0;
+            }
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             Item pressed = s_press;
             bool dragged = s_drag >= 0;
@@ -1162,6 +1286,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         case WM_CAPTURECHANGED:
+            if (s_winDrag && reinterpret_cast<HWND>(lParam) != hwnd) {
+                s_winDrag = false;
+                EndMove();
+                return 0;
+            }
             if ((s_drag >= 0 || s_press.kind != kNoItem) && reinterpret_cast<HWND>(lParam) != hwnd) {
                 s_drag = -1;
                 s_press = {};
@@ -1260,6 +1389,8 @@ void SettingsDialog_Show() {
     s_initial.on[kUpdates] = g_settings.checkUpdates;
     s_initial.slider[kLongPressMs] = g_settings.longPressMs;
     s_initial.slider[kScale] = g_settings.popupScale;
+    s_initial.seg[kSegStyle] = g_settings.glassStyle;
+    s_initial.seg[kSegTheme] = g_settings.theme;
     s_initial.exclude = g_settings.excludeApps;
     s_v = s_initial;
     for (int i = 0; i < kToggleCount; ++i) s_knob[i] = s_v.on[i] ? 1.0f : 0.0f;
@@ -1289,6 +1420,7 @@ void SettingsDialog_Show() {
     BOOL disable = TRUE;
     DwmSetWindowAttribute(s_hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
 
+    ApplyLook();
     CaptureBehind();  // 还没显示：直接截
     s_openedAt = NowMs();
     s_alpha = 0;
