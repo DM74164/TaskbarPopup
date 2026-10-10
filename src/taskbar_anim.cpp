@@ -54,11 +54,13 @@ struct Slide {
     bool settling = false;     // 真任务栏正在显示出来，截图停留 / 淡出
     double shownAt = 0;        // 发出显示真任务栏请求的时间
     double settleStart = 0;    // 真任务栏真正显示出来的时间，0 = 还没显示
+    bool earlyOff = false;     // 正在滑回来，自动隐藏已经提前关了（真任务栏得一直藏着，等截图滑到原位）
 };
 
 // 以下只在动画线程里访问
 std::vector<std::unique_ptr<Slide>> s_slides;
 UINT s_offSeq = 0;  // 还没执行的“关掉自动隐藏”请求的编号，0 = 没有
+HANDLE s_offThread = nullptr;  // 提前关自动隐藏的线程
 
 HANDLE s_thread = nullptr;
 DWORD s_threadId = 0;
@@ -178,6 +180,7 @@ void ShowOverlay(Slide& s) {
 }
 
 void StartMove(Slide& s, double to) {
+    s.earlyOff = false;
     s.from = s.pos;
     s.to = to;
     s.start = NowMs();
@@ -188,12 +191,27 @@ void StartMove(Slide& s, double to) {
     s.settling = false;
 }
 
+// 等提前关自动隐藏的线程做完，之后才能再开、再关，免得先后颠倒。
+// 等的时候照样处理发来的消息：资源管理器要等每个窗口（包括这个线程的截图窗口）处理完广播才返回
+void JoinOff() {
+    if (!s_offThread) return;
+    DWORD start = GetTickCount();
+    for (DWORD elapsed = 0; elapsed < 3000; elapsed = GetTickCount() - start) {
+        if (MsgWaitForMultipleObjectsEx(1, &s_offThread, 3000 - elapsed, QS_SENDMESSAGE, 0) != WAIT_OBJECT_0 + 1) break;
+        MSG msg;
+        PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+    }
+    CloseHandle(s_offThread);
+    s_offThread = nullptr;
+}
+
 // 关掉本程序打开的自动隐藏，再告诉主线程（它接着把没跟着缩回去的窗口、桌面图标收拾好）
 // 资源管理器没在运行（崩溃、重启中）时关不掉，也照实告诉主线程：它会记着自动隐藏还开着，等资源管理器回来再关
 void ApplyPendingOff() {
     if (!s_offSeq) return;
     UINT seq = s_offSeq;
     s_offSeq = 0;
+    JoinOff();
     DesktopIcons_WaitUpdated(1000);  // 工作区一变桌面就重新排列，用户挪过的图标得先读完
     // 等的时候主线程改了主意（窗口又最大化了，已经要求重新打开），或者要退出了（主线程自己关）：不关了。
     // 主线程那边已经不等这次的回报
@@ -201,6 +219,57 @@ void ApplyPendingOff() {
     DesktopIcons_AbandonUpdates();
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);
+}
+
+struct OffJob {
+    UINT seq;
+    UINT generation;
+};
+
+DWORD WINAPI OffThread(LPVOID param) {
+    std::unique_ptr<OffJob> job(static_cast<OffJob*>(param));
+    t_generation = job->generation;
+    DesktopIcons_WaitUpdated(1000);
+    if (Stopped() || s_wantedSeq != 0) return 0;  // 等的时候主线程改了主意，或者要退出了
+    DesktopIcons_AbandonUpdates();
+    bool done = Taskbar_SetAutoHide(false);
+    PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, job->seq, done);
+    return 0;
+}
+
+// 这块屏上有最大化的窗口（看得见的）
+bool MaximizedOn(HMONITOR monitor) {
+    struct Ctx {
+        HMONITOR monitor;
+        bool found;
+    } ctx = {monitor, false};
+    EnumWindows(
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            auto& c = *reinterpret_cast<Ctx*>(param);
+            if (!IsWindowVisible(hwnd) || !IsZoomed(hwnd) || IsCloaked(hwnd)) return TRUE;
+            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != c.monitor) return TRUE;
+            c.found = true;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found;
+}
+
+// 截图开始滑回来时：这块屏上没有最大化的窗口（回到了桌面、或者窗口都还原了），关自动隐藏时没有窗口要在截图后面缩回去，
+// 就不等滑到原位，现在关，桌面图标也能早点排回原位显示出来。在另一个线程上关：关的时候要等资源管理器广播完，
+// 在这里关会卡住正在滑的截图
+bool OffEarly(const Slide& s) {
+    if (!s_offSeq || MaximizedOn(MonitorFromRect(&s.rect, MONITOR_DEFAULTTONEAREST))) return false;
+    JoinOff();
+    auto* job = new OffJob{s_offSeq, t_generation};
+    HANDLE thread = CreateThread(nullptr, 0, OffThread, job, 0, nullptr);
+    if (!thread) {
+        delete job;
+        return false;
+    }
+    s_offThread = thread;
+    s_offSeq = 0;
+    return true;
 }
 
 bool SlidingIn() {
@@ -222,6 +291,8 @@ void AfterHidden(const HideCommand& c) {
         s_offSeq = 0;  // 还没执行的关闭请求作废
         DesktopIcons_WaitSaved(1500);  // 工作区一变桌面就重新排列，得先记完图标位置
         // 要退出了，或者主线程已经改主意要关了（窗口最大化后马上又还原）：不开，也不拉伸
+        if (Stopped() || c.autoHideSeq != s_wantedSeq) return;
+        JoinOff();  // 刚提前关过的话等它关完再开
         if (Stopped() || c.autoHideSeq != s_wantedSeq) return;
         bool done = Taskbar_SetAutoHide(true);
         PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_ON, c.autoHideSeq, done);
@@ -337,7 +408,10 @@ void OnShow(HWND taskbar, UINT offSeq) {
         ApplyPendingOff();
         return;
     }
-    if (s->moving && s->to == 0) return;  // 正在滑回来，滑到原位时关自动隐藏
+    if (s->moving && s->to == 0) {  // 正在滑回来，滑到原位时关自动隐藏（能提前关的话现在关）
+        if (!s->earlyOff) s->earlyOff = OffEarly(*s);
+        return;
+    }
     if (!s->moving && s->pos == 0) {  // 本来就在原位
         ApplyPendingOff();
         ShowWindowAsync(taskbar, SW_SHOWNA);
@@ -369,6 +443,7 @@ void OnShow(HWND taskbar, UINT offSeq) {
         ShowWindowAsync(taskbar, SW_HIDE);
     }
     StartMove(*s, 0);
+    s->earlyOff = OffEarly(*s);
 }
 
 // 推进一帧，返回是否还有动画在进行
@@ -392,6 +467,8 @@ bool Step() {
             s.start = now;
         }
         if (s.moving) {
+            // 自动隐藏提前关了，资源管理器可能自己把真任务栏显示出来：截图滑到原位之前一直藏着，免得两条任务栏一起出现
+            if (s.earlyOff && IsWindowVisible(s.taskbar)) ShowWindowAsync(s.taskbar, SW_HIDE);
             double t = std::min(1.0, (now - s.start) / s.duration);
             // 滑出先慢后快，滑入先快后慢
             double e = s.to > s.from ? t * t : 1 - (1 - t) * (1 - t) * (1 - t);
@@ -488,6 +565,7 @@ DWORD WINAPI AnimThread(LPVOID ready) {
         if (active) WaitForVBlank();
     }
 
+    JoinOff();
     for (auto& s : s_slides) Destroy(*s);
     s_slides.clear();
     while (PeekMessageW(&msg, nullptr, kCmdHide, kCmdHide, PM_REMOVE))  // 没来得及处理的命令
