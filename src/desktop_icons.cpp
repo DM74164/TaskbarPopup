@@ -33,6 +33,8 @@ constexpr UINT kCmdUpdate = WM_APP + 5;
 constexpr UINT kCmdRecover = WM_APP + 6;  // 上次藏起的桌面图标没来得及显示回来（被强行结束、崩溃）
 constexpr UINT kCmdReveal = WM_APP + 7;   // 自动隐藏刚关掉：图标排回原位就显示。wParam：会话编号
 constexpr UINT kCmdCover = WM_APP + 8;    // 要回到桌面了：照片重新垫一下（资源管理器可能改过桌面窗口的层次）
+// 上次关掉以后还没摆完又打开了自动隐藏：记下的位置接着用，图标已经显示回来的话重新拍照、藏起
+constexpr UINT kCmdRehide = WM_APP + 9;
 constexpr wchar_t kCoverClass[] = L"TaskbarPopupDesktopCover";
 
 struct IconPos {
@@ -247,6 +249,29 @@ void HideIcons() {
     s_hiddenList = list;
     s_hiddenAt = NowMs();
     Log(L"藏起桌面图标，任务栏回来、图标排回原位以后再显示");
+}
+
+// 上次关掉以后还没摆完又要打开自动隐藏（kCmdRehide），打开之前做：图标还藏着的话照片也接着用；已经显示回来的话，
+// 图标都在记下的位置、图标窗口和工作区也和记位置时一样才重新拍照，不然不拍（回桌面时图标晚一下出现，不会盖一张不对的照片）
+void Reshoot() {
+    if (s_hiddenList) return;
+    ReleaseShot();
+    HWND list = s_savedList;
+    if (!IsWindow(list) || !WillHide(list)) return;
+    RECT now;
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetWindowRect(list, &now) || !EqualRect(&now, &s_savedListRect) ||
+        !GetMonitorInfoW(MonitorFromWindow(list, MONITOR_DEFAULTTONEAREST), &mi) || !EqualRect(&mi.rcWork, &s_savedWork) ||
+        !AtSaved(Read())) {
+        Log(L"桌面图标还没排回原位，这次不拍照");
+        return;
+    }
+    Capture(list);
+    // 等的一方已经不等了：自动隐藏可能已经打开，照片也许拍到了挪动中的图标
+    if (s_discard.exchange(false) && s_shot) {
+        ReleaseShot();
+        Log(L"拍照太慢，照片不用");
+    }
 }
 
 // 显示图标；盖着照片的话等资源管理器把图标画出来再撤掉
@@ -502,6 +527,12 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 ShowCover();  // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面
                 break;
             }
+            case kCmdRehide:
+                Reshoot();
+                SetEvent(s_savedEvent);
+                HideIcons();
+                ShowCover();
+                break;
             case kCmdCover:
                 if (Current(static_cast<UINT>(msg.wParam))) ShowCover();
                 break;
@@ -594,13 +625,14 @@ bool EnsureThread() {
 void DesktopIcons_BeginSession() {
     std::lock_guard<std::mutex> guard(s_lock);
     ++s_session;
-    if (s_snapshot) return;  // 上次关掉以后还没摆完：记下的还是打开之前的样子，接着用
+    // 上次关掉以后还没摆完：记下的还是打开之前的样子，接着用；图标可能已经显示回来了，要重新藏起
+    UINT cmd = s_snapshot ? kCmdRehide : kCmdSave;
     if (!EnsureThread()) return;
     s_snapshot = true;
     s_discard = false;
     ResetEvent(s_savedEvent);
-    if (!PostThreadMessageW(s_threadId, kCmdSave, 0, 0)) {
-        s_snapshot = false;
+    if (!PostThreadMessageW(s_threadId, cmd, 0, 0)) {
+        if (cmd == kCmdSave) s_snapshot = false;
         SetEvent(s_savedEvent);
     }
 }
