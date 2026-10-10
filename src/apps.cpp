@@ -109,7 +109,16 @@ std::vector<InstalledApp> Apps_Match(const std::wstring& filter, size_t max) {
 }
 
 void Apps_Stop() {
-    if (s_thread.joinable()) s_thread.join();
+    if (!s_thread.joinable()) return;
+    // 后台还在读开始菜单（某个应用或外壳扩展卡住时可能一直读不完）：最多等半秒，等不到就不等了，
+    // 进程最后用 TerminateProcess 结束
+    for (int i = 0; i < 50 && s_loading; ++i) Sleep(10);
+    if (s_loading) {
+        Log(L"读应用列表的线程没有及时结束");
+        s_thread.detach();
+    } else {
+        s_thread.join();
+    }
 }
 
 }  // namespace app
