@@ -800,6 +800,23 @@ void LeaveHiddenMode() {
     RequestAutoHideOff(nullptr);  // 已经要求过的不会重复
 }
 
+// 从迷你任务栏打开的开始菜单：用的就是迷你任务栏，开始菜单在前台时系统任务栏照样藏着。
+// 点了以后 3 秒内到前台的系统界面算这一次；它到过前台以后，前台换成别的窗口就作废
+DWORD s_quietStartAt = 0;  // 在迷你任务栏上点开始菜单的时间，0 = 没有
+bool s_quietStartSeen = false;
+
+bool QuietShellUi(HWND fg) {
+    if (!s_quietStartAt) return false;
+    bool shellUi = fg && InList(GetClassNameStr(fg), kShellUiClasses);
+    bool late = GetTickCount() - s_quietStartAt > 3000;
+    if (shellUi && (s_quietStartSeen || !late)) {
+        s_quietStartSeen = true;
+        return true;
+    }
+    if (shellUi || s_quietStartSeen || late) s_quietStartAt = 0;
+    return false;
+}
+
 void ShowForShellUi() {
     for (const Hidden& h : s_hidden) {
         if (!IsWindow(h.taskbar) || IsWindowVisible(h.taskbar)) continue;
@@ -898,6 +915,7 @@ void EvaluateNow(bool enforce) {
         if (steady) FlushDesktopMark();
         else s_desktopMarked = false;
     }
+    bool quiet = QuietShellUi(fg);
     bool transient = !fg || IsTransient(fg);
     WatchLocation(transient ? s_targetWindow : fg);
     if (transient) {
@@ -905,7 +923,7 @@ void EvaluateNow(bool enforce) {
         // 除非让任务栏隐藏的那个窗口已经最小化、关掉或还原了：
         // 最小化最后一个窗口后，前台常常落到正隐藏着的任务栏上，不处理的话任务栏就一直出不来
         if (!s_targetMonitor || GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
-            if (s_targetMonitor && fg && InList(GetClassNameStr(fg), kShellUiClasses)) ShowForShellUi();
+            if (s_targetMonitor && fg && !quiet && InList(GetClassNameStr(fg), kShellUiClasses)) ShowForShellUi();
             return;
         }
         fg = nullptr;
@@ -1163,6 +1181,12 @@ void Taskbar_EmergencyRestore() {
     for (HWND h : FindTaskbars())
         if (!IsWindowVisible(h) || std::find(s_everHidden.begin(), s_everHidden.end(), h) != s_everHidden.end())
             ShowWindowAsync(h, SW_SHOWNA);
+}
+
+void Fullscreen_QuietStartMenu() {
+    s_quietStartAt = GetTickCount();
+    if (!s_quietStartAt) s_quietStartAt = 1;
+    s_quietStartSeen = false;
 }
 
 bool Taskbar_IsShownOn(HMONITOR monitor) {
