@@ -99,6 +99,7 @@ void Fullscreen_Check();
 void Fullscreen_OnAutoHideOff(UINT seq, bool done);  // 收到 WM_APP_AUTOHIDE_OFF
 void Fullscreen_OnAutoHideOn(UINT seq, bool done);   // 收到 WM_APP_AUTOHIDE_ON
 void Fullscreen_OnTaskbarCreated();                  // 资源管理器（重新）启动了
+void Fullscreen_QuietStartMenu();                    // 接下来打开的开始菜单是迷你任务栏点的：不把藏着的任务栏放出来
 void Taskbar_RestoreAll();        // 启动、退出时：显示所有任务栏，关掉本程序打开的自动隐藏，窗口和桌面图标还原
 void Taskbar_EmergencyRestore();  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
 bool Taskbar_IsShownOn(HMONITOR monitor);  // 这块屏幕上的任务栏现在是否显示着（没被本程序藏起来）

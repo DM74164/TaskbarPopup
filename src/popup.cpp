@@ -823,6 +823,7 @@ void Launch(const std::wstring& target) {
 void ActivateIndex(int idx, bool newInstance = false) {
     if (idx == 0) {
         HideNow();
+        Fullscreen_QuietStartMenu();
         SendStartMenu();
         return;
     }
