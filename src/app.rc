@@ -1,10 +1,11 @@
 #include <windows.h>
+#include "version.h"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,0,0
-PRODUCTVERSION 1,0,0,0
+FILEVERSION TP_VERSION_MAJOR,TP_VERSION_MINOR,TP_VERSION_PATCH,0
+PRODUCTVERSION TP_VERSION_MAJOR,TP_VERSION_MINOR,TP_VERSION_PATCH,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -14,12 +15,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "DM74164"
             VALUE "FileDescription", "TaskbarPopup"
-            VALUE "FileVersion", "1.0.0"
+            VALUE "FileVersion", TP_VERSION_STR
             VALUE "InternalName", "TaskbarPopup"
             VALUE "LegalCopyright", "Copyright (C) 2026 DM74164, AGPL-3.0"
             VALUE "OriginalFilename", "TaskbarPopup.exe"
             VALUE "ProductName", "TaskbarPopup"
-            VALUE "ProductVersion", "1.0.0"
+            VALUE "ProductVersion", TP_VERSION_STR
             VALUE "Comments", "https://github.com/DM74164/TaskbarPopup"
         END
     END
