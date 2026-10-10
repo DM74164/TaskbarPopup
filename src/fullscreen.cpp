@@ -1023,6 +1023,7 @@ void Fullscreen_OnAutoHideOff(UINT seq, bool done) {
     s_ownAutoHide = false;
     s_autoHideConfirmed = false;
     SetRestoreAutoHideFlag(false);
+    DesktopIcons_RevealLater();
     // 等资源管理器广播完工作区的变化，程序和桌面照新的工作区排好以后再收拾
     SetTimer(g_mainWnd, kTimerAfterAutoHide, static_cast<UINT>(300 * TP_ANIM_SCALE), OnAfterAutoHide);
 }
