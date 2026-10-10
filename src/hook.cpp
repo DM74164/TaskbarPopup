@@ -44,6 +44,7 @@ DWORD s_threadId = 0;
 // 快捷键：主线程交过来的放在 s_newBindings，钩子线程收到 kMsgBindings 后换上
 constexpr UINT kMsgBindings = WM_APP + 1;
 constexpr DWORD kMaskVk = 0xE8;  // 没分配用途的键码，单独的 Alt / Shift 触发后补发它
+constexpr DWORD kTapMaxMs = 600;  // 单独的修饰键只设了单按时，按住超过这么久再松开就不算单按
 std::mutex s_bindLock;
 std::vector<KeyBinding> s_newBindings;
 
@@ -181,7 +182,7 @@ bool BeginPress(const KeyBinding& b, UINT vk, DWORD scan, bool extended, DWORD t
     s_press.target = target;
     if (IsModifierVk(vk)) {
         s_press.state = Press::Modifier;
-        if (b.hold >= 0) s_bindTimer = SetTimer(nullptr, 0, static_cast<UINT>(s_thresholdMs.load()), OnBindTimer);
+        if (b.hold >= 0) s_bindTimer = SetTimer(nullptr, 0, static_cast<UINT>(b.holdMs), OnBindTimer);
         return false;
     }
     if (b.hold < 0) {
@@ -190,7 +191,7 @@ bool BeginPress(const KeyBinding& b, UINT vk, DWORD scan, bool extended, DWORD t
         return true;
     }
     s_press.state = Press::Pending;
-    s_bindTimer = SetTimer(nullptr, 0, static_cast<UINT>(s_thresholdMs.load()), OnBindTimer);
+    s_bindTimer = SetTimer(nullptr, 0, static_cast<UINT>(b.holdMs), OnBindTimer);
     return true;
 }
 
@@ -252,7 +253,8 @@ int BindKey(bool down, const KBDLLHOOKSTRUCT& k) {
                 if (down) return 0;  // 自动重复
                 StopBindTimer();
                 s_press.state = Press::Idle;
-                if (!s_press.fired && s_press.binding.tap >= 0 && k.time - s_press.downTime < static_cast<DWORD>(s_thresholdMs.load())) {
+                DWORD tapMax = s_press.binding.hold >= 0 ? static_cast<DWORD>(s_press.binding.holdMs) : kTapMaxMs;
+                if (!s_press.fired && s_press.binding.tap >= 0 && k.time - s_press.downTime < tapMax) {
                     s_press.fired = true;
                     Fire(s_press.binding.tap);
                 }
