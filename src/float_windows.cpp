@@ -8,7 +8,8 @@
 // 系统还没激活它之前，先把浮在上面的小窗口临时设成置顶，激活时大窗口怎么提也越不过它们，过一会儿再取消置顶。
 // 钩子和这里的一切都跑在单独的线程上，主线程忙着画玻璃时鼠标也不会卡。
 //
-// 也可以设一个快捷键：按一下固定前台的小窗口（和双击一样），已经固定的再按一下取消，窗口上方提示一下。
+// 也可以设一个快捷键：按一下固定前台的小窗口（鼠标键的快捷键固定鼠标下的窗口，和双击一样），已经固定的再按一下取消，
+// 窗口上方提示一下。
 #include "common.h"
 
 #include <algorithm>
@@ -21,7 +22,7 @@ namespace {
 // 主线程启停
 HANDLE s_thread = nullptr;
 DWORD s_threadId = 0;
-constexpr UINT kMsgTogglePin = WM_APP + 1;  // 发给小窗口线程：wParam 是按快捷键时的前台窗口
+constexpr UINT kMsgTogglePin = WM_APP + 1;  // 发给小窗口线程：wParam 是要固定 / 取消固定的窗口
 
 // 以下只在小窗口线程里访问
 HWINEVENTHOOK s_hook = nullptr;
@@ -431,8 +432,9 @@ void FloatWindows_Configure(bool enabled) {
     }
 }
 
-void FloatWindows_TogglePin() {
-    if (s_thread) PostThreadMessageW(s_threadId, kMsgTogglePin, reinterpret_cast<WPARAM>(GetForegroundWindow()), 0);
+void FloatWindows_TogglePin(HWND target) {
+    if (!target) target = GetForegroundWindow();
+    if (s_thread) PostThreadMessageW(s_threadId, kMsgTogglePin, reinterpret_cast<WPARAM>(target), 0);
 }
 
 }  // namespace app

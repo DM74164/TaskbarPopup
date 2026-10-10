@@ -29,6 +29,7 @@ NOTIFYICONDATAW s_nid = {};
 HICON s_trayIcon = nullptr;
 UINT s_msgTaskbarCreated = 0;
 std::wstring s_balloonUrl;  // 最近一次弹出的气泡被点时要打开的网址，空 = 点了不做什么
+const wchar_t* const kHotkeyKeys[kHotkeyCount] = {L"PopupHotkey", L"PinHotkey"};  // 设置文件里的名字，长按的再加 Hold
 
 // 运行时画托盘图标：底部一条任务栏 + 向上的箭头
 HICON CreateAppIcon() {
@@ -189,6 +190,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Hotkeys_OnHotkey(wParam);
             return 0;
 
+        case WM_APP_HOTKEY:
+            Hotkeys_Run(static_cast<int>(wParam), reinterpret_cast<HWND>(lParam));
+            return 0;
+
         case WM_APP_AUTOHIDE_OFF:
             Fullscreen_OnAutoHideOff(static_cast<UINT>(wParam), lParam != 0);
             return 0;
@@ -344,10 +349,12 @@ void LoadSettings() {
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
     g_settings.theme = theme == kThemeLight || theme == kThemeDark ? theme : kThemeSystem;
     std::vector<wchar_t> buf(32768);
-    GetPrivateProfileStringW(L"General", L"PopupHotkey", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
-    g_settings.popupHotkey = ParseHotkey(buf.data());
-    GetPrivateProfileStringW(L"General", L"PinHotkey", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
-    g_settings.pinHotkey = ParseHotkey(buf.data());
+    for (int id = 0; id < kHotkeyCount; ++id) {
+        GetPrivateProfileStringW(L"General", kHotkeyKeys[id], L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+        g_settings.hotkey[id] = ParseHotkey(buf.data());
+        std::wstring hold = std::wstring(kHotkeyKeys[id]) + L"Hold";
+        g_settings.hotkeyHold[id] = GetPrivateProfileIntW(L"General", hold.c_str(), 0, f.c_str()) != 0;
+    }
     GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.excludeApps.clear();
     std::wstring list = buf.data();
@@ -375,8 +382,11 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"KeepFloatsOnTop", g_settings.keepFloatsOnTop ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"PopupHotkey", HotkeyText(g_settings.popupHotkey).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"PinHotkey", HotkeyText(g_settings.pinHotkey).c_str(), f.c_str());
+    for (int id = 0; id < kHotkeyCount; ++id) {
+        WritePrivateProfileStringW(L"General", kHotkeyKeys[id], HotkeyText(g_settings.hotkey[id]).c_str(), f.c_str());
+        std::wstring hold = std::wstring(kHotkeyKeys[id]) + L"Hold";
+        WritePrivateProfileStringW(L"General", hold.c_str(), g_settings.hotkeyHold[id] ? L"1" : L"0", f.c_str());
+    }
     std::wstring exclude;
     for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;
     WritePrivateProfileStringW(L"General", L"ExcludeApps", exclude.c_str(), f.c_str());

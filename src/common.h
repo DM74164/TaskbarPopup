@@ -38,6 +38,7 @@ namespace app {
 // ---------------- 设置 ----------------
 enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / 毛玻璃
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
+enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool longPressPopup = true;
@@ -49,8 +50,8 @@ struct Settings {
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
     bool keepFloatsOnTop = true; // 点全屏（最大化）的窗口时，浮在上面的小窗口不被盖住
-    UINT popupHotkey = 0;        // 弹出迷你任务栏的快捷键（见 MakeHotkey），0 = 没设
-    UINT pinHotkey = 0;          // 固定 / 取消固定前台小窗口的快捷键
+    UINT hotkey[kHotkeyCount] = {};       // 快捷键（见 MakeHotkey），下标是 HotkeyId，0 = 没设
+    bool hotkeyHold[kHotkeyCount] = {};   // 长按触发（按住 longPressMs 毫秒），否则单按
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
@@ -273,21 +274,36 @@ void SettingsDialog_Show();
 
 // ---------------- 小窗口留在全屏窗口上面 ----------------
 void FloatWindows_Configure(bool enabled);
-void FloatWindows_TogglePin();  // 固定前台的小窗口（和双击一样），已经固定的取消，在窗口上方提示一下
+void FloatWindows_TogglePin(HWND target);  // 固定小窗口（和双击一样），已经固定的取消，在窗口上方提示一下。target 为空时用前台窗口
 
 // ---------------- 快捷键（hotkeys.cpp）----------------
-// 一个快捷键存成 (修饰键 MOD_CONTROL / MOD_SHIFT / MOD_ALT << 16) | 虚拟键码，0 = 没设
+// 一个快捷键存成 (修饰键 MOD_CONTROL / MOD_SHIFT / MOD_ALT << 16) | 虚拟键码，0 = 没设。
+// 键可以是键盘上的键（单独的左右 Ctrl / Shift / Alt 用 VK_LCONTROL 这类分左右的键码），也可以是鼠标键（VK_LBUTTON 这类）
 constexpr UINT MakeHotkey(UINT mods, UINT vk) { return (mods << 16) | vk; }
 constexpr UINT HotkeyMods(UINT hotkey) { return hotkey >> 16; }
 constexpr UINT HotkeyVk(UINT hotkey) { return hotkey & 0xFFFF; }
-enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };
-std::wstring KeyName(UINT vk);             // 空 = 不能用在快捷键里的键
-std::wstring HotkeyText(UINT hotkey);      // 如 Ctrl+Alt+Z；0 时为空
-UINT ParseHotkey(const std::wstring& text);  // 反过来，认不出时为 0
+constexpr bool IsMouseVk(UINT vk) { return vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2; }
+constexpr bool IsModifierVk(UINT vk) { return vk >= VK_LSHIFT && vk <= VK_RMENU; }  // 分左右的 Shift / Ctrl / Alt
+std::wstring KeyName(UINT vk, bool display = false);  // 空 = 不能用在快捷键里的键。display：给人看的（鼠标键、左右 Ctrl 写中文）
+std::wstring HotkeyText(UINT hotkey, bool display = false);  // 如 Ctrl+Alt+Z；0 时为空
+UINT ParseHotkey(const std::wstring& text);  // HotkeyText(hotkey) 反过来，认不出时为 0
+const wchar_t* HotkeyProblem(UINT hotkey, bool hold);  // 这个键为什么不能这样用（单按 / 长按），能用时为 nullptr
 void Hotkeys_Apply();                // 按 g_settings 注册；注册不上的（被别的程序占用）弹托盘气泡说一次
-void Hotkeys_Suspend(bool suspend);  // 设置窗口录快捷键时先全部注销，不然按下已经设的组合键录不到
+void Hotkeys_Suspend(bool suspend);  // 设置窗口录快捷键时先全部停掉，不然按下已经设的键录不到
 bool Hotkeys_Failed(int id);         // 现在设的这个注册不上
 void Hotkeys_OnHotkey(WPARAM id);    // 主窗口收到 WM_HOTKEY
+void Hotkeys_Run(int id, HWND target);  // 做快捷键对应的事。target：鼠标键触发时鼠标下的窗口，键盘触发时为空
+constexpr UINT WM_APP_HOTKEY = WM_APP + 6;  // 键盘钩子线程通知：快捷键触发了，wParam 是 HotkeyId，lParam 是 target
+
+// RegisterHotKey 管不了的快捷键（鼠标键、长按、单独的 Ctrl / Shift / Alt、锁定键）由键盘钩子线程来认。
+// tap / hold：单按 / 长按时做哪件事（HotkeyId），-1 = 没有；两样都有时没按够长按时长就松开算单按
+struct KeyBinding {
+    UINT mods = 0;
+    UINT vk = 0;
+    int tap = -1;
+    int hold = -1;
+};
+void Hook_SetBindings(const std::vector<KeyBinding>& bindings);
 HWND SettingsDialog_Hwnd();
 
 // ---------------- 液态玻璃材质 ----------------

@@ -77,12 +77,14 @@ constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSeg
 // 快捷键：下标是 HotkeyId
 const ToggleText kHotkeyText[kHotkeyCount] = {
     {L"弹出迷你任务栏", L"再按一次收起"},
-    {L"固定前台的小窗口", L"再按一次取消固定"},
+    {L"固定前台的小窗口", L"再按一次取消；鼠标键固定鼠标下的窗口"},
 };
+const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 kHotkeyMode：Item::index = 第几个 * kSegStride + 这个下标
 
 // 能点的东西
 enum Kind {
-    kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kCheckNow, kChip, kAddChip, kOk, kCancel, kClose
+    kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kOk,
+    kCancel, kClose
 };
 struct Item {
     Kind kind = kNoItem;
@@ -97,6 +99,7 @@ struct Values {
     int slider[kSliderCount] = {};
     int seg[kSegCount] = {};
     UINT hotkey[kHotkeyCount] = {};
+    bool hold[kHotkeyCount] = {};
     std::vector<std::wstring> exclude;
 };
 Values s_v, s_initial;
@@ -139,8 +142,10 @@ SliderGeom s_sliderGeom[kSliderCount];
 std::vector<float> s_rowLines;  // 卡片里两行之间的分隔线：每条 x0, x1, y 三个数
 RectF s_segTrack[kSegCount];    // 分段按钮的底槽
 RectF s_hotkeyBox[kHotkeyCount];  // 快捷键那一行右边显示按键的框
+RectF s_hotkeyModeTrack[kHotkeyCount];  // 框下面“单按 / 长按”的底槽
 int s_capture = -1;               // 正在录哪个快捷键，-1 = 没在录
-std::wstring s_captureError;      // 刚按的组合键为什么不能用
+std::wstring s_hotkeyError[kHotkeyCount];  // 刚按的键（或刚选的单按 / 长按）为什么不行
+UINT s_captureLone = 0;           // 录的时候只按了这个 Ctrl / Shift / Alt（分左右），松开时就录它
 bool s_eatChar = false;           // 录快捷键用掉了这次按键，接下来的 WM_SYSCHAR 别交给系统（会响一声）
 
 Item s_hover, s_press, s_focus;
@@ -168,8 +173,14 @@ std::unique_ptr<FontFamily> s_fontFamily;
 float Px(float dip) { return dip * s_scale; }
 const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 
-bool SliderEnabled(int which) { return which != kLongPressMs || s_v.on[kLongPress]; }
 bool HotkeyEnabled(int which) { return which != kHotkeyPin || s_v.on[kKeepFloats]; }  // 固定了也要它开着才有用
+// 长按时长：长按 Win 和长按的快捷键都用它
+bool SliderEnabled(int which) {
+    if (which != kLongPressMs || s_v.on[kLongPress]) return true;
+    for (int i = 0; i < kHotkeyCount; ++i)
+        if (s_v.hotkey[i] && s_v.hold[i] && HotkeyEnabled(i)) return true;
+    return false;
+}
 
 std::wstring SliderText(int which) {
     wchar_t text[32];
@@ -243,13 +254,20 @@ float SegRow(int which, float x, float y, float w) {
     return h;
 }
 
-// 快捷键：左边名字和说明，右边一个框显示按键（设了的话框里右边有个小叉，点了清掉）。点这一行开始录
+// 快捷键：左边名字和说明，右边一个框显示按键（设了的话框里右边有个小叉，点了清掉），框下面选单按还是长按。
+// 点这一行开始录
 float HotkeyRow(int which, float x, float y, float w) {
-    float h = Px(54), bw = Px(140), bh = Px(30);
+    float h = Px(80), bw = Px(130), bh = Px(28), mh = Px(26);
     s_items.push_back({kHotkeyRow, which, RectF(x, y, w, h)});
-    RectF box(x + w - Px(kRowPad) - bw, y + (h - bh) / 2, bw, bh);
+    RectF box(x + w - Px(kRowPad) - bw, y + Px(11), bw, bh);
     s_hotkeyBox[which] = box;
     s_items.push_back({kHotkeyClear, which, RectF(box.X + box.Width - bh, box.Y, bh, bh)});
+    float pad = Px(3);
+    RectF track(box.X, box.Y + bh + Px(6), bw, mh);
+    s_hotkeyModeTrack[which] = track;
+    float ow = (bw - 2 * pad) / 2;
+    for (int i = 0; i < 2; ++i)
+        s_items.push_back({kHotkeyMode, which * kSegStride + i, RectF(track.X + pad + i * ow, track.Y + pad, ow, mh - 2 * pad)});
     return h;
 }
 
@@ -301,12 +319,12 @@ void BuildLayout() {
                      [](float x, float y, float w) { return SliderRow(kScale, x, y, w); },
                      [](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
                      [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); }});
+    left = AddGroup(px0, left, L"外观",
+                    {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
+                     [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
     float right = AddGroup(px1, top, L"启动和更新",
                            {[](float x, float y, float w) { return ToggleRow(kAutoStart, x, y, w); },
                             [](float x, float y, float w) { return ToggleRow(kUpdates, x, y, w); }});
-    right = AddGroup(px1, right, L"外观",
-                     {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
-                      [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
     right = AddGroup(px1, right, L"快捷键",
                      {[](float x, float y, float w) { return HotkeyRow(kHotkeyPopup, x, y, w); },
                       [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); }});
@@ -365,13 +383,14 @@ bool Enabled(const Item& it) {
     if (it.kind == kHotkeyRow) return HotkeyEnabled(it.index);
     // 小叉：设了快捷键、没在录的时候才有
     if (it.kind == kHotkeyClear) return HotkeyEnabled(it.index) && s_v.hotkey[it.index] && s_capture != it.index;
+    if (it.kind == kHotkeyMode) return HotkeyEnabled(it.index / kSegStride);
     return true;
 }
 
 Item HitTest(int x, int y) {
     PointF pt(static_cast<float>(x), static_cast<float>(y));
     // “立即检查”、快捷键的小叉在一整行上面，先看它们
-    auto onTop = [](const Item& it) { return it.kind == kCheckNow || it.kind == kHotkeyClear; };
+    auto onTop = [](const Item& it) { return it.kind == kCheckNow || it.kind == kHotkeyClear || it.kind == kHotkeyMode; };
     for (const Item& it : s_items)
         if (onTop(it) && it.rect.Contains(pt) && Enabled(it)) return it;
     for (const Item& it : s_items)
@@ -526,19 +545,22 @@ void DrawHotkeyRow(Graphics& g, const Item& it) {
     if (enabled && (s_hover == it || s_press == it))
         FillRound(g, RectF(r.X + Px(4), r.Y + Px(3), r.Width - Px(8), r.Height - Px(6)), Px(9), pal.hover);
 
-    // 说明：录的时候说怎么取消；刚按的不能用时说为什么；设的被别的程序占了也说一声
+    // 说明：刚按的键不行时说为什么；录的时候说怎么取消；设的被别的程序占了也说一声。最多两行
     std::wstring sub = t.sub;
     Color subColor = enabled ? pal.subtle : pal.separator;
-    if (capturing) {
-        sub = s_captureError.empty() ? L"Esc 取消，Backspace 清除" : s_captureError;
-        if (!s_captureError.empty()) subColor = pal.warn;
+    if (!s_hotkeyError[it.index].empty()) {
+        sub = s_hotkeyError[it.index];
+        subColor = pal.warn;
+    } else if (capturing) {
+        sub = L"按下按键或鼠标键，Esc 取消";
     } else if (enabled && hotkey && hotkey == s_initial.hotkey[it.index] && Hotkeys_Failed(it.index)) {
         sub = L"被别的程序占用了，换一个吧";
         subColor = pal.warn;
     }
     float x = r.X + Px(kRowPad), textW = box.X - x - Px(8);
-    DrawText(g, t.label, Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(8), textW, Px(20)), enabled ? pal.text : pal.subtle);
-    DrawText(g, sub, Px(11.5f), FontStyleRegular, RectF(x, r.Y + Px(29), textW, Px(17)), subColor);
+    DrawText(g, t.label, Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(12), textW, Px(20)), enabled ? pal.text : pal.subtle);
+    DrawText(g, sub, Px(11.5f), FontStyleRegular, RectF(x, r.Y + Px(35), textW, Px(38)), subColor, StringAlignmentNear,
+             true);
 
     // 框：录的时候是强调色的边
     FillRound(g, box, Px(8), capturing ? pal.button : pal.trackOff);
@@ -548,10 +570,10 @@ void DrawHotkeyRow(Graphics& g, const Item& it) {
     RectF textRect(box.X + Px(10), box.Y, box.Width - Px(20), box.Height);
     if (capturing) {
         std::wstring held = HeldModifiers();
-        text = held.empty() ? L"按下组合键…" : held + L"…";
+        text = held.empty() ? L"按下按键…" : held + L"…";
         color = held.empty() ? pal.subtle : pal.text;
     } else if (hotkey) {
-        text = HotkeyText(hotkey);
+        text = HotkeyText(hotkey, true);
         textRect.Width -= box.Height - Px(10);  // 右边留给小叉
     } else {
         text = L"未设置";
@@ -570,6 +592,20 @@ void DrawHotkeyRow(Graphics& g, const Item& it) {
         g.DrawLine(&pen, cx - a, cy - a, cx + a, cy + a);
         g.DrawLine(&pen, cx - a, cy + a, cx + a, cy - a);
     }
+}
+
+// 框下面的“单按 / 长按”
+void DrawHotkeyMode(Graphics& g, const Item& it) {
+    const Palette& pal = Colors();
+    int which = it.index / kSegStride, option = it.index % kSegStride;
+    bool enabled = HotkeyEnabled(which);
+    const RectF& r = it.rect;
+    bool selected = s_v.hold[which] == (option == 1);
+    if (option == 0) FillRound(g, s_hotkeyModeTrack[which], s_hotkeyModeTrack[which].Height / 2, pal.trackOff);
+    if (selected && enabled) DrawCard(g, r, r.Height / 2, pal.buttonHot, pal.cardRim);
+    else if (enabled && (s_hover == it || s_press == it)) FillRound(g, r, r.Height / 2, pal.hover);
+    Color color = !enabled ? pal.separator : selected ? pal.text : pal.subtle;
+    DrawText(g, kHotkeyModes[option], Px(12), FontStyleRegular, r, color, StringAlignmentCenter);
 }
 
 void DrawChip(Graphics& g, const Item& it) {
@@ -651,6 +687,7 @@ void DrawContent(Graphics& g) {
             case kSegment: DrawSegment(g, it); break;
             case kHotkeyRow: DrawHotkeyRow(g, it); break;
             case kHotkeyClear: break;  // 和那一行一起画
+            case kHotkeyMode: DrawHotkeyMode(g, it); break;
             case kChip:
             case kAddChip: DrawChip(g, it); break;
             default: DrawButton(g, it); break;
@@ -1044,64 +1081,123 @@ void NudgeSlider(int which, int steps) {
 
 void StartCapture(int which) {
     s_capture = which;
-    s_captureError.clear();
+    s_hotkeyError[which].clear();
+    s_captureLone = 0;
     s_focus = {kHotkeyRow, which, {}};
     Hotkeys_Suspend(true);
 }
 
 void EndCapture() {
     if (s_capture < 0) return;
+    s_hotkeyError[s_capture].clear();
     s_capture = -1;
-    s_captureError.clear();
+    s_captureLone = 0;
     Hotkeys_Suspend(false);
 }
 
 void SetHotkey(int which, UINT hotkey) {
     s_v.hotkey[which] = hotkey;
+    s_hotkeyError[which].clear();
     // 和小叉一起消失的悬停状态清掉
     if (s_hover.kind == kHotkeyClear) s_hover = {};
 }
 
-// 录的时候按了键（WM_KEYDOWN / WM_SYSKEYDOWN）
-void CaptureKey(UINT vk) {
-    if (vk == VK_PROCESSKEY || vk == VK_PACKET) return;  // 输入法、模拟输入的字符，不是真的按键
-    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
+// which 设成 hotkey、按 hold（单按 / 长按）触发行不行，不行的话为什么
+const wchar_t* HotkeyRefusal(int which, UINT hotkey, bool hold) {
+    if (const wchar_t* problem = HotkeyProblem(hotkey, hold)) return problem;
+    int other = 1 - which;
+    if (hotkey == s_v.hotkey[other] && hold == s_v.hold[other]) return L"和另一个快捷键重复了";
+    return nullptr;
+}
+
+// 录到了一个键：能用就设上、不录了，不能用就说为什么、接着录
+void TryHotkey(UINT hotkey) {
+    int which = s_capture;
+    bool hold = s_v.hold[which];
+    const wchar_t* refusal = HotkeyRefusal(which, hotkey, hold);
+    UINT vk = HotkeyVk(hotkey);
+    // 单按的键盘按键用 RegisterHotKey，先试试是不是被别的程序占了（鼠标键、长按这些试不出来）
+    bool viaRegister = !hold && !IsMouseVk(vk) && !IsModifierVk(vk) && vk != VK_CAPITAL && vk != VK_NUMLOCK && vk != VK_SCROLL;
+    if (!refusal && viaRegister) {
+        if (RegisterHotKey(s_hwnd, 0xBFFF, HotkeyMods(hotkey) | MOD_NOREPEAT, vk)) UnregisterHotKey(s_hwnd, 0xBFFF);
+        else refusal = L"被别的程序占用了，换一个吧";
+    }
+    if (refusal) {
+        s_hotkeyError[which] = refusal;
+        return;
+    }
+    SetHotkey(which, hotkey);
+    EndCapture();
+}
+
+// 录的时候现在按着的 Ctrl / Shift / Alt；except 这个（分左右的）键不算
+UINT CaptureMods(UINT except = 0) {
+    auto held = [except](int vk) { return static_cast<UINT>(vk) != except && GetKeyState(vk) < 0; };
+    return (held(VK_LCONTROL) || held(VK_RCONTROL) ? MOD_CONTROL : 0) | (held(VK_LSHIFT) || held(VK_RSHIFT) ? MOD_SHIFT : 0) |
+           (held(VK_LMENU) || held(VK_RMENU) ? MOD_ALT : 0);
+}
+
+// 键盘消息里的 Shift / Ctrl / Alt 分出左右
+UINT SpecificModifier(UINT vk, LPARAM lParam) {
+    bool extended = (lParam & (1 << 24)) != 0;
     switch (vk) {
-        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
-        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
-        case VK_MENU: case VK_LMENU: case VK_RMENU:
-        case VK_LWIN: case VK_RWIN:
-            return;  // 只按了修饰键：框里跟着显示，等主键
+        case VK_SHIFT: {
+            UINT scan = (lParam >> 16) & 0xFF;
+            UINT specific = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+            return specific == VK_RSHIFT || specific == VK_LSHIFT ? specific : (scan == 0x36 ? VK_RSHIFT : VK_LSHIFT);
+        }
+        case VK_CONTROL: return extended ? VK_RCONTROL : VK_LCONTROL;
+        case VK_MENU: return extended ? VK_RMENU : VK_LMENU;
     }
+    return 0;
+}
+
+// 录的时候按了键（WM_KEYDOWN / WM_SYSKEYDOWN）
+void CaptureKey(UINT vk, LPARAM lParam) {
+    if (vk == VK_PROCESSKEY || vk == VK_PACKET || vk == VK_LWIN || vk == VK_RWIN) return;  // 输入法、模拟输入的字符；Win 留给长按
+    if (UINT specific = SpecificModifier(vk, lParam)) {
+        // 只按了修饰键：框里跟着显示，等主键；就这一个修饰键按下又松开的话录它自己
+        if (!(lParam & (1 << 30))) s_captureLone = CaptureMods(specific) ? 0 : specific;
+        return;
+    }
+    s_captureLone = 0;
     s_eatChar = true;
-    if (!ctrl && !shift && !alt) {
-        if (vk == VK_ESCAPE) {
-            EndCapture();
-            return;
-        }
-        if (vk == VK_BACK || vk == VK_DELETE) {
-            SetHotkey(s_capture, 0);
-            EndCapture();
-            return;
-        }
-    }
-    UINT mods = (ctrl ? MOD_CONTROL : 0) | (shift ? MOD_SHIFT : 0) | (alt ? MOD_ALT : 0);
-    // 不带 Ctrl、Alt 的话平常打字就会被它拿走；只有 F1~F24（F12 留给调试器）可以单按或配 Shift
-    bool fkey = vk >= VK_F1 && vk <= VK_F24 && vk != VK_F12;
-    UINT hotkey = MakeHotkey(mods, vk);
-    if (KeyName(vk).empty()) {
-        s_captureError = L"这个键不能用，换一个";
-    } else if (!ctrl && !alt && !fkey) {
-        s_captureError = L"要带上 Ctrl 或 Alt";
-    } else if (hotkey == s_v.hotkey[1 - s_capture]) {
-        s_captureError = L"和另一个快捷键重复了";
-    } else if (!RegisterHotKey(s_hwnd, 0xBFFF, mods | MOD_NOREPEAT, vk)) {
-        s_captureError = L"被别的程序占用了，换一个";
-    } else {
-        UnregisterHotKey(s_hwnd, 0xBFFF);
-        SetHotkey(s_capture, hotkey);
+    UINT mods = CaptureMods();
+    if (!mods && vk == VK_ESCAPE) {
         EndCapture();
+        return;
     }
+    if (!mods && (vk == VK_BACK || vk == VK_DELETE)) {
+        SetHotkey(s_capture, 0);
+        EndCapture();
+        return;
+    }
+    TryHotkey(MakeHotkey(mods, vk));
+}
+
+// 录的时候松开了键：刚才只按了一个 Ctrl / Shift / Alt 就录它
+void CaptureKeyUp(UINT vk, LPARAM lParam) {
+    UINT specific = SpecificModifier(vk, lParam);
+    if (specific && specific == s_captureLone) TryHotkey(MakeHotkey(0, specific));
+    s_captureLone = 0;
+}
+
+// 录的时候在窗口上按了鼠标键
+void CaptureMouse(UINT vk) {
+    s_captureLone = 0;
+    TryHotkey(MakeHotkey(CaptureMods(), vk));
+}
+
+// 选单按还是长按：设着的键这样触发不行的话不换，说为什么
+void SetHotkeyMode(int which, bool hold) {
+    if (s_v.hold[which] == hold) return;
+    if (s_v.hotkey[which])
+        if (const wchar_t* refusal = HotkeyRefusal(which, s_v.hotkey[which], hold)) {
+            s_hotkeyError[which] = refusal;
+            return;
+        }
+    s_v.hold[which] = hold;
+    s_hotkeyError[which].clear();
 }
 
 void AddExclude(const std::wstring& path) {
@@ -1206,8 +1302,10 @@ void Apply() {
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
-    if (s_v.hotkey[kHotkeyPopup] != s_initial.hotkey[kHotkeyPopup]) g_settings.popupHotkey = s_v.hotkey[kHotkeyPopup];
-    if (s_v.hotkey[kHotkeyPin] != s_initial.hotkey[kHotkeyPin]) g_settings.pinHotkey = s_v.hotkey[kHotkeyPin];
+    for (int i = 0; i < kHotkeyCount; ++i) {
+        if (s_v.hotkey[i] != s_initial.hotkey[i]) g_settings.hotkey[i] = s_v.hotkey[i];
+        if (s_v.hold[i] != s_initial.hold[i]) g_settings.hotkeyHold[i] = s_v.hold[i];
+    }
 
     // 名单按增删合并到现在的名单上，不整个替换
     auto contains = [](const std::vector<std::wstring>& list, const std::wstring& name) {
@@ -1225,6 +1323,12 @@ void Apply() {
 }
 
 void Activate(const Item& it) {
+    // 快捷键那一行下面的提示（为什么不行）点了别处就去掉
+    for (int i = 0; i < kHotkeyCount; ++i) {
+        bool sameRow = ((it.kind == kHotkeyRow || it.kind == kHotkeyClear) && it.index == i) ||
+                       (it.kind == kHotkeyMode && it.index / kSegStride == i);
+        if (!sameRow && s_capture != i) s_hotkeyError[i].clear();
+    }
     switch (it.kind) {
         case kToggleRow: SetToggle(it.index, !s_v.on[it.index]); break;
         case kSegment:
@@ -1236,6 +1340,7 @@ void Activate(const Item& it) {
             else StartCapture(it.index);
             break;
         case kHotkeyClear: SetHotkey(it.index, 0); break;
+        case kHotkeyMode: SetHotkeyMode(it.index / kSegStride, it.index % kSegStride == 1); break;
         case kCheckNow: Update_CheckNow(true); break;
         case kChip: RemoveExclude(it.index); return;
         case kAddChip: ShowAddMenu(it.rect); return;
@@ -1394,7 +1499,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (wParam == VK_F4 && msg == WM_SYSKEYDOWN) break;  // Alt+F4 照常关闭
             s_eatChar = false;
             if (s_capture >= 0) {
-                CaptureKey(static_cast<UINT>(wParam));
+                CaptureKey(static_cast<UINT>(wParam), lParam);
                 Render();
                 return 0;
             }
@@ -1404,8 +1509,25 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_KEYUP:
         case WM_SYSKEYUP:
             if (s_capture < 0) break;
+            CaptureKeyUp(static_cast<UINT>(wParam), lParam);
             Render();  // 松开了修饰键，框里跟着变
             return 0;
+
+        // 录快捷键时在窗口上按的鼠标键（左键要配修饰键，单按左键是点别处、不录了）
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
+            if (s_capture >= 0) {
+                UINT vk = msg == WM_RBUTTONDOWN ? VK_RBUTTON
+                          : msg == WM_MBUTTONDOWN ? VK_MBUTTON
+                          : GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
+                CaptureMouse(vk);
+                Render();
+            }
+            return msg == WM_XBUTTONDOWN ? TRUE : 0;
+
+        case WM_XBUTTONUP:
+            return TRUE;  // 不让 DefWindowProc 再发“后退 / 前进”命令
 
         case WM_SYSCHAR:
             if (!s_eatChar) break;
@@ -1441,6 +1563,11 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case WM_LBUTTONDOWN: {
+            if (s_capture >= 0 && CaptureMods()) {  // 录的时候按着修饰键点左键：录 Ctrl + 左键这类
+                CaptureMouse(VK_LBUTTON);
+                Render();
+                return 0;
+            }
             Item it = HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             if (s_capture >= 0 && !(it.kind == kHotkeyRow && it.index == s_capture)) EndCapture();  // 点了别处就不录了
             if (it.kind == kNoItem &&
@@ -1603,8 +1730,11 @@ void SettingsDialog_Show() {
     s_initial.slider[kScale] = g_settings.popupScale;
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;
-    s_initial.hotkey[kHotkeyPopup] = g_settings.popupHotkey;
-    s_initial.hotkey[kHotkeyPin] = g_settings.pinHotkey;
+    for (int i = 0; i < kHotkeyCount; ++i) {
+        s_initial.hotkey[i] = g_settings.hotkey[i];
+        s_initial.hold[i] = g_settings.hotkeyHold[i];
+        s_hotkeyError[i].clear();
+    }
     s_initial.exclude = g_settings.excludeApps;
     s_v = s_initial;
     for (int i = 0; i < kToggleCount; ++i) s_knob[i] = s_v.on[i] ? 1.0f : 0.0f;
@@ -1613,7 +1743,7 @@ void SettingsDialog_Show() {
     s_drag = -1;
     s_still = 0;
     s_capture = -1;
-    s_captureError.clear();
+    s_captureLone = 0;
 
     // 居中到鼠标所在的显示器
     POINT pt;
