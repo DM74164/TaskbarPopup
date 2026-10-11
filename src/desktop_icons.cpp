@@ -69,6 +69,8 @@ HDC s_shotDC = nullptr;
 HBITMAP s_shot = nullptr;
 HGDIOBJ s_shotOld = nullptr;
 const DWORD* s_shotBits = nullptr;  // 照片的像素（s_shotWindow 那么大，从上到下）
+// 照片只盖图标那些地方（s_shotArea 那么大，1 是要盖）：藏起图标后再拍一张只有壁纸的，和照片不一样的就是图标。空着就是整张盖
+std::vector<BYTE> s_mask;
 RECT s_shotWindow = {};          // 拍照时桌面窗口在屏幕上的范围（照片的原点）
 RECT s_shotArea = {};            // 要盖住的范围：拍照时的工作区
 HWND s_desktopRoot = nullptr;    // 放图标的顶层窗口（Progman / WorkerW），照片窗口紧贴在它上面
@@ -146,7 +148,10 @@ void Pause(DWORD ms) {
     }
 }
 
+void ReleaseMask();
+
 void ReleaseShot() {
+    ReleaseMask();
     if (s_shotDC) {
         SelectObject(s_shotDC, s_shotOld);
         DeleteDC(s_shotDC);
@@ -203,16 +208,27 @@ bool Near(DWORD a, DWORD b) {
     return true;
 }
 
-// 两张和 s_shotWindow 一样大的图在要盖住的那一块里有多少个点不一样（隔一个点比一个）
+// 两张和 s_shotWindow 一样大的图在照片盖住的地方有多少个点不一样（隔一个点比一个）
 long CountDiff(const DWORD* a, const DWORD* b, int w) {
     long diff = 0;
-    for (LONG y = s_shotArea.top - s_shotWindow.top; y < s_shotArea.bottom - s_shotWindow.top; y += 2) {
-        const DWORD* pa = a + static_cast<size_t>(y) * w;
-        const DWORD* pb = b + static_cast<size_t>(y) * w;
-        for (LONG x = s_shotArea.left - s_shotWindow.left; x < s_shotArea.right - s_shotWindow.left; x += 2)
-            if (!Near(pa[x], pb[x])) ++diff;
+    LONG ox = s_shotArea.left - s_shotWindow.left, oy = s_shotArea.top - s_shotWindow.top;
+    LONG aw = s_shotArea.right - s_shotArea.left, ah = s_shotArea.bottom - s_shotArea.top;
+    bool masked = s_mask.size() == static_cast<size_t>(aw) * ah;
+    for (LONG y = 0; y < ah; y += 2) {
+        const DWORD* pa = a + static_cast<size_t>(y + oy) * w + ox;
+        const DWORD* pb = b + static_cast<size_t>(y + oy) * w + ox;
+        const BYTE* pm = masked ? s_mask.data() + static_cast<size_t>(y) * aw : nullptr;
+        for (LONG x = 0; x < aw; x += 2)
+            if ((!pm || pm[x]) && !Near(pa[x], pb[x])) ++diff;
     }
     return diff;
+}
+
+std::unique_ptr<Dib> s_maskShot;  // 照片里只留要盖的地方（其余全透明），盖着的就是它
+
+void ReleaseMask() {
+    s_mask.clear();
+    s_maskShot.reset();
 }
 
 LRESULT CALLBACK CoverProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -298,7 +314,13 @@ bool ShowCover() {
         SIZE size = {s_shotArea.right - s_shotArea.left, s_shotArea.bottom - s_shotArea.top};
         POINT src = {s_shotArea.left - s_shotWindow.left, s_shotArea.top - s_shotWindow.top};
         BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, 0};
-        if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, s_shotDC, &src, 0, &blend, ULW_ALPHA)) return false;
+        HDC from = s_shotDC;
+        if (s_maskShot) {  // 只盖图标的：逐像素透明
+            from = s_maskShot->dc;
+            src = {0, 0};
+            blend.AlphaFormat = AC_SRC_ALPHA;
+        }
+        if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, from, &src, 0, &blend, ULW_ALPHA)) return false;
     }
     HWND above = GetWindow(s_desktopRoot, GW_HWNDPREV);  // 紧挨在桌面窗口上面的那个，照片放在它下面
     if (above == s_cover) above = GetWindow(s_cover, GW_HWNDPREV);
@@ -313,7 +335,8 @@ void FadeOutCover() {
     if (!s_coverShown) return;
     constexpr double kFadeMs = 150;
     for (double start = NowMs(), t = 0; t < kFadeMs; t = NowMs() - start) {
-        BLENDFUNCTION blend = {AC_SRC_OVER, 0, static_cast<BYTE>(255 * (1 - t / kFadeMs)), 0};
+        BLENDFUNCTION blend = {AC_SRC_OVER, 0, static_cast<BYTE>(255 * (1 - t / kFadeMs)),
+                               static_cast<BYTE>(s_maskShot ? AC_SRC_ALPHA : 0)};
         if (!UpdateLayeredWindow(s_cover, nullptr, nullptr, nullptr, nullptr, nullptr, 0, &blend, ULW_ALPHA)) break;
         WaitForVBlank();
     }
@@ -382,6 +405,92 @@ void WaitPainted(HWND list) {
     WaitForVBlank();
 }
 
+// 图标刚藏起来、照片整张盖着（被全屏窗口挡着，看不见）：再给桌面拍一张，这张只有壁纸。和照片比，不一样的地方
+// （只看图标所在的格子）就是图标和文字，向外多留两个点；照片改成只盖这些地方，其余透明。动态壁纸、幻灯片壁纸照常露着动，
+// 换回真图标时也只换图标那一块，不会看到壁纸跳一下
+void MaskCover() {
+    if (!s_shotBits || !s_coverShown || !s_hiddenList || s_maskShot || !IsWindow(s_desktopRoot)) return;
+    RECT rr;
+    if (!GetWindowRect(s_desktopRoot, &rr) || !EqualRect(&rr, &s_shotWindow)) return;
+    int w = rr.right - rr.left, h = rr.bottom - rr.top;
+    LONG aw = s_shotArea.right - s_shotArea.left, ah = s_shotArea.bottom - s_shotArea.top;
+    LONG ox = s_shotArea.left - s_shotWindow.left, oy = s_shotArea.top - s_shotWindow.top;
+    double start = NowMs();
+    WaitForVBlank();  // 图标窗口藏起来要等一帧才从画面上消失
+    Dib bare;
+    if (!bare.Create(w, h) || !PrintWindow(s_desktopRoot, bare.dc, PW_RENDERFULLCONTENT)) return;
+    GdiFlush();
+
+    // 图标所在的格子（屏幕坐标转成 s_shotArea 里的坐标）。读不到间距时整块都算
+    std::vector<BYTE> cell(static_cast<size_t>(aw) * ah, 0);
+    POINT spacing = {};
+    Ref<IFolderView> view;
+    bool cells = !s_icons.empty() && DesktopView(view) && SUCCEEDED(view->GetSpacing(&spacing)) && spacing.x > 0 &&
+                 spacing.y > 0;
+    if (cells) {
+        for (const IconPos& icon : s_icons) {
+            POINT pt = icon.pt;
+            MapWindowPoints(s_hiddenList, nullptr, &pt, 1);
+            LONG l = std::max<LONG>(0, pt.x - 8 - s_shotArea.left), t = std::max<LONG>(0, pt.y - 8 - s_shotArea.top);
+            LONG r = std::min<LONG>(aw, pt.x + spacing.x + 8 - s_shotArea.left);
+            LONG b = std::min<LONG>(ah, pt.y + spacing.y + 8 - s_shotArea.top);
+            for (LONG y = t; y < b; ++y) std::fill(cell.begin() + y * aw + l, cell.begin() + y * aw + std::max(l, r), 1);
+        }
+    } else {
+        std::fill(cell.begin(), cell.end(), 1);
+    }
+    // 不一样的点，再向外扩两个点（先横着扩、再竖着扩）
+    std::vector<BYTE> diff(cell.size(), 0), wide(cell.size(), 0);
+    for (LONG y = 0; y < ah; ++y) {
+        const DWORD* p = s_shotBits + static_cast<size_t>(y + oy) * w + ox;
+        const DWORD* q = bare.bits + static_cast<size_t>(y + oy) * w + ox;
+        for (LONG x = 0; x < aw; ++x) {
+            size_t i = static_cast<size_t>(y) * aw + x;
+            if (cell[i] && !Near(p[x], q[x])) diff[i] = 1;
+        }
+    }
+    constexpr LONG kGrow = 2;
+    for (LONG y = 0; y < ah; ++y)
+        for (LONG x = 0; x < aw; ++x)
+            if (diff[static_cast<size_t>(y) * aw + x])
+                for (LONG k = std::max<LONG>(0, x - kGrow); k <= std::min<LONG>(aw - 1, x + kGrow); ++k)
+                    wide[static_cast<size_t>(y) * aw + k] = 1;
+    std::fill(diff.begin(), diff.end(), 0);
+    long covered = 0;
+    for (LONG y = 0; y < ah; ++y)
+        for (LONG x = 0; x < aw; ++x)
+            if (wide[static_cast<size_t>(y) * aw + x])
+                for (LONG k = std::max<LONG>(0, y - kGrow); k <= std::min<LONG>(ah - 1, y + kGrow); ++k) {
+                    size_t i = static_cast<size_t>(k) * aw + x;
+                    if (!diff[i]) ++covered;
+                    diff[i] = 1;
+                }
+    if (!covered) {  // 没拍出图标（比如桌面上没有图标）：照片没用了
+        Log(L"藏起图标后的桌面和照片一样，不盖照片");
+        HideCover();
+        ReleaseShot();
+        return;
+    }
+
+    auto masked = std::make_unique<Dib>();
+    if (!masked->Create(aw, ah)) return;
+    for (LONG y = 0; y < ah; ++y) {
+        const DWORD* p = s_shotBits + static_cast<size_t>(y + oy) * w + ox;
+        DWORD* d = masked->bits + static_cast<size_t>(y) * aw;
+        const BYTE* m = diff.data() + static_cast<size_t>(y) * aw;
+        for (LONG x = 0; x < aw; ++x) d[x] = m[x] ? (p[x] | 0xFF000000) : 0;  // 只有全透明和不透明，不用预乘
+    }
+    GdiFlush();
+    POINT dst = {s_shotArea.left, s_shotArea.top}, src = {0, 0};
+    SIZE size = {aw, ah};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, masked->dc, &src, 0, &blend, ULW_ALPHA)) return;
+    s_mask = std::move(diff);
+    s_maskShot = std::move(masked);
+    Log(L"照片改成只盖图标（%.1f%% 的地方%ls），用了 %.0f 毫秒", 100.0 * covered / (static_cast<double>(aw) * ah),
+        cells ? L"" : L"，没读到图标格子", NowMs() - start);
+}
+
 // 图标显示出来以后（照片还盖着）：隔一会儿给桌面再拍一张，和照片一样了才撤照片。图标是一个个画出来的（图标、缩略图、
 // 小箭头可能晚一点），没画完就撤照片看上去就是一闪。不再变了也算（比如鼠标停在某个图标上，它有高亮），最多等 ms 毫秒。
 // 返回还有多少个点不一样，拍不到返回 -1
@@ -432,14 +541,18 @@ void DiagnoseShot() {
         for (int x = 0; x < w; x += 16) {
             POINT pt = {s_shotArea.left + x, s_shotArea.top + y};
             if (GetAncestor(WindowFromPoint(pt), GA_ROOT) != s_desktopRoot) continue;  // 被别的窗口挡着
+            if (!s_mask.empty() && !s_mask[static_cast<size_t>(y) * w + x]) continue;    // 照片没盖这里
             DWORD a = screen.bits[static_cast<size_t>(y) * w + x], b = photo[static_cast<size_t>(y) * sw + x];
             ++seen;
             if (!Near(a, b)) ++bad;
             for (int shift = 0; shift < 24; shift += 8)
                 sum += std::abs(static_cast<int>((a >> shift) & 0xFF) - static_cast<int>((b >> shift) & 0xFF));
         }
-    Log(L"诊断：屏幕上露着的桌面取了 %ld 个点，和照片不一样的 %ld 个，平均每个颜色分量差 %.2f", seen, bad,
+    MSG pending;  // 又要开始下一轮了（存图要几百毫秒）：不存了
+    bool busy = PeekMessageW(&pending, reinterpret_cast<HWND>(-1), 0, 0, PM_NOREMOVE) != FALSE;
+    Log(L"诊断：屏幕上露着的桌面（照片盖着的地方）取了 %ld 个点，和照片不一样的 %ld 个，平均每个颜色分量差 %.2f", seen, bad,
         seen ? sum / seen / 3 : 0.0);
+    if (busy) return;
     CLSID png = {0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
     Gdiplus::Bitmap a(w, h, sw * 4, PixelFormat32bppRGB, reinterpret_cast<BYTE*>(const_cast<DWORD*>(photo)));
     Gdiplus::Bitmap b(w, h, w * 4, PixelFormat32bppRGB, reinterpret_cast<BYTE*>(screen.bits));
@@ -711,12 +824,14 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 // 免得资源管理器在图标还露着时就挪它们。已经要退出（会话变了）就不藏
                 if (Current(static_cast<UINT>(msg.wParam))) CoverAndHide();
                 SetEvent(s_savedEvent);
+                MaskCover();  // 自动隐藏可以去开了，这时图标已经藏好、照片盖着，再把照片改成只盖图标
                 break;
             }
             case kCmdRehide:
                 Reshoot(static_cast<UINT>(msg.wParam));
                 if (Current(static_cast<UINT>(msg.wParam))) CoverAndHide();
                 SetEvent(s_savedEvent);
+                MaskCover();
                 break;
             case kCmdDisplay:
                 if (s_hiddenList && GetSystemMetrics(SM_CMONITORS) > 1) {
