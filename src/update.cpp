@@ -153,12 +153,15 @@ bool ParseRelease(const std::string& json, std::string& tag, std::string& url, b
     if (i >= json.size() || json[i] != '{') return false;
     int depth = 0;
     bool inAssets = false;  // 在最外层的 "assets" 数组里：里面每个文件是第 3 层的对象
+    bool assetIsZip = false, assetUploaded = false;  // 正在读的这个文件：名字对、传完了（没传完的 state 是 "open"）
     while (i < json.size()) {
         char c = json[i];
         if (c == '{' || c == '[') {
             ++depth;
+            if (inAssets && depth == 3) assetIsZip = assetUploaded = false;
             ++i;
         } else if (c == '}' || c == ']') {
+            if (inAssets && depth == 3 && assetIsZip && assetUploaded) hasZip = true;
             if (--depth <= 0) break;  // 最外层的对象结束了
             if (depth == 1) inAssets = false;
             ++i;
@@ -175,7 +178,8 @@ bool ParseRelease(const std::string& json, std::string& tag, std::string& url, b
             std::string value;
             if (!ReadJsonString(json, i, value)) return false;
             if (depth == 3) {
-                if (key == "name" && value == kZipName) hasZip = true;
+                if (key == "name") assetIsZip = value == kZipName;
+                else if (key == "state") assetUploaded = value == "uploaded";
             } else if (key == "tag_name") {
                 tag = value;
             } else if (key == "html_url") {
