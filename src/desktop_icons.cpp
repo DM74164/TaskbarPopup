@@ -51,7 +51,10 @@ std::atomic<UINT> s_updateLate{0};  // 关自动隐藏那一刻最后发出的�
 std::mutex s_lock;              // 保护 s_session、s_snapshot
 UINT s_session = 0;             // 每打开一次自动隐藏（和退出时）加一，旧的摆放请求看到变了就放弃
 bool s_snapshot = false;        // 有一份打开自动隐藏之前记下的位置（可能还在记）
-std::atomic<bool> s_discard{false};  // 记得太慢，自动隐藏已经打开了，记下的不能用
+// 等记位置、拍照等得超时的那次会话的编号（等的一方不等了，自动隐藏已经打开）：这次及以前的会话记下的、拍下的都不能用。
+// 只增不减：新会话开始时不清，免得把上一次还没记完的那份当成能用的
+std::atomic<UINT> s_discardFrom{0};
+bool Discarded(UINT session) { return s_discardFrom >= session; }
 std::atomic<bool> s_quit{false};
 std::vector<IconPos> s_icons;  // 只在图标线程上用
 std::vector<POINT> s_layout;   // 关掉自动隐藏、桌面排好以后读到的位置（资源管理器排的），和 s_icons 一一对应
@@ -285,7 +288,7 @@ void CoverAndHide() {
 
 // 上次关掉以后还没摆完又要打开自动隐藏（kCmdRehide），打开之前做：图标还藏着的话照片也接着用；已经显示回来的话，
 // 图标都在记下的位置、图标窗口和工作区也和记位置时一样才重新拍照，不然不拍（回桌面时图标晚一下出现，不会盖一张不对的照片）
-void Reshoot() {
+void Reshoot(UINT session) {
     if (s_hiddenList) return;
     ReleaseShot();
     HWND list = s_savedList;
@@ -300,7 +303,7 @@ void Reshoot() {
     }
     Capture(list);
     // 等的一方已经不等了：自动隐藏可能已经打开，照片也许拍到了挪动中的图标
-    if (s_discard.exchange(false) && s_shot) {
+    if (Discarded(session) && s_shot) {
         ReleaseShot();
         Log(L"拍照太慢，照片不用");
     }
@@ -367,7 +370,7 @@ bool DesktopPressed() {
     return !wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW");
 }
 
-void Save() {
+void Save(UINT session) {
     Clear();
     s_savedList = nullptr;
     double start = NowMs();
@@ -402,7 +405,7 @@ void Save() {
         }
     }
     // 等的一方已经不等了：自动隐藏可能已经打开，读到的也许是重新排过的位置，照片也许拍到了挪动中的图标
-    if (s_discard.exchange(false)) {
+    if (Discarded(session)) {
         Log(L"记图标位置太慢，这次不摆回去");
         Clear();
         ReleaseShot();
@@ -567,7 +570,7 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
         if (s_quit) continue;
         switch (msg.message) {
             case kCmdSave: {
-                Save();
+                Save(static_cast<UINT>(msg.wParam));
                 // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面。藏好了再让动画线程去开自动隐藏，
                 // 免得资源管理器在图标还露着时就挪它们
                 CoverAndHide();
@@ -575,7 +578,7 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 break;
             }
             case kCmdRehide:
-                Reshoot();
+                Reshoot(static_cast<UINT>(msg.wParam));
                 CoverAndHide();
                 SetEvent(s_savedEvent);
                 break;
@@ -675,9 +678,8 @@ void DesktopIcons_BeginSession() {
     UINT cmd = s_snapshot ? kCmdRehide : kCmdSave;
     if (!EnsureThread()) return;
     s_snapshot = true;
-    s_discard = false;
     ResetEvent(s_savedEvent);
-    if (!PostThreadMessageW(s_threadId, cmd, 0, 0)) {
+    if (!PostThreadMessageW(s_threadId, cmd, s_session, 0)) {
         if (cmd == kCmdSave) s_snapshot = false;
         SetEvent(s_savedEvent);
     }
@@ -685,7 +687,9 @@ void DesktopIcons_BeginSession() {
 
 void DesktopIcons_WaitSaved(DWORD ms) {
     if (!s_savedEvent) return;
-    if (WaitForSingleObject(s_savedEvent, ms) == WAIT_TIMEOUT) s_discard = true;
+    if (WaitForSingleObject(s_savedEvent, ms) != WAIT_TIMEOUT) return;
+    std::lock_guard<std::mutex> guard(s_lock);
+    s_discardFrom = s_session;
 }
 
 bool DesktopIcons_Mark() {
