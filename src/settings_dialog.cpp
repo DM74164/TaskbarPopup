@@ -1009,7 +1009,7 @@ void ApplyLook() {
 void Relayout(bool keepTop) {
     int oldW = s_width, oldH = s_height;
     POINT center = {s_pos.x + s_width / 2, s_pos.y + s_height / 2};
-    BuildLayout();
+    LayoutFor(MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTONEAREST));  // 变高了也要缩到屏幕放得下
     if (s_width == oldW && s_height == oldH) {
         Render();
         return;
@@ -1513,6 +1513,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 Render();
                 return 0;
             }
+            if (msg == WM_SYSKEYDOWN) break;  // Alt+字母等交给系统，别当成 Enter/Esc
             OnKey(wParam);
             return 0;
 

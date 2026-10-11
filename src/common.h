@@ -147,6 +147,8 @@ void DesktopIcons_AbandonUpdates();       // 马上要关自动隐藏：还没�
 void DesktopIcons_Cover();             // 主线程，要回到桌面了（要关自动隐藏）：图标还藏着的话把桌面的照片重新垫好
 void DesktopIcons_RevealLater();       // 主线程，自动隐藏刚关掉：图标排回原位就显示出来（打开前藏起来了的话）
 void DesktopIcons_Recover();           // 上次藏起的桌面图标没显示回来（被强行结束）：现在显示
+void DesktopIcons_DisplayChanged();    // 主线程，显示器变了（WM_DISPLAYCHANGE）：接上了第二块屏的话藏着的图标马上显示
+void DesktopIcons_EmergencyShow();     // 崩溃时：藏着的桌面图标直接显示（不摆位置）
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
 
 // ---------------- 键盘钩子（在单独的线程上运行）----------------
@@ -225,6 +227,7 @@ struct AppTarget {
     std::wstring launch;    // 再开一个 / 打开：固定的应用的启动路径，应用商店应用的 shell:AppsFolder\<ID>，或者程序路径
     std::wstring runAs;     // 以管理员身份运行的对象（.lnk 或程序）；应用商店应用为空
     std::wstring location;  // 打开文件所在的位置时选中的文件；应用商店应用为空
+    std::wstring exe;       // 打开“最近”里的文件用的程序（桌面程序的程序路径）；应用商店应用、找不到程序时为空
     std::vector<std::wstring> appIds;  // 读“最近”项用的 AppUserModelID，按顺序试：显式的在前，按程序路径算的在后
 };
 AppTarget ResolveAppTarget(HWND hwnd, const std::wstring& launch, const std::wstring& pinName);
@@ -235,7 +238,7 @@ struct RecentItem {
     std::wstring file, args, dir;      // 快捷方式：目标、参数、工作目录
 };
 std::vector<RecentItem> RecentItems(const std::vector<std::wstring>& appIds, size_t max);  // 第一个有结果的 ID 的
-void OpenRecentItem(const RecentItem& item);              // 本程序是管理员时也以普通权限打开
+void OpenRecentItem(const RecentItem& item, const std::wstring& exe);  // 文件用 exe 打开（为空时用默认程序）；本程序是管理员时也以普通权限打开
 void RunAsAdmin(HWND owner, const std::wstring& file);    // owner：UAC 提示框的父窗口，要在前台
 void OpenFileLocation(const std::wstring& path);          // 在资源管理器里打开所在文件夹并选中它
 

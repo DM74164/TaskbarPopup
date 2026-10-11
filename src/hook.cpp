@@ -140,6 +140,23 @@ void StopBindTimer() {
     s_bindTimer = 0;
 }
 
+// 吞掉了带 Alt / Shift 的组合键：补发一个没用的键，松开 Alt / Shift 时系统就不会当成单按（激活菜单栏、切换输入法）
+void MaskMods(UINT mods) {
+    if (!(mods & (MOD_ALT | MOD_SHIFT))) return;
+    INPUT in[2] = {KeyInput(kMaskVk, 0, false, false), KeyInput(kMaskVk, 0, true, false)};
+    SendInput(2, in, sizeof(INPUT));
+}
+
+// 分左右的 Ctrl / Shift / Alt 对应的 MOD_ 标记，别的键是 0
+UINT ModOf(UINT vk) {
+    switch (vk) {
+        case VK_LCONTROL: case VK_RCONTROL: return MOD_CONTROL;
+        case VK_LSHIFT: case VK_RSHIFT: return MOD_SHIFT;
+        case VK_LMENU: case VK_RMENU: return MOD_ALT;
+    }
+    return 0;
+}
+
 void Fire(int action) {
     if (action >= 0) PostMessageW(g_mainWnd, WM_APP_HOTKEY, static_cast<WPARAM>(action), reinterpret_cast<LPARAM>(s_press.target));
 }
@@ -148,6 +165,7 @@ void CALLBACK OnBindTimer(HWND, UINT, UINT_PTR, DWORD) {
     StopBindTimer();
     if (s_press.state == Press::Pending) {
         s_press.state = Press::Fired;  // 之后的自动重复和松开都吞掉
+        MaskMods(s_press.binding.mods);
         Fire(s_press.binding.hold);
     } else if (s_press.state == Press::Modifier && !s_press.fired) {
         s_press.fired = true;
@@ -187,6 +205,7 @@ bool BeginPress(const KeyBinding& b, UINT vk, DWORD scan, bool extended, DWORD t
     }
     if (b.hold < 0) {
         s_press.state = Press::Swallow;
+        MaskMods(b.mods);
         Fire(b.tap);
         return true;
     }
@@ -200,6 +219,7 @@ void ReleaseEarly() {
     StopBindTimer();
     s_press.state = Press::Idle;
     if (s_press.binding.tap >= 0) {
+        MaskMods(s_press.binding.mods);
         Fire(s_press.binding.tap);
     } else {
         INPUT in[2] = {PressInput(false), PressInput(true)};
@@ -229,7 +249,8 @@ int BindKey(bool down, const KBDLLHOOKSTRUCT& k) {
     if (mine) s_press.lastTime = k.time;
     switch (s_press.state) {
         case Press::Idle: {
-            if (!down || (k.flags & LLKHF_INJECTED)) return -1;
+            // 已经按着的键（自动重复）不算新的一次：钩子里拿到的还是这次事件之前的状态，刚按下时是松开的
+            if (!down || (k.flags & LLKHF_INJECTED) || (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000)) return -1;
             const KeyBinding* b = Match(vk);
             if (!b) return -1;
             return BeginPress(*b, vk, k.scanCode, (k.flags & LLKHF_EXTENDED) != 0, k.time, {}, nullptr) ? 1 : 0;
@@ -240,7 +261,24 @@ int BindKey(bool down, const KBDLLHOOKSTRUCT& k) {
                 ReleaseEarly();
                 return 1;
             }
-            if (!down) return -1;  // 之前就按着的键松开
+            if (!down) {
+                if (!(ModOf(vk) & s_press.binding.mods)) return -1;  // 之前就按着的键松开
+                // 组合键里的 Ctrl / Shift / Alt 先松开了：有单按的现在就算单按（之后这个键的松开吞掉），
+                // 没有的话先把拦着的按下还回去再松开它，免得之后补发成不带修饰键的按键
+                bool ext = (k.flags & LLKHF_EXTENDED) != 0;
+                if (s_press.binding.tap < 0) {
+                    GiveBack(KeyInput(vk, k.scanCode, true, ext));
+                    return 1;
+                }
+                StopBindTimer();
+                s_press.state = Press::Swallow;
+                Fire(s_press.binding.tap);
+                if (!(s_press.binding.mods & (MOD_ALT | MOD_SHIFT))) return 0;
+                INPUT in[3] = {KeyInput(kMaskVk, 0, false, false), KeyInput(kMaskVk, 0, true, false),
+                               KeyInput(vk, k.scanCode, true, ext)};
+                SendInput(3, in, sizeof(INPUT));
+                return 1;
+            }
             GiveBack(KeyInput(vk, k.scanCode, false, (k.flags & LLKHF_EXTENDED) != 0));
             return 1;
         case Press::Fired:
@@ -278,6 +316,14 @@ int BindKey(bool down, const KBDLLHOOKSTRUCT& k) {
 // 鼠标事件：返回 true 表示吞掉
 bool HandleMouse(WPARAM msg, const MSLLHOOKSTRUCT& m) {
     if (m.dwExtraInfo == kInjectMarker) return false;
+    if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+        // Ctrl + 滚轮缩放、Shift + 滚轮横着滚：单独的修饰键这次不算
+        if (s_press.state == Press::Modifier && !s_press.fired) {
+            StopBindTimer();
+            s_press.state = Press::Idle;
+        }
+        return false;
+    }
     if (msg == WM_MOUSEMOVE) {
         // 拦着鼠标键时挪远了，是要拖动：把按下还回去
         if (s_press.state == Press::Pending && IsMouseVk(s_press.vk) &&
@@ -329,9 +375,10 @@ bool HandleMouse(WPARAM msg, const MSLLHOOKSTRUCT& m) {
             s_press.state = Press::Idle;
             return true;
         case Press::Modifier:
-            if (down && !s_press.fired) {  // Ctrl + 点击之类：这次不算
+            if (down && !s_press.fired) {  // Ctrl + 点击之类：这次不算，这个鼠标键照常看是不是快捷键
                 StopBindTimer();
                 s_press.state = Press::Idle;
+                return HandleMouse(msg, m);
             }
             return false;
     }
