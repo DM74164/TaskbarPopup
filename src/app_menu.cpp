@@ -238,6 +238,7 @@ AppTarget ResolveAppTarget(HWND hwnd, const std::wstring& launch, const std::wst
     if (!packaged) {
         t.runAs = !lnk.empty() ? lnk : exe;
         t.location = FileExists(exe) ? exe : lnk;
+        if (FileExists(exe)) t.exe = exe;
     }
     return t;
 }
@@ -269,12 +270,21 @@ std::vector<RecentItem> RecentItems(const std::vector<std::wstring>& appIds, siz
     return result;
 }
 
-void OpenRecentItem(const RecentItem& item) {
+void OpenRecentItem(const RecentItem& item, const std::wstring& exe) {
     if (!item.file.empty()) {
         LaunchAsUser(item.file, item.args, item.dir);
         return;
     }
     if (!item.pidl) return;
+    // 和任务栏的跳转列表一样，用这个程序打开（它不一定是这类文件的默认程序）。文件夹、不是文件的外壳项照常打开
+    wchar_t path[MAX_PATH] = {};
+    if (!exe.empty() && SHGetPathFromIDListW(item.pidl.get(), path)) {
+        DWORD attr = GetFileAttributesW(path);
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            LaunchAsUser(exe, L"\"" + std::wstring(path) + L"\"");
+            return;
+        }
+    }
     if (IsElevated()) {
         // 本程序是管理员时直接打开的话，打开它的程序也是管理员权限：换成解析名交给资源管理器
         PWSTR name = nullptr;

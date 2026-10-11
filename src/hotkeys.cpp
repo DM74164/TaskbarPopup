@@ -165,13 +165,11 @@ void Hotkeys_Apply() {
         }
 
         UINT reg = viaRegister ? want : 0;
+        if (!reg && !s_suspended) s_failed[id] = false;  // 不走 RegisterHotKey 了（换成长按、鼠标键或清空），之前注册不上的提示也不作数
         if (reg == s_registered[id]) continue;
         if (s_registered[id]) UnregisterHotKey(g_mainWnd, kHotkeyIdBase + id);
         s_registered[id] = 0;
-        if (!reg) {
-            if (!s_suspended) s_failed[id] = false;
-            continue;
-        }
+        if (!reg) continue;
         if (RegisterHotKey(g_mainWnd, kHotkeyIdBase + id, HotkeyMods(reg) | MOD_NOREPEAT, HotkeyVk(reg))) {
             s_registered[id] = reg;
             s_failed[id] = false;

@@ -22,6 +22,7 @@ constexpr wchar_t kApiHost[] = L"api.github.com";
 constexpr wchar_t kApiPath[] = L"/repos/DM74164/TaskbarPopup/releases/latest";
 constexpr wchar_t kRepoUrl[] = L"https://github.com/DM74164/TaskbarPopup/";  // 下载页面只认这个仓库下的地址
 constexpr wchar_t kReleasesUrl[] = L"https://github.com/DM74164/TaskbarPopup/releases/latest";
+constexpr char kZipName[] = "TaskbarPopup.zip";  // 发布里要有这个文件才算能下载
 constexpr wchar_t kUserAgent[] = L"TaskbarPopup/" TP_VERSION_STR;  // GitHub API 不接受没有 User-Agent 的请求
 constexpr UINT kFirstCheckMs = 15 * 1000;            // 启动后先等一会儿，别和开机时的其他程序抢网络
 constexpr UINT kIntervalMs = 24 * 60 * 60 * 1000;   // 之后每天一次
@@ -36,6 +37,7 @@ struct Version {
 struct Result {
     bool ok = false;
     Version latest;
+    bool hasZip = false;  // 下载文件已经传上去了（在网页上新建的发布，要等编译、签名完才有）
     std::wstring url;    // 下载页面
     std::wstring error;  // 失败原因，给用户看的
 };
@@ -99,7 +101,7 @@ std::wstring VersionText(const Version& v) {
     return buf;
 }
 
-// ---- 只认最外层的 "tag_name" 和 "html_url"（author 等嵌套对象里也有 html_url）----
+// ---- 只认最外层的 "tag_name"、"html_url"（author 等嵌套对象里也有 html_url），和 "assets" 里每个文件的 "name" ----
 
 // s[i] 是开头的引号；读完 i 停在结尾引号后面。只关心 ASCII 的值，\u 转义出的非 ASCII 字符记成 '?'
 bool ReadJsonString(const std::string& s, size_t& i, std::string& out) {
@@ -145,11 +147,12 @@ void SkipSpace(const std::string& s, size_t& i) {
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) ++i;
 }
 
-bool ParseRelease(const std::string& json, std::string& tag, std::string& url) {
+bool ParseRelease(const std::string& json, std::string& tag, std::string& url, bool& hasZip) {
     size_t i = 0;
     SkipSpace(json, i);
     if (i >= json.size() || json[i] != '{') return false;
     int depth = 0;
+    bool inAssets = false;  // 在最外层的 "assets" 数组里：里面每个文件是第 3 层的对象
     while (i < json.size()) {
         char c = json[i];
         if (c == '{' || c == '[') {
@@ -157,20 +160,27 @@ bool ParseRelease(const std::string& json, std::string& tag, std::string& url) {
             ++i;
         } else if (c == '}' || c == ']') {
             if (--depth <= 0) break;  // 最外层的对象结束了
+            if (depth == 1) inAssets = false;
             ++i;
         } else if (c == '"') {
             std::string key;
             if (!ReadJsonString(json, i, key)) return false;
-            if (depth != 1) continue;
-            // 最外层对象里后面跟冒号的字符串就是键；值是字符串时顺便读掉，不是的话交给外面的循环
+            if (depth != 1 && !(inAssets && depth == 3)) continue;
+            // 对象里后面跟冒号的字符串就是键；值是字符串时顺便读掉，不是的话交给外面的循环
             SkipSpace(json, i);
             if (i >= json.size() || json[i] != ':') continue;
             SkipSpace(json, ++i);
+            if (depth == 1 && key == "assets" && i < json.size() && json[i] == '[') inAssets = true;
             if (i >= json.size() || json[i] != '"') continue;
             std::string value;
             if (!ReadJsonString(json, i, value)) return false;
-            if (key == "tag_name") tag = value;
-            else if (key == "html_url") url = value;
+            if (depth == 3) {
+                if (key == "name" && value == kZipName) hasZip = true;
+            } else if (key == "tag_name") {
+                tag = value;
+            } else if (key == "html_url") {
+                url = value;
+            }
         } else {
             ++i;
         }
@@ -286,7 +296,7 @@ Result Fetch() {
     }
 
     std::string tag, url;
-    if (!ParseRelease(body, tag, url) || !ParseVersion(tag, r.latest)) {
+    if (!ParseRelease(body, tag, url, r.hasZip) || !ParseVersion(tag, r.latest)) {
         Log(L"检查更新：读不懂回应（%u 字节）", static_cast<unsigned>(body.size()));
         r.error = L"服务器的回应不对";
         return r;
@@ -393,10 +403,15 @@ void Update_OnResult() {
         if (manual) Tell(L"检查更新失败：" + r.error, true);
         return;
     }
-    Log(L"检查更新：最新版本 %ls，下载页面 %ls", VersionText(r.latest).c_str(), r.url.c_str());
+    Log(L"检查更新：最新版本 %ls%ls，下载页面 %ls", VersionText(r.latest).c_str(), r.hasZip ? L"" : L"（下载文件还没传上去）",
+        r.url.c_str());
     if (Compare(r.latest, CurrentVersion()) > 0) {
-        // 自动检查不为同一个版本反复提醒
-        if (manual || Compare(r.latest, NotifiedVersion()) > 0) AnnounceNewer(r, manual);
+        // 刚发布、下载文件还在编译签名：先不提醒（也不记成提醒过），下次检查再说
+        if (!r.hasZip) {
+            if (manual) Tell(L"发现新版本 " + VersionText(r.latest) + L"，下载文件还没准备好，过一会儿再检查", false);
+        } else if (manual || Compare(r.latest, NotifiedVersion()) > 0) {
+            AnnounceNewer(r, manual);  // 自动检查不为同一个版本反复提醒
+        }
     } else if (manual) {
         Tell(L"已经是最新版本（v" TP_VERSION_STR L"）", false);
     }
