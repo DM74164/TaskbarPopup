@@ -1513,7 +1513,9 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 Render();
                 return 0;
             }
-            if (msg == WM_SYSKEYDOWN) break;  // Alt+字母等交给系统，别当成 Enter/Esc
+            // Alt+字母等别当成 Enter/Esc；也不交给 DefWindowProc，不然单按 Alt / F10 松开后进了看不见的系统菜单模式。
+            // Alt+空格照常弹窗口菜单（靠后面的 WM_SYSCHAR）
+            if (msg == WM_SYSKEYDOWN) return 0;
             OnKey(wParam);
             return 0;
 
