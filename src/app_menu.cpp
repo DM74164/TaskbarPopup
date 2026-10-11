@@ -185,6 +185,23 @@ bool DescribeRecent(IUnknown* object, RecentItem& out) {
     return !out.name.empty() && (!out.file.empty() || out.pidl);
 }
 
+// exe 是不是登记过的、能打开这类文件（path 的扩展名）的程序之一（不一定是默认的）
+bool IsHandlerFor(const std::wstring& exe, const std::wstring& path) {
+    size_t dot = path.find_last_of(L".\\/");
+    if (dot == std::wstring::npos || path[dot] != L'.') return false;
+    IEnumAssocHandlers* handlers = nullptr;
+    if (FAILED(SHAssocEnumHandlers(path.substr(dot).c_str(), ASSOC_FILTER_NONE, &handlers))) return false;
+    bool found = false;
+    IAssocHandler* handler = nullptr;
+    while (!found && handlers->Next(1, &handler, nullptr) == S_OK) {
+        PWSTR name = nullptr;  // 程序的完整路径
+        if (SUCCEEDED(handler->GetName(&name))) found = EqualsNoCase(TakeString(name), exe);
+        handler->Release();
+    }
+    handlers->Release();
+    return found;
+}
+
 }  // namespace
 
 AppTarget ResolveAppTarget(HWND hwnd, const std::wstring& launch, const std::wstring& pinName) {
@@ -276,11 +293,12 @@ void OpenRecentItem(const RecentItem& item, const std::wstring& exe) {
         return;
     }
     if (!item.pidl) return;
-    // 和任务栏的跳转列表一样，用这个程序打开（它不一定是这类文件的默认程序）。文件夹、不是文件的外壳项照常打开
+    // 和任务栏的跳转列表一样，用这个程序打开（它不一定是这类文件的默认程序）。窗口所属的程序不是登记过的打开程序时
+    // （比如 LibreOffice 的 soffice.bin、java / python 这类宿主），以及文件夹、不是文件的外壳项，照常用默认程序打开
     wchar_t path[MAX_PATH] = {};
     if (!exe.empty() && SHGetPathFromIDListW(item.pidl.get(), path)) {
         DWORD attr = GetFileAttributesW(path);
-        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY) && IsHandlerFor(exe, path)) {
             LaunchAsUser(exe, L"\"" + std::wstring(path) + L"\"");
             return;
         }
