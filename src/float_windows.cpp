@@ -82,6 +82,17 @@ std::vector<HWND> CoveredFloats(HWND big) {
     return covered;
 }
 
+// big 和 lowest 之间（Z 序里）夹着别的看得见、和 big 重叠的窗口（没双击过的小窗口、别的大窗口）
+bool OthersBetween(HWND big, HWND lowest, const std::vector<HWND>& covered) {
+    RECT b, r, overlap;
+    if (!GetWindowRect(big, &b)) return false;
+    for (HWND h = GetWindow(big, GW_HWNDNEXT); h && h != lowest; h = GetWindow(h, GW_HWNDNEXT))
+        if (std::find(covered.begin(), covered.end(), h) == covered.end() && IsAppWindow(h) && GetWindowRect(h, &r) &&
+            IntersectRect(&overlap, &r, &b))
+            return true;
+    return false;
+}
+
 void Schedule();
 
 void CALLBACK OnCheck(HWND, UINT, UINT_PTR, DWORD) {
@@ -89,16 +100,20 @@ void CALLBACK OnCheck(HWND, UINT, UINT_PTR, DWORD) {
     s_timer = 0;
     HWND big = s_big;
     if (!big || GetForegroundWindow() != big || !IsBigWindow(big)) return;
+    // 置顶的大窗口不动：插到普通窗口后面会让它丢掉置顶
+    if (GetWindowLongPtrW(big, GWL_EXSTYLE) & WS_EX_TOPMOST) return;
     std::vector<HWND> covered = CoveredFloats(big);
     if (covered.empty() && s_stage == 0)
         Log(L"小窗口留在上面：%ls 在前台，双击过的 %d 个小窗口都没被盖住", GetClassNameStr(big).c_str(),
             static_cast<int>(s_floats.size()));
     if (!covered.empty()) {
         const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
-        // 大窗口插到最靠下的那个小窗口后面；异步，对方没响应也不会卡住本程序
-        SetWindowPos(big, covered.back(), 0, 0, 0, 0, flags);
-        // 前两次挪了还被盖住：换个办法，把小窗口从下到上一个个提到最上面（不激活）
-        if (s_stage >= 2)
+        // 大窗口插到最靠下的那个小窗口后面；异步，对方没响应也不会卡住本程序。
+        // 中间夹着没双击过的窗口时不能这么挪（会把它们一起露出来）
+        bool others = OthersBetween(big, covered.back(), covered);
+        if (!others) SetWindowPos(big, covered.back(), 0, 0, 0, 0, flags);
+        // 前两次挪了还被盖住、或者不能挪大窗口：把小窗口从下到上一个个提到最上面（不激活）
+        if (s_stage >= 2 || others)
             for (auto it = covered.rbegin(); it != covered.rend(); ++it) SetWindowPos(*it, HWND_TOP, 0, 0, 0, 0, flags);
         Log(L"小窗口留在上面：%ls 盖住了 %d 个小窗口，挪下去（第 %d 次）", GetClassNameStr(big).c_str(),
             static_cast<int>(covered.size()), s_stage + 1);
@@ -156,10 +171,11 @@ void BeforeClick(HWND big) {
     if (above.empty()) return;
     busy = true;
     for (HWND h : above) {
-        // 同步设置，保证在这次点击交给大窗口之前生效；对方卡住的话改成异步，最多耽误鼠标几十毫秒
-        UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-        if (!SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 50, nullptr)) flags |= SWP_ASYNCWINDOWPOS;
-        if (SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, flags)) s_lifted.push_back(h);
+        // 同步设置，保证在这次点击交给大窗口之前生效。对方卡住（几十毫秒没响应）就不提它：
+        // 异步提的话可能等取消置顶过去了才生效，它就一直置顶了；之后照常靠 OnCheck 挪
+        if (!SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 50, nullptr)) continue;
+        if (SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER))
+            s_lifted.push_back(h);
     }
     busy = false;
     if (s_liftTimer) KillTimer(nullptr, s_liftTimer);

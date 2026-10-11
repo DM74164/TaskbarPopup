@@ -35,6 +35,7 @@ constexpr UINT kCmdReveal = WM_APP + 7;   // 自动隐藏刚关掉：图标排�
 constexpr UINT kCmdCover = WM_APP + 8;    // 要回到桌面了：照片重新垫一下（资源管理器可能改过桌面窗口的层次）
 // 上次关掉以后还没摆完又打开了自动隐藏：记下的位置接着用，图标已经显示回来的话重新拍照、藏起
 constexpr UINT kCmdRehide = WM_APP + 9;
+constexpr UINT kCmdDisplay = WM_APP + 10;  // 显示器变了：接上了第二块屏的话藏着的图标马上显示（别的屏上的桌面露着）
 constexpr wchar_t kCoverClass[] = L"TaskbarPopupDesktopCover";
 
 struct IconPos {
@@ -60,6 +61,7 @@ std::vector<IconPos> s_icons;  // 只在图标线程上用
 std::vector<POINT> s_layout;   // 关掉自动隐藏、桌面排好以后读到的位置（资源管理器排的），和 s_icons 一一对应
 std::vector<POINT> s_mark;     // Mark 时读到的位置，和 s_icons 一一对应
 HWND s_hiddenList = nullptr;   // 藏起来的桌面图标窗口，只在图标线程上用
+std::atomic<HWND> s_hiddenNow{nullptr};  // 同上，给主线程看：退出等不及、崩溃时直接显示
 RECT s_hiddenRect = {};        // 藏起时它的位置大小（工作区变了它可能跟着变）
 double s_hiddenAt = 0;
 // 桌面的照片，和盖在桌面上的照片窗口。只在图标线程上用
@@ -264,10 +266,12 @@ bool WillHide(HWND list) { return list && GetSystemMetrics(SM_CMONITORS) == 1 &&
 // 藏起记位置时找到的桌面图标窗口。照片在记位置时已经拍好了
 void HideIcons() {
     HWND list = s_savedList;
-    if (s_hiddenList || !IsWindow(list) || !WillHide(list)) return;
+    if (s_quit || s_hiddenList || !IsWindow(list) || !WillHide(list)) return;
     SaveHidden(true);  // 先记下再藏，藏的这一刻被强行结束也能找回来
     s_hiddenRect = s_savedListRect;
+    s_hiddenNow = list;
     ShowWindow(list, SW_HIDE);
+    if (s_quit) ShowWindowAsync(list, SW_SHOWNA);  // 藏的同时主线程不等了：它可能没看到这次
     s_hiddenList = list;
     s_hiddenAt = NowMs();
     Log(L"藏起桌面图标，任务栏回来、图标排回原位以后再显示");
@@ -324,6 +328,7 @@ void ShowIcons() {
     HWND list = s_hiddenList;
     if (IsWindow(list)) ShowWindow(list, SW_SHOWNA);
     s_hiddenList = nullptr;
+    s_hiddenNow = nullptr;
     SaveHidden(false);
     if (s_coverShown) {
         double start = NowMs();
@@ -572,15 +577,21 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
             case kCmdSave: {
                 Save(static_cast<UINT>(msg.wParam));
                 // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面。藏好了再让动画线程去开自动隐藏，
-                // 免得资源管理器在图标还露着时就挪它们
-                CoverAndHide();
+                // 免得资源管理器在图标还露着时就挪它们。已经要退出（会话变了）就不藏
+                if (Current(static_cast<UINT>(msg.wParam))) CoverAndHide();
                 SetEvent(s_savedEvent);
                 break;
             }
             case kCmdRehide:
                 Reshoot(static_cast<UINT>(msg.wParam));
-                CoverAndHide();
+                if (Current(static_cast<UINT>(msg.wParam))) CoverAndHide();
                 SetEvent(s_savedEvent);
+                break;
+            case kCmdDisplay:
+                if (s_hiddenList && GetSystemMetrics(SM_CMONITORS) > 1) {
+                    Log(L"接上了另一块屏幕，藏着的桌面图标现在显示");
+                    ShowIcons();  // 位置照常等关掉自动隐藏以后摆
+                }
                 break;
             case kCmdCover:
                 if (Current(static_cast<UINT>(msg.wParam)) && s_hiddenList) ShowCover();
@@ -643,7 +654,8 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 break;
         }
     }
-    if (!s_quit) ShowIcons();  // 超时退出的留给下次启动
+    if (!s_quit) ShowIcons();
+    else if (IsWindow(s_hiddenList)) ShowWindowAsync(s_hiddenList, SW_SHOWNA);  // 主线程不等了：直接显示，不淡出
     HideCover();
     if (s_cover) DestroyWindow(s_cover);
     s_cover = nullptr;
@@ -735,6 +747,15 @@ void DesktopIcons_Recover() {
     if (EnsureThread()) PostThreadMessageW(s_threadId, kCmdRecover, 0, 0);
 }
 
+void DesktopIcons_DisplayChanged() {
+    std::lock_guard<std::mutex> guard(s_lock);
+    if (s_thread) PostThreadMessageW(s_threadId, kCmdDisplay, 0, 0);
+}
+
+void DesktopIcons_EmergencyShow() {
+    if (HWND list = s_hiddenNow.exchange(nullptr)) ShowWindowAsync(list, SW_SHOWNA);  // 记号留着，下次启动时再看一眼
+}
+
 void DesktopIcons_Finish(DWORD ms) {
     if (!s_thread) return;
     {
@@ -746,6 +767,7 @@ void DesktopIcons_Finish(DWORD ms) {
     PostThreadMessageW(s_threadId, WM_QUIT, 0, 0);
     if (WaitForSingleObject(s_thread, ms) == WAIT_TIMEOUT) {
         s_quit = true;  // 资源管理器卡住了，不等了；线程读完这次就退出
+        DesktopIcons_EmergencyShow();  // 图标还藏着的话先显示出来，不摆位置了
         Log(L"摆桌面图标超时，不等了");
     } else {
         s_quit = false;

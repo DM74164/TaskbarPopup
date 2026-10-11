@@ -206,6 +206,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Update_OnResult();
             return 0;
 
+        case WM_DISPLAYCHANGE:
+            DesktopIcons_DisplayChanged();
+            break;
+
         case WM_TIMER:
             if (wParam == kTimerFullscreen) {
                 Fullscreen_Check();
@@ -265,6 +269,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 LONG WINAPI OnCrash(EXCEPTION_POINTERS*) {
     Taskbar_EmergencyRestore();  // 崩溃也别把任务栏留在隐藏状态
+    DesktopIcons_EmergencyShow();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

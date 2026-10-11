@@ -1054,7 +1054,7 @@ void ShowItemMenu(int idx, POINT at) {
 
     // 下面这些只用上面抄下来的东西，不碰格子；趁本窗口还在前台时启动，新程序才能顺利拿到前台
     if (cmd >= kCmdRecent && cmd < kCmdRecent + recent.size()) {
-        OpenRecentItem(recent[cmd - kCmdRecent]);
+        OpenRecentItem(recent[cmd - kCmdRecent], app.exe);
         HideNow();
         return;
     }
