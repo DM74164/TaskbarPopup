@@ -68,6 +68,7 @@ double s_hiddenAt = 0;
 HDC s_shotDC = nullptr;
 HBITMAP s_shot = nullptr;
 HGDIOBJ s_shotOld = nullptr;
+const DWORD* s_shotBits = nullptr;  // 照片的像素（s_shotWindow 那么大，从上到下）
 RECT s_shotWindow = {};          // 拍照时桌面窗口在屏幕上的范围（照片的原点）
 RECT s_shotArea = {};            // 要盖住的范围：拍照时的工作区
 HWND s_desktopRoot = nullptr;    // 放图标的顶层窗口（Progman / WorkerW），照片窗口紧贴在它上面
@@ -154,6 +155,64 @@ void ReleaseShot() {
     s_shotDC = nullptr;
     s_shot = nullptr;
     s_shotOld = nullptr;
+    s_shotBits = nullptr;
+}
+
+// 一块 32 位的内存位图
+struct Dib {
+    HDC dc = nullptr;
+    HBITMAP bmp = nullptr;
+    HGDIOBJ old = nullptr;
+    DWORD* bits = nullptr;
+    int w = 0, h = 0;
+    Dib() = default;
+    Dib(const Dib&) = delete;
+    Dib& operator=(const Dib&) = delete;
+    ~Dib() {
+        if (dc) {
+            SelectObject(dc, old);
+            DeleteDC(dc);
+        }
+        if (bmp) DeleteObject(bmp);
+    }
+    bool Create(int width, int height) {
+        if (bits && w == width && h == height) return true;
+        BITMAPINFO bi = {};
+        bi.bmiHeader = {sizeof(BITMAPINFOHEADER), width, -height, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        void* p = nullptr;
+        if (!dc) dc = CreateCompatibleDC(nullptr);
+        HBITMAP b = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &p, nullptr, 0) : nullptr;
+        if (!b) return false;
+        HGDIOBJ prev = SelectObject(dc, b);
+        if (bmp) DeleteObject(bmp);
+        else old = prev;
+        bmp = b;
+        bits = static_cast<DWORD*>(p);
+        w = width;
+        h = height;
+        return true;
+    }
+};
+
+// 两个像素看上去一样：每个颜色分量差得不多
+bool Near(DWORD a, DWORD b) {
+    for (int shift = 0; shift < 24; shift += 8) {
+        int d = static_cast<int>((a >> shift) & 0xFF) - static_cast<int>((b >> shift) & 0xFF);
+        if (d > 6 || d < -6) return false;
+    }
+    return true;
+}
+
+// 两张和 s_shotWindow 一样大的图在要盖住的那一块里有多少个点不一样（隔一个点比一个）
+long CountDiff(const DWORD* a, const DWORD* b, int w) {
+    long diff = 0;
+    for (LONG y = s_shotArea.top - s_shotWindow.top; y < s_shotArea.bottom - s_shotWindow.top; y += 2) {
+        const DWORD* pa = a + static_cast<size_t>(y) * w;
+        const DWORD* pb = b + static_cast<size_t>(y) * w;
+        for (LONG x = s_shotArea.left - s_shotWindow.left; x < s_shotArea.right - s_shotWindow.left; x += 2)
+            if (!Near(pa[x], pb[x])) ++diff;
+    }
+    return diff;
 }
 
 LRESULT CALLBACK CoverProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -209,6 +268,7 @@ void Capture(HWND list) {
     s_shotDC = dc;
     s_shot = bmp;
     s_shotOld = old;
+    s_shotBits = static_cast<const DWORD*>(bits);
     s_shotWindow = rr;
     s_shotArea = area;
     s_desktopRoot = root;
@@ -322,7 +382,73 @@ void WaitPainted(HWND list) {
     WaitForVBlank();
 }
 
-// 显示图标；盖着照片的话等资源管理器把图标画出来、上了屏，再淡出照片
+// 图标显示出来以后（照片还盖着）：隔一会儿给桌面再拍一张，和照片一样了才撤照片。图标是一个个画出来的（图标、缩略图、
+// 小箭头可能晚一点），没画完就撤照片看上去就是一闪。不再变了也算（比如鼠标停在某个图标上，它有高亮），最多等 ms 毫秒。
+// 返回还有多少个点不一样，拍不到返回 -1
+long WaitLikeShot(DWORD ms) {
+    if (!s_shotBits || !IsWindow(s_desktopRoot)) return -1;
+    RECT rr;
+    if (!GetWindowRect(s_desktopRoot, &rr) || !EqualRect(&rr, &s_shotWindow)) return -1;
+    int w = rr.right - rr.left, h = rr.bottom - rr.top;
+    long tiny = (s_shotArea.right - s_shotArea.left) * (s_shotArea.bottom - s_shotArea.top) / 4 / 2000;
+    Dib now, last;
+    bool haveLast = false;
+    long diff = -1;
+    for (double start = NowMs();;) {
+        if (!now.Create(w, h) || !PrintWindow(s_desktopRoot, now.dc, PW_RENDERFULLCONTENT)) return diff;
+        GdiFlush();
+        diff = CountDiff(now.bits, s_shotBits, w);
+        if (diff <= tiny) return diff;
+        bool stable = haveLast && CountDiff(now.bits, last.bits, w) == 0;
+        if (stable || NowMs() - start >= ms) return diff;
+        std::swap(now.dc, last.dc);
+        std::swap(now.bmp, last.bmp);
+        std::swap(now.old, last.old);
+        std::swap(now.bits, last.bits);
+        std::swap(now.w, last.w);
+        std::swap(now.h, last.h);
+        haveLast = true;
+        Pause(25);
+    }
+}
+
+// 诊断日志开着时：照片撤掉以后，把屏幕上露着的桌面和照片比一比，两张图存到设置文件夹里（desktop-photo.png、
+// desktop-screen.png），看照片和真桌面哪里不一样
+void DiagnoseShot() {
+    if (!g_settings.debugLog || !s_shotBits) return;
+    int w = s_shotArea.right - s_shotArea.left, h = s_shotArea.bottom - s_shotArea.top;
+    int sw = s_shotWindow.right - s_shotWindow.left;
+    const DWORD* photo = s_shotBits + static_cast<size_t>(s_shotArea.top - s_shotWindow.top) * sw +
+                         (s_shotArea.left - s_shotWindow.left);
+    Dib screen;
+    if (!screen.Create(w, h)) return;
+    HDC sdc = GetDC(nullptr);
+    BitBlt(screen.dc, 0, 0, w, h, sdc, s_shotArea.left, s_shotArea.top, SRCCOPY);
+    ReleaseDC(nullptr, sdc);
+    GdiFlush();
+    long seen = 0, bad = 0;
+    double sum = 0;
+    for (int y = 0; y < h; y += 16)
+        for (int x = 0; x < w; x += 16) {
+            POINT pt = {s_shotArea.left + x, s_shotArea.top + y};
+            if (GetAncestor(WindowFromPoint(pt), GA_ROOT) != s_desktopRoot) continue;  // 被别的窗口挡着
+            DWORD a = screen.bits[static_cast<size_t>(y) * w + x], b = photo[static_cast<size_t>(y) * sw + x];
+            ++seen;
+            if (!Near(a, b)) ++bad;
+            for (int shift = 0; shift < 24; shift += 8)
+                sum += std::abs(static_cast<int>((a >> shift) & 0xFF) - static_cast<int>((b >> shift) & 0xFF));
+        }
+    Log(L"诊断：屏幕上露着的桌面取了 %ld 个点，和照片不一样的 %ld 个，平均每个颜色分量差 %.2f", seen, bad,
+        seen ? sum / seen / 3 : 0.0);
+    CLSID png = {0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+    Gdiplus::Bitmap a(w, h, sw * 4, PixelFormat32bppRGB, reinterpret_cast<BYTE*>(const_cast<DWORD*>(photo)));
+    Gdiplus::Bitmap b(w, h, w * 4, PixelFormat32bppRGB, reinterpret_cast<BYTE*>(screen.bits));
+    std::wstring dir = SettingsDir() + L"\\";
+    a.Save((dir + L"desktop-photo.png").c_str(), &png, nullptr);
+    b.Save((dir + L"desktop-screen.png").c_str(), &png, nullptr);
+}
+
+// 显示图标；盖着照片的话等资源管理器把图标画出来、和照片对上了，再淡出照片
 void ShowIcons() {
     if (!s_hiddenList) return;
     HWND list = s_hiddenList;
@@ -333,9 +459,14 @@ void ShowIcons() {
     if (s_coverShown) {
         double start = NowMs();
         WaitPainted(list);
+        long diff = WaitLikeShot(600);
+        WaitForVBlank();  // 拍到的是画好的，等它上屏
+        WaitForVBlank();
         double painted = NowMs() - start;
         FadeOutCover();
-        Log(L"显示桌面图标，等图标画好用了 %.0f 毫秒，淡出照片（照片盖了 %.0f 毫秒）", painted, NowMs() - s_coverAt);
+        Log(L"显示桌面图标，等图标画好、和照片对上用了 %.0f 毫秒（还差 %ld 个点），淡出照片（照片盖了 %.0f 毫秒）", painted,
+            diff, NowMs() - s_coverAt);
+        DiagnoseShot();
     } else {
         Log(L"显示桌面图标");
     }
