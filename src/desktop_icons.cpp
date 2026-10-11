@@ -491,32 +491,54 @@ void MaskCover() {
         cells ? L"" : L"，没读到图标格子", NowMs() - start);
 }
 
+// 照片盖住的地方一共比多少个点（和 CountDiff 一样隔一个点比一个）
+long CountSamples() {
+    LONG aw = s_shotArea.right - s_shotArea.left, ah = s_shotArea.bottom - s_shotArea.top;
+    bool masked = s_mask.size() == static_cast<size_t>(aw) * ah;
+    long n = 0;
+    for (LONG y = 0; y < ah; y += 2)
+        for (LONG x = 0; x < aw; x += 2)
+            if (!masked || s_mask[static_cast<size_t>(y) * aw + x]) ++n;
+    return n;
+}
+
 // 图标显示出来以后（照片还盖着）：隔一会儿给桌面再拍一张，和照片一样了才撤照片。图标是一个个画出来的（图标、缩略图、
-// 小箭头可能晚一点），没画完就撤照片看上去就是一闪。不再变了也算（比如鼠标停在某个图标上，它有高亮），最多等 ms 毫秒。
-// 返回还有多少个点不一样，拍不到返回 -1
-long WaitLikeShot(DWORD ms) {
+// 小箭头可能晚一点），没画完就撤照片看上去就是一闪。资源管理器有时显示出图标窗口好几百毫秒都不画，这时桌面不变但和照片
+// 差得远，不能当成画好了：差得不多（一成以内，比如鼠标停在某个图标上有高亮、图标边上的动态壁纸在动）并且不再变好才算，
+// 一直不画就让它重画一次。最多等 ms 毫秒。trace 记下拍到的和照片差多少（百分比，变了才记），返回还有多少个点不一样，拍不到返回 -1
+long WaitLikeShot(HWND list, DWORD ms, std::wstring& trace) {
     if (!s_shotBits || !IsWindow(s_desktopRoot)) return -1;
     RECT rr;
     if (!GetWindowRect(s_desktopRoot, &rr) || !EqualRect(&rr, &s_shotWindow)) return -1;
     int w = rr.right - rr.left, h = rr.bottom - rr.top;
     long tiny = (s_shotArea.right - s_shotArea.left) * (s_shotArea.bottom - s_shotArea.top) / 4 / 2000;
-    Dib now, last;
-    bool haveLast = false;
-    long diff = -1;
+    long total = std::max(1L, CountSamples());
+    Dib now;
+    long diff = -1, last = -1, shownPct = -1;
+    bool nudged = false;
     for (double start = NowMs();;) {
         if (!now.Create(w, h) || !PrintWindow(s_desktopRoot, now.dc, PW_RENDERFULLCONTENT)) return diff;
         GdiFlush();
         diff = CountDiff(now.bits, s_shotBits, w);
+        long pct = (diff * 100 + total - 1) / total;
+        if (pct != shownPct) {  // 一样的不重复记
+            wchar_t step[24];
+            swprintf(step, 24, trace.empty() ? L"%ld%%" : L"→%ld%%", pct);
+            trace += step;
+            shownPct = pct;
+        }
         if (diff <= tiny) return diff;
-        bool stable = haveLast && CountDiff(now.bits, last.bits, w) == 0;
-        if (stable || NowMs() - start >= ms) return diff;
-        std::swap(now.dc, last.dc);
-        std::swap(now.bmp, last.bmp);
-        std::swap(now.old, last.old);
-        std::swap(now.bits, last.bits);
-        std::swap(now.w, last.w);
-        std::swap(now.h, last.h);
-        haveLast = true;
+        bool stuck = last >= 0 && diff >= last - total / 200;  // 和上一张比没怎么变好
+        if (stuck && diff * 10 <= total) return diff;
+        double elapsed = NowMs() - start;
+        if (elapsed >= ms) return diff;
+        if (stuck && !nudged && elapsed >= 150 && IsWindow(list)) {
+            RedrawWindow(list, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+            trace += L"（让它重画）";
+            shownPct = -1;
+            nudged = true;
+        }
+        last = diff;
         Pause(25);
     }
 }
@@ -572,13 +594,14 @@ void ShowIcons() {
     if (s_coverShown) {
         double start = NowMs();
         WaitPainted(list);
-        long diff = WaitLikeShot(600);
+        std::wstring trace;
+        long diff = WaitLikeShot(list, s_maskShot ? 1500 : 600, trace);
         WaitForVBlank();  // 拍到的是画好的，等它上屏
         WaitForVBlank();
         double painted = NowMs() - start;
         FadeOutCover();
-        Log(L"显示桌面图标，等图标画好、和照片对上用了 %.0f 毫秒（还差 %ld 个点），淡出照片（照片盖了 %.0f 毫秒）", painted,
-            diff, NowMs() - s_coverAt);
+        Log(L"显示桌面图标，等图标画好、和照片对上用了 %.0f 毫秒（和照片差 %ls，还差 %ld 个点），淡出照片（照片盖了 %.0f 毫秒）",
+            painted, trace.c_str(), diff, NowMs() - s_coverAt);
         DiagnoseShot();
     } else {
         Log(L"显示桌面图标");
