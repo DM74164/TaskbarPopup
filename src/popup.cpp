@@ -1331,7 +1331,7 @@ void ShowSelectedMenu() {
 void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu);
 
 // 点托盘格子：左键先收起迷你任务栏，再去系统托盘里点它。
-// 右键在那一格上方弹迷你任务栏自己的菜单，不碰系统托盘；选“程序自己的菜单”才去系统托盘里右键它（TrayAppMenu）
+// 右键在那一格上方弹迷你任务栏自己的菜单，不碰系统托盘；选“程序菜单”才去系统托盘里右键它（TrayAppMenu）
 void ActivateTray(int i, bool right) {
     if (i < 0 || i >= TrayCells() || !TrayOnPage(i)) return;
     if (i >= s_trayShown) {  // “显示隐藏的图标”
@@ -1429,7 +1429,7 @@ void WatchTrayMenu() {
 }
 
 // 在那一格上方弹迷你任务栏自己的菜单，迷你任务栏留着；选了一项再收起。
-// offerAppMenu = 加一项“程序自己的菜单”（系统托盘里刚弹不出来时就不加了）
+// offerAppMenu = 加一项“程序菜单”（系统托盘里刚弹不出来时就不加了）
 void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu) {
     EndTrayMode();
     if (cell < 0 || cell >= s_trayShown || s_tray[cell].exe != app.exe) {

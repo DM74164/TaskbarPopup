@@ -648,7 +648,7 @@ bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool 
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"打开");
-    if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, L"程序自己的菜单");
+    if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, L"程序菜单");
     if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
         AppendMenuW(menu, MF_STRING, kTrayLocation, L"打开文件所在的位置");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
