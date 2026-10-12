@@ -311,6 +311,57 @@ void Capture(HWND list) {
     Log(L"给桌面拍了照，用了 %.0f 毫秒", NowMs() - start);
 }
 
+// 诊断用：照片窗口到桌面窗口之间（照片下面、桌面上面）有哪些窗口，照片自己看不看得见
+void LogCoverPlace() {
+    std::wstring between;
+    int n = 0;
+    HWND w = GetWindow(s_cover, GW_HWNDNEXT);
+    for (; w && w != s_desktopRoot && n < 20; w = GetWindow(w, GW_HWNDNEXT), ++n) {
+        if (!IsWindowVisible(w)) continue;
+        RECT r = {};
+        GetWindowRect(w, &r);
+        wchar_t item[96];
+        swprintf(item, 96, L" %ls(%ld,%ld)-(%ld,%ld)%ls", GetClassNameStr(w).c_str(), r.left, r.top, r.right, r.bottom,
+                 IsCloaked(w) ? L"隐身" : L"");
+        between += item;
+    }
+    HWND up = GetWindow(s_cover, GW_HWNDPREV);
+    Log(L"诊断：照片窗口%ls%ls，在 %ls 下面，%ls桌面窗口 %ls%ls", IsWindowVisible(s_cover) ? L"显示着" : L"没显示",
+        IsCloaked(s_cover) ? L"（被系统隐身）" : L"", up ? GetClassNameStr(up).c_str() : L"(最上面)",
+        w == s_desktopRoot ? L"下面就是" : L"没找到下面的", GetClassNameStr(s_desktopRoot).c_str(),
+        between.empty() ? L"" : (L"，中间显示着的窗口：" + between).c_str());
+}
+
+// 诊断用：照片盖着、桌面露出来时，屏幕上（照片该盖的地方）看到的是照片还是藏起图标后的桌面
+void LogCoverOnScreen() {
+    if (!s_shotBits || !s_bare || !s_coverShown) return;
+    int w = s_shotArea.right - s_shotArea.left, h = s_shotArea.bottom - s_shotArea.top;
+    int sw = s_shotWindow.right - s_shotWindow.left;
+    if (s_bare->w != sw || s_mask.size() != static_cast<size_t>(w) * h) return;
+    Dib screen;
+    if (!screen.Create(w, h)) return;
+    HDC sdc = GetDC(nullptr);
+    BitBlt(screen.dc, 0, 0, w, h, sdc, s_shotArea.left, s_shotArea.top, SRCCOPY);
+    ReleaseDC(nullptr, sdc);
+    GdiFlush();
+    size_t off = static_cast<size_t>(s_shotArea.top - s_shotWindow.top) * sw + (s_shotArea.left - s_shotWindow.left);
+    long seen = 0, photo = 0, bare = 0;
+    for (int y = 0; y < h; y += 8)
+        for (int x = 0; x < w; x += 8) {
+            if (!s_mask[static_cast<size_t>(y) * w + x]) continue;
+            POINT pt = {s_shotArea.left + x, s_shotArea.top + y};
+            if (GetAncestor(WindowFromPoint(pt), GA_ROOT) != s_desktopRoot) continue;  // 被别的窗口挡着
+            size_t i = off + static_cast<size_t>(y) * sw + x;
+            DWORD a = screen.bits[static_cast<size_t>(y) * w + x];
+            bool likePhoto = Near(a, s_shotBits[i]), likeBare = Near(a, s_bare->bits[i]);
+            if (likePhoto == likeBare) continue;  // 两张这里一样，看不出来
+            ++seen;
+            if (likePhoto) ++photo;
+            else ++bare;
+        }
+    Log(L"诊断：照片该盖的地方屏幕上取了 %ld 个点，像照片的 %ld 个，像没图标的桌面的 %ld 个", seen, photo, bare);
+}
+
 // 把照片盖在桌面上（已经盖着的话重新贴到桌面窗口上面）。照片窗口紧贴在桌面窗口上面，别的窗口都在它上面，鼠标点得穿。
 // 没有照片、没盖成时返回 false
 bool ShowCover() {
@@ -342,9 +393,26 @@ bool ShowCover() {
         }
         if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, from, &src, 0, &blend, ULW_ALPHA)) return false;
     }
-    HWND above = GetWindow(s_desktopRoot, GW_HWNDPREV);  // 紧挨在桌面窗口上面的那个，照片放在它下面
-    if (above == s_cover) above = GetWindow(s_cover, GW_HWNDPREV);
-    SetWindowPos(s_cover, above ? above : HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    // 紧挨在桌面窗口上面的那个，照片放在它下面。放不进去（比如那个窗口属于别的层）就再往上找一个
+    HWND above = GetWindow(s_desktopRoot, GW_HWNDPREV);
+    bool placed = false;
+    for (int tries = 0; tries < 8 && !placed; ++tries) {
+        if (above == s_cover) above = GetWindow(s_cover, GW_HWNDPREV);
+        placed = SetWindowPos(s_cover, above ? above : HWND_TOP, 0, 0, 0, 0,
+                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW) != FALSE;
+        if (!placed) {
+            Log(L"照片放到 %ls 下面失败（错误 %lu），换一个", above ? GetClassNameStr(above).c_str() : L"最上面",
+                GetLastError());
+            if (!above) break;
+            above = GetWindow(above, GW_HWNDPREV);
+        }
+    }
+    if (!placed) {
+        Log(L"照片放不到桌面上面，不盖照片");
+        ShowWindow(s_cover, SW_HIDE);
+        return false;
+    }
+    if (g_settings.debugLog && !s_coverShown) LogCoverPlace();
     if (!s_coverShown) s_coverAt = NowMs();
     s_coverShown = true;
     return true;
@@ -617,6 +685,7 @@ void DiagnoseShot() {
 void ShowIcons() {
     if (!s_hiddenList) return;
     HWND list = s_hiddenList;
+    if (g_settings.debugLog) LogCoverOnScreen();
     if (IsWindow(list)) ShowWindow(list, SW_SHOWNA);
     s_hiddenList = nullptr;
     s_hiddenNow = nullptr;
