@@ -31,6 +31,7 @@ constexpr ULONG_PTR kInjectMarker = 0x54425055;
 // 主线程改设置，钩子线程读
 std::atomic<bool> s_enabled{true};
 std::atomic<int> s_thresholdMs{kDefaultLongPressMs};
+std::atomic<bool> s_taskbarHidden{false};  // 主线程：本程序藏着任务栏
 
 // 以下只在钩子线程里访问
 HHOOK s_hook = nullptr;
@@ -74,11 +75,6 @@ INPUT KeyInput(DWORD vk, DWORD scan, bool up, bool extended) {
     in.ki.dwFlags = (up ? KEYEVENTF_KEYUP : 0) | (extended ? KEYEVENTF_EXTENDEDKEY : 0);
     in.ki.dwExtraInfo = kInjectMarker;
     return in;
-}
-
-void SendWinTap(DWORD vk) {
-    INPUT in[2] = {KeyInput(vk, 0, false, true), KeyInput(vk, 0, true, true)};
-    SendInput(2, in, sizeof(INPUT));
 }
 
 bool ModifierHeld() {
@@ -431,7 +427,7 @@ bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
 
     switch (s_state) {
         case State::Idle:
-            if (!s_enabled || !isWin || !down) return false;
+            if (!(s_enabled || s_taskbarHidden) || !isWin || !down) return false;
             s_winVk = k.vkCode;
             // 别的软件注入的 Win，或者先按住了 Ctrl/Shift/Alt 的组合键：不干预
             if ((k.flags & LLKHF_INJECTED) || ModifierHeld()) {
@@ -439,7 +435,7 @@ bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
                 return false;
             }
             s_state = State::Pending;
-            StartTimer();
+            if (s_enabled) StartTimer();  // 只为任务栏藏着时的开始菜单拦的话不用等长按
             return true;
 
         case State::Pending:
@@ -447,7 +443,9 @@ bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
                 if (down) return true;  // 按住时的自动重复
                 StopTimer();
                 s_state = State::Idle;
-                SendWinTap(s_winVk);  // 短按：还给系统一次完整的 Win 单击
+                // 短按：还给系统一次完整的 Win 单击。任务栏藏着时交给主线程，先弹迷你任务栏再打开开始菜单
+                if (s_taskbarHidden) PostMessageW(g_mainWnd, WM_APP_WINTAP, s_winVk, 0);
+                else SendWinTap(s_winVk);
                 return true;
             }
             if (!down) return false;  // 之前就按着的键松开，与 Win 无关
@@ -543,6 +541,13 @@ void Hook_SetBindings(const std::vector<KeyBinding>& bindings) {
 void Hook_Configure(bool enabled, int thresholdMs) {
     s_enabled = enabled;
     s_thresholdMs = thresholdMs;
+}
+
+void Hook_SetTaskbarHidden(bool hidden) { s_taskbarHidden = hidden; }
+
+void SendWinTap(DWORD vk) {
+    INPUT in[2] = {KeyInput(vk, 0, false, true), KeyInput(vk, 0, true, true)};
+    SendInput(2, in, sizeof(INPUT));
 }
 
 void SendStartMenu() { SendWinTap(VK_LWIN); }
