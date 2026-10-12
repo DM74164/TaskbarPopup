@@ -1328,8 +1328,10 @@ void ShowSelectedMenu() {
     ShowItemMenu(s_sel, POINT{static_cast<LONG>(r.X + r.Width / 2), static_cast<LONG>(r.Y)});
 }
 
+void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu);
+
 // 点托盘格子：左键先收起迷你任务栏，再去系统托盘里点它。
-// 右键迷你任务栏留着，去系统托盘里右键它、弹出它自己的菜单，菜单关了再看要不要收起（WatchTrayMenu）
+// 右键在那一格上方弹迷你任务栏自己的菜单，不碰系统托盘；选“程序自己的菜单”才去系统托盘里右键它（TrayAppMenu）
 void ActivateTray(int i, bool right) {
     if (i < 0 || i >= TrayCells() || !TrayOnPage(i)) return;
     if (i >= s_trayShown) {  // “显示隐藏的图标”
@@ -1344,13 +1346,18 @@ void ActivateTray(int i, bool right) {
         Tray_Click(app, false);
         return;
     }
-    if (Tray_Busy()) return;  // 上一次还没点完
+    ShowTrayMenu(i, app, true);
+}
+
+// 去系统托盘里右键它、弹出它自己的菜单。迷你任务栏留着，菜单关了再看要不要收起（WatchTrayMenu）
+void TrayAppMenu(int cell, const TrayApp& app) {
+    if (Tray_Busy()) return;
     HideThumb();
     s_trayMode = true;
     s_trayModeAt = GetTickCount();
     s_trayIdleAt = 0;
     s_trayRefocused = false;
-    s_trayHot = i;
+    s_trayHot = cell;
     SetTimer(s_hwnd, kTimerTrayMenu, kTrayWatchMs, nullptr);
     Redraw();
     Tray_Click(app, true, s_hwnd);
@@ -1421,9 +1428,9 @@ void WatchTrayMenu() {
     }
 }
 
-// 系统托盘里弹不出程序自己的菜单：在那一格上方弹迷你任务栏自己的菜单，迷你任务栏留着；选了一项再收起
-void ShowTrayMenu(const TrayApp& app) {
-    int cell = s_trayHot;
+// 在那一格上方弹迷你任务栏自己的菜单，迷你任务栏留着；选了一项再收起。
+// offerAppMenu = 加一项“程序自己的菜单”（系统托盘里刚弹不出来时就不加了）
+void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu) {
     EndTrayMode();
     if (cell < 0 || cell >= s_trayShown || s_tray[cell].exe != app.exe) {
         cell = -1;
@@ -1442,10 +1449,11 @@ void ShowTrayMenu(const TrayApp& app) {
     s_menuOpen = true;
     HideThumb();
     Redraw();
-    Tray_Menu(app, s_hwnd, at, [] { HideNow(); });
+    bool appMenu = Tray_Menu(app, s_hwnd, at, [] { HideNow(); }, offerAppMenu);
     s_menuOpen = false;
     s_trayHot = -1;
     Redraw();
+    if (appMenu && s_open) TrayAppMenu(cell, app);
 }
 
 bool IsStartUi(HWND h) { return h && GetClassNameStr(h) == L"Windows.UI.Core.CoreWindow"; }
@@ -1592,7 +1600,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_APP_TRAY_MENU: {
             std::unique_ptr<TrayApp> app(reinterpret_cast<TrayApp*>(lParam));
-            if (app && s_open && !s_preview) ShowTrayMenu(*app);
+            if (app && s_open && !s_preview) ShowTrayMenu(s_trayHot, *app, false);
             else if (app) Log(L"托盘：迷你任务栏已经收起，不再弹 %ls 的菜单", app->name.c_str());
             return 0;
         }

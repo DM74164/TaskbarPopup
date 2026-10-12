@@ -638,16 +638,17 @@ void EndApp(const TrayApp& app) {
     if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.exe, app.name}, 0, nullptr)) CloseHandle(h);
 }
 
-enum TrayCmd : UINT { kTrayOpen = 1, kTrayLocation, kTrayEnd };
+enum TrayCmd : UINT { kTrayOpen = 1, kTrayAppMenu, kTrayLocation, kTrayEnd };
 
 }  // namespace
 
-bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)()) {
+bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu) {
     std::wstring name = app.name.size() > 40 ? app.name.substr(0, 39) + L"…" : app.name;
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"打开");
+    if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, L"程序自己的菜单");
     if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
         AppendMenuW(menu, MF_STRING, kTrayLocation, L"打开文件所在的位置");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -658,6 +659,7 @@ bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)()) {
                               owner, nullptr);
     PostMessageW(owner, WM_NULL, 0, 0);
     DestroyMenu(menu);
+    if (cmd == kTrayAppMenu) return true;
     if (!cmd) return false;
     if (picked) picked();
     switch (cmd) {
@@ -665,7 +667,7 @@ bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)()) {
         case kTrayLocation: OpenFileLocation(app.exe); break;
         case kTrayEnd: EndApp(app); break;
     }
-    return true;
+    return false;
 }
 
 void Tray_Refresh() {
