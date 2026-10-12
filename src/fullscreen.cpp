@@ -57,8 +57,11 @@ constexpr DWORD kRetryMs = 400;
 constexpr DWORD kRequestWindowMs = 10000;
 constexpr int kMaxRequests = 3;       // kRequestWindowMs 里最多发这么多次，还要再发就算它拒绝
 constexpr DWORD kReshowMs = 3000;     // 刚藏起来又被资源管理器显示出来时，不再播动画，直接藏
+constexpr DWORD kPeekMs = 3000;       // 托盘图标那边临时显示任务栏以后，这么久之内不把它藏回去
 
 std::vector<Hidden> s_hidden;
+HWND s_peekTaskbar = nullptr;  // 托盘图标那边临时显示着的任务栏（Fullscreen_PeekTaskbar）
+DWORD s_peekAt = 0;
 std::vector<HWND> s_everHidden;  // 本次运行藏过的任务栏，退出时无论如何都发一次显示
 std::vector<Stretched> s_stretched;
 std::vector<Before> s_before;  // 不为空 = 打开过自动隐藏、跟着变大的窗口还没收拾完
@@ -767,6 +770,10 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
             }
             continue;
         }
+        if (h && tb == s_peekTaskbar && now - s_peekAt < kPeekMs) {
+            h->at = now;  // 托盘图标那边正要在里面点；之后再藏也不放动画
+            continue;
+        }
         bool animate = true;
         if (h) {
             // 刚藏过又冒出来：再滑一遍看上去就是任务栏在反复伸缩，所以直接藏
@@ -1195,6 +1202,20 @@ void Taskbar_EmergencyRestore() {
 }
 
 bool Fullscreen_TaskbarHidden() { return !s_hidden.empty(); }
+
+bool Fullscreen_PeekTaskbar(HWND tb, bool show) {
+    Hidden* h = tb ? FindHidden(tb) : nullptr;
+    if (!h || !IsWindow(tb)) return false;
+    if ((IsWindowVisible(tb) != FALSE) != show) {
+        Log(show ? L"托盘：临时显示任务栏 %p，好找到里面的按钮" : L"托盘：把临时显示的任务栏 %p 藏回去",
+            static_cast<void*>(tb));
+        ShowWindowAsync(tb, show ? SW_SHOWNA : SW_HIDE);
+    }
+    h->at = GetTickCount();  // 之后几秒内再看到它显示着也直接藏，不放动画
+    s_peekTaskbar = show ? tb : nullptr;
+    s_peekAt = h->at;
+    return true;
+}
 
 void Fullscreen_QuietStartMenu() {
     s_quietStartAt = GetTickCount();
