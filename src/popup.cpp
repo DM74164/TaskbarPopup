@@ -346,7 +346,7 @@ std::wstring TrayTitle(int i) {
     }
     std::wstring name = i >= 0 && i < s_trayShown ? s_tray[i].name : L"";
     if (TrayPages() <= 1) return name;
-    swprintf(text, 96, L"第 %d/%d 页，← → 翻页", s_trayPage + 1, TrayPages());
+    swprintf(text, 96, L"第 %d/%d 页", s_trayPage + 1, TrayPages());
     return name.empty() ? text : name + L"（" + text + L"）";
 }
 
