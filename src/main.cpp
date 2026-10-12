@@ -206,6 +206,14 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Update_OnResult();
             return 0;
 
+        case WM_APP_WINTAP:
+            Popup_StartMenu(static_cast<DWORD>(wParam));
+            return 0;
+
+        case WM_APP_TRAY_LAUNCH:
+            Tray_OnMessage(msg, lParam);
+            return 0;
+
         case WM_DISPLAYCHANGE:
             DesktopIcons_DisplayChanged();
             break;
@@ -343,6 +351,8 @@ void LoadSettings() {
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
     g_settings.showLevels = GetPrivateProfileIntW(L"General", L"ShowLevels", 1, f.c_str()) != 0;
+    g_settings.trayIcons = GetPrivateProfileIntW(L"General", L"TrayIcons", 1, f.c_str()) != 0;
+    g_settings.trayStyle = GetPrivateProfileIntW(L"General", L"TrayStyle", kTrayStacked, f.c_str()) == kTrayRow ? kTrayRow : kTrayStacked;
     int scale = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupScale", kDefaultPopupScale, f.c_str()));
     g_settings.popupScale = std::max(kMinPopupScale, std::min(scale, kMaxPopupScale));
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
@@ -383,6 +393,8 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"LongPressMs", std::to_wstring(g_settings.longPressMs).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowLevels", g_settings.showLevels ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"TrayIcons", g_settings.trayIcons ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"TrayStyle", std::to_wstring(g_settings.trayStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());

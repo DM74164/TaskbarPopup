@@ -695,10 +695,14 @@ Hidden* FindHidden(HWND taskbar) {
     return nullptr;
 }
 
+// 键盘钩子要知道任务栏藏没藏：藏着时短按 Win 先呼出迷你任务栏再开开始菜单
+void SyncHiddenFlag() { Hook_SetTaskbarHidden(!s_hidden.empty()); }
+
 bool RemoveHidden(HWND taskbar) {
     auto it = std::find_if(s_hidden.begin(), s_hidden.end(), [&](const Hidden& h) { return h.taskbar == taskbar; });
     if (it == s_hidden.end()) return false;
     s_hidden.erase(it);
+    SyncHiddenFlag();
     return true;
 }
 
@@ -734,6 +738,7 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
     // 资源管理器重启后旧句柄失效
     s_hidden.erase(std::remove_if(s_hidden.begin(), s_hidden.end(), [](const Hidden& h) { return !IsWindow(h.taskbar); }),
                    s_hidden.end());
+    SyncHiddenFlag();
     s_homes.erase(std::remove_if(s_homes.begin(), s_homes.end(), [](const TaskbarHome& h) { return !IsWindow(h.taskbar); }),
                   s_homes.end());
     HWND first = nullptr;  // 这块屏上的任务栏
@@ -770,6 +775,7 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
             h->at = now;
         } else {
             s_hidden.push_back({tb, now});
+            SyncHiddenFlag();
             Log(L"隐藏任务栏 %p", static_cast<void*>(tb));
         }
         if (std::find(s_everHidden.begin(), s_everHidden.end(), tb) == s_everHidden.end()) s_everHidden.push_back(tb);
@@ -799,6 +805,7 @@ void LeaveHiddenMode() {
         first = false;
     }
     s_hidden.clear();
+    SyncHiddenFlag();
     RequestAutoHideOff(nullptr);  // 已经要求过的不会重复
 }
 
@@ -1159,6 +1166,7 @@ void Taskbar_RestoreAll() {
     s_offFailedAt = 0;
     s_onFailures = 0;
     s_hidden.clear();
+    SyncHiddenFlag();
     s_everHidden.clear();
     UndoLegacyWorkAreas();
     if (wasOn) {
@@ -1185,6 +1193,8 @@ void Taskbar_EmergencyRestore() {
         if (!IsWindowVisible(h) || std::find(s_everHidden.begin(), s_everHidden.end(), h) != s_everHidden.end())
             ShowWindowAsync(h, SW_SHOWNA);
 }
+
+bool Fullscreen_TaskbarHidden() { return !s_hidden.empty(); }
 
 void Fullscreen_QuietStartMenu() {
     s_quietStartAt = GetTickCount();
