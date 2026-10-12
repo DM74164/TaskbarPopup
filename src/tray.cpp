@@ -6,7 +6,8 @@
 //     迷你任务栏弹出时直接用读好的（每 15 秒、每次收起后重新读一遍）
 //   - 点击：在后台线程上用 UI 自动化在系统托盘里找到对应的按钮。左键先直接“调用”它（和在托盘里按回车一样，
 //     不用把系统任务栏、隐藏的图标弹出来）；不行或者是右键，就展开“隐藏的图标”，在它上面模拟一次真的鼠标单击，
-//     这样程序自己的窗口和右键菜单照常弹出来。都找不到时左键改成再启动一次这个程序（多数托盘程序会把开着的窗口调出来）
+//     这样程序自己的窗口和右键菜单照常弹出来。都找不到时左键改成再启动一次这个程序（多数托盘程序会把开着的窗口调出来），
+//     右键改成弹出迷你任务栏自己的菜单（打开、打开文件所在的位置、结束程序）
 #include "common.h"
 
 #include <tlhelp32.h>
@@ -345,6 +346,17 @@ void LaunchInstead(const TrayApp& app) {
     PostMessageW(g_mainWnd, WM_APP_TRAY_LAUNCH, 0, reinterpret_cast<LPARAM>(new std::wstring(app.exe)));
 }
 
+void MenuInstead(const TrayApp& app) {
+    Log(L"托盘：弹不出 %ls 自己的菜单，改用迷你任务栏的菜单", app.name.c_str());
+    PostMessageW(g_mainWnd, WM_APP_TRAY_MENU, 0, reinterpret_cast<LPARAM>(new TrayApp(app)));
+}
+
+// 点不中时：左键再启动一次，右键弹迷你任务栏自己的菜单
+void Instead(const TrayApp& app, bool right) {
+    if (right) MenuInstead(app);
+    else LaunchInstead(app);
+}
+
 void Names(const wchar_t* where, const std::vector<Button>& buttons) {
     if (!g_settings.debugLog) return;
     std::wstring list;
@@ -360,7 +372,7 @@ void RunJob(const Job& job) {
     if (FAILED(CoCreateInstance(kClsidUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIidUIAutomation,
                                 reinterpret_cast<void**>(&uia.p))) || !uia.p) {
         Log(L"托盘：用不了 UI 自动化");
-        if (!job.overflowOnly && !job.right) LaunchInstead(job.app);
+        if (!job.overflowOnly) Instead(job.app, job.right);
         return;
     }
     HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
@@ -396,7 +408,7 @@ void RunJob(const Job& job) {
             if (IsChevron(b)) chevron = &b;
         if (!chevron || !Press(*chevron)) {
             Log(L"托盘：没能展开隐藏的图标（%ls）", chevron ? L"按钮按不动" : L"找不到按钮");
-            if (!job.overflowOnly && !job.right) LaunchInstead(job.app);
+            if (!job.overflowOnly) Instead(job.app, job.right);
             return;
         }
         for (int i = 0; i < 20; ++i) {  // 最多等 1 秒
@@ -406,7 +418,7 @@ void RunJob(const Job& job) {
         }
         if (!overflow || !IsWindowVisible(overflow)) {
             Log(L"托盘：按了展开隐藏的图标，但没有展开");
-            if (!job.overflowOnly && !job.right) LaunchInstead(job.app);
+            if (!job.overflowOnly) Instead(job.app, job.right);
             return;
         }
         Sleep(200);  // 等展开动画放完，按钮到位
@@ -419,8 +431,8 @@ void RunJob(const Job& job) {
         ClickAt(b->rect, job.right);
         return;
     }
-    if (!job.right) LaunchInstead(job.app);
-    else Log(L"托盘：隐藏的图标里找不到 %ls", job.app.name.c_str());
+    Log(L"托盘：隐藏的图标里找不到 %ls", job.app.name.c_str());
+    Instead(job.app, job.right);
 }
 
 DWORD WINAPI ClickThread(LPVOID param) {
@@ -446,7 +458,102 @@ void StartJob(Job* job) {
     }
 }
 
+// ---- 迷你任务栏自己的菜单 ----
+
+std::vector<DWORD> ProcessesOf(const std::wstring& exe) {
+    std::vector<DWORD> pids;
+    std::wstring want = Lower(exe);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return pids;
+    PROCESSENTRY32W pe = {sizeof(pe)};
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+        if (!h) continue;
+        wchar_t path[MAX_PATH];
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(h, 0, path, &size) && Lower(path) == want) pids.push_back(pe.th32ProcessID);
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+    return pids;
+}
+
+struct EndJob {
+    std::wstring exe, name;
+};
+
+// 结束程序：先给它的窗口发关闭（藏着的也发，多数托盘程序收到会自己退出），3 秒后还在的强行结束
+DWORD WINAPI EndThread(LPVOID param) {
+    std::unique_ptr<EndJob> job(static_cast<EndJob*>(param));
+    std::vector<DWORD> pids = ProcessesOf(job->exe);
+    std::vector<HANDLE> handles;
+    for (DWORD pid : pids)
+        if (HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid)) handles.push_back(h);
+    if (handles.size() < pids.size()) Log(L"托盘：%ls 有 %d 个进程没有权限结束（管理员权限的程序）", job->name.c_str(),
+                                          static_cast<int>(pids.size() - handles.size()));
+    struct Ctx {
+        const std::vector<DWORD>* pids;
+    } ctx = {&pids};
+    EnumWindows(
+        [](HWND h, LPARAM lp) -> BOOL {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(h, &pid);
+            const auto* list = reinterpret_cast<Ctx*>(lp)->pids;
+            if (std::find(list->begin(), list->end(), pid) != list->end()) PostMessageW(h, WM_CLOSE, 0, 0);
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+    int killed = 0;
+    if (!handles.empty() &&
+        WaitForMultipleObjects(static_cast<DWORD>(std::min<size_t>(handles.size(), MAXIMUM_WAIT_OBJECTS)), handles.data(),
+                               TRUE, 3000) == WAIT_TIMEOUT)
+        for (HANDLE h : handles)
+            if (WaitForSingleObject(h, 0) == WAIT_TIMEOUT && TerminateProcess(h, 1)) ++killed;
+    for (HANDLE h : handles) CloseHandle(h);
+    Log(L"托盘：结束 %ls（%d 个进程，强行结束了 %d 个）", job->name.c_str(), static_cast<int>(pids.size()), killed);
+    if (pids.empty() || handles.size() < pids.size()) MessageBeep(MB_ICONWARNING);
+    return 0;
+}
+
+void EndApp(const TrayApp& app) {
+    wchar_t text[512];
+    swprintf(text, 512, L"结束“%ls”？\n它没保存的内容会丢失。", app.name.c_str());
+    if (MessageBoxW(nullptr, text, L"TaskbarPopup", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST |
+                                                         MB_SETFOREGROUND) != IDOK)
+        return;
+    if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.exe, app.name}, 0, nullptr)) CloseHandle(h);
+}
+
+enum TrayCmd : UINT { kTrayAppMenu = 1, kTrayOpen, kTrayLocation, kTrayEnd };
+
 }  // namespace
+
+void Tray_Menu(const TrayApp& app, bool offerAppMenu) {
+    std::wstring name = app.name.size() > 40 ? app.name.substr(0, 39) + L"…" : app.name;
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (offerAppMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, L"程序自己的菜单");
+    AppendMenuW(menu, MF_STRING, kTrayOpen, L"打开");
+    if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
+        AppendMenuW(menu, MF_STRING, kTrayLocation, L"打开文件所在的位置");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kTrayEnd, L"结束程序");
+    SetMenuDefaultItem(menu, offerAppMenu ? kTrayAppMenu : kTrayOpen, FALSE);
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(g_mainWnd);  // 不然点别处菜单不会消失
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, pt.x, pt.y, 0,
+                              g_mainWnd, nullptr);
+    PostMessageW(g_mainWnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    switch (cmd) {
+        case kTrayAppMenu: Tray_Click(app, true); break;
+        case kTrayOpen: Tray_Click(app, false); break;
+        case kTrayLocation: OpenFileLocation(app.exe); break;
+        case kTrayEnd: EndApp(app); break;
+    }
+}
 
 void Tray_Refresh() {
     if (s_loading.exchange(true)) return;
@@ -467,6 +574,11 @@ void Tray_Click(const TrayApp& app, bool right) { StartJob(new Job{app, right, f
 void Tray_ShowHidden() { StartJob(new Job{TrayApp{}, false, true}); }
 
 bool Tray_OnMessage(UINT msg, LPARAM lParam) {
+    if (msg == WM_APP_TRAY_MENU) {
+        std::unique_ptr<TrayApp> app(reinterpret_cast<TrayApp*>(lParam));
+        if (app) Tray_Menu(*app, false);
+        return true;
+    }
     if (msg != WM_APP_TRAY_LAUNCH) return false;
     std::unique_ptr<std::wstring> exe(reinterpret_cast<std::wstring*>(lParam));
     if (exe && !exe->empty()) LaunchAsUser(*exe);
