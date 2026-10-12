@@ -6,7 +6,8 @@
 //     迷你任务栏弹出时直接用读好的（每 15 秒、每次收起后重新读一遍）
 //   - 点击：在后台线程上用 UI 自动化在系统托盘里找到对应的按钮。左键先直接“调用”它（和在托盘里按回车一样，
 //     不用把系统任务栏、隐藏的图标弹出来）；不行或者是右键，就展开“隐藏的图标”，在它上面模拟一次真的鼠标单击，
-//     这样程序自己的窗口和右键菜单照常弹出来。任务栏被本程序藏着时 UI 自动化看不到里面的按钮：先从它的子窗口找，
+//     这样程序自己的窗口和右键菜单照常弹出来（右键先试像按菜单键那样让它弹菜单，鼠标不挪过去，
+//     按鼠标位置弹菜单的程序菜单就出在迷你任务栏的图标上方；没弹出来再真点）。任务栏被本程序藏着时 UI 自动化看不到里面的按钮：先从它的子窗口找，
 //     还找不到就临时把它显示出来（自动隐藏开着，只在屏幕底边露一条线），点完、菜单关了再藏回去。
 //     都找不到时左键改成再启动一次这个程序（多数托盘程序会把开着的窗口调出来），
 //     右键改成弹出迷你任务栏自己的菜单（打开、打开文件所在的位置、结束程序）
@@ -30,6 +31,7 @@ const IID kIidUIAutomation = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc
 const IID kIidInvokePattern = {0xfb377fbe, 0x8ea6, 0x46d5, {0x9c, 0x73, 0x64, 0x99, 0x64, 0x2d, 0x30, 0x59}};
 const IID kIidTogglePattern = {0x94cf8058, 0x9b8d, 0x4ab9, {0x8b, 0xfd, 0x4c, 0xd0, 0xa3, 0x3c, 0x8c, 0x70}};
 const IID kIidExpandCollapsePattern = {0x619be086, 0x1f4e, 0x4ee4, {0xba, 0xfa, 0x21, 0x01, 0x28, 0x73, 0x87, 0x30}};
+const IID kIidElement3 = {0x8471df34, 0xaee0, 0x4a01, {0xa7, 0xde, 0x7d, 0xb9, 0xaf, 0x12, 0xc2, 0x96}};
 
 template <class T>
 struct Ref {
@@ -350,6 +352,15 @@ bool Press(const Button& b) {
     return false;
 }
 
+// 像按键盘上的菜单键那样让按钮弹出右键菜单，鼠标不用挪过去。系统不支持时返回 false
+bool ShowMenuOf(const Button& b) {
+    IUIAutomationElement3* e3 = nullptr;
+    if (!b.element || FAILED(b.element->QueryInterface(kIidElement3, reinterpret_cast<void**>(&e3))) || !e3) return false;
+    HRESULT hr = e3->ShowContextMenu();
+    e3->Release();
+    return SUCCEEDED(hr);
+}
+
 // 在 rect 中间模拟一次鼠标单击，再把鼠标挪回原处
 void ClickAt(const RECT& rect, bool right) {
     POINT saved;
@@ -383,6 +394,19 @@ bool MenuShowing() {
     for (HWND h = FindWindowExW(nullptr, nullptr, L"#32768", nullptr); h; h = FindWindowExW(nullptr, h, L"#32768", nullptr))
         if (IsWindowVisible(h)) return true;
     return false;
+}
+
+// 前台窗口属于这个程序（它弹菜单时会把前台给自己的窗口，自己画菜单的程序也一样）
+bool ForegroundIsApp(const std::wstring& exe) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    HANDLE h = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+    if (!h) return false;
+    wchar_t path[MAX_PATH];
+    DWORD size = MAX_PATH;
+    bool same = QueryFullProcessImageNameW(h, 0, path, &size) && Lower(path) == Lower(exe);
+    CloseHandle(h);
+    return same;
 }
 
 struct Job {
@@ -496,6 +520,16 @@ bool RunJob(const Job& job) {
     Names(L"展开后隐藏的图标", inOverflow);
     if (const Button* b = BestMatch(inOverflow, job.app, true)) {
         RECT r = b->rect;
+        if (job.right && ShowMenuOf(*b)) {
+            for (int i = 0; i < 12; ++i) {  // 最多等 0.6 秒
+                Sleep(50);
+                if (MenuShowing() || ForegroundIsApp(job.app.exe)) {
+                    Log(L"托盘：像按菜单键那样弹出了 %ls 的菜单", b->name.c_str());
+                    return true;
+                }
+            }
+            Log(L"托盘：像按菜单键那样没弹出 %ls 的菜单，改成真的右键点一下", b->name.c_str());
+        }
         Log(L"托盘：%ls隐藏图标里的 %ls（%ld,%ld - %ld,%ld）", job.right ? L"右键" : L"点", b->name.c_str(), r.left,
             r.top, r.right, r.bottom);
         ClickAt(r, job.right);
