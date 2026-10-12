@@ -109,6 +109,7 @@ constexpr UINT WM_APP_AUTOHIDE_ON = WM_APP + 4;   // 动画线程通知：开自
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // 检查更新的线程通知：结果出来了，交给 Update_OnResult
 constexpr UINT WM_APP_TRAY_LAUNCH = WM_APP + 7;   // 点托盘图标的线程通知：找不到图标，再启动一次程序，交给 Tray_OnMessage
 constexpr UINT WM_APP_WINTAP = WM_APP + 8;        // 钩子线程通知：任务栏藏着时短按了 Win（wParam 是键码），交给 Popup_StartMenu
+constexpr UINT WM_APP_TRAY_MENU = WM_APP + 9;     // 点托盘图标的线程通知：程序自己的菜单弹不出来，交给 Tray_OnMessage
 
 // ---------------- 最大化 / 全屏时隐藏任务栏 ----------------
 void Fullscreen_SetEnabled(bool enabled);
@@ -267,7 +268,9 @@ void Tray_Refresh();                    // 在后台重新读一遍（已经在�
 std::vector<TrayApp> Tray_Hidden();     // 最近读到的、正在运行、收在“隐藏的图标”里的
 void Tray_Click(const TrayApp& app, bool right);  // 在后台线程上去系统托盘里点它
 void Tray_ShowHidden();                 // 展开系统的“隐藏的图标”
-bool Tray_OnMessage(UINT msg, LPARAM lParam);  // 主窗口收到 WM_APP_TRAY_LAUNCH 时交给它
+// 迷你任务栏自己的菜单（在鼠标处）：打开、打开文件所在的位置、结束程序；offerAppMenu 时第一项是“程序自己的菜单”
+void Tray_Menu(const TrayApp& app, bool offerAppMenu);
+bool Tray_OnMessage(UINT msg, LPARAM lParam);  // 主窗口收到 WM_APP_TRAY_LAUNCH、WM_APP_TRAY_MENU 时交给它
 
 // ---------------- 迷你任务栏 ----------------
 void Popup_Init();

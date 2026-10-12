@@ -211,6 +211,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_APP_TRAY_LAUNCH:
+        case WM_APP_TRAY_MENU:
             Tray_OnMessage(msg, lParam);
             return 0;
 

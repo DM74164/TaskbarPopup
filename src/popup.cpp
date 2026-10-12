@@ -28,6 +28,8 @@ constexpr UINT_PTR kTimerRefocus = 4;  // 刚弹出就失去了前台：稍等�
 constexpr UINT kRefocusDelayMs = 100;
 constexpr double kRefocusMs = 500;     // 弹出后多久之内失去前台算“刚弹出”
 constexpr double kShowMs = 320.0 * TP_ANIM_SCALE;
+constexpr double kStartShowMs = 180.0 * TP_ANIM_SCALE;  // 任务栏藏着时短按 Win：弹得快一点，
+constexpr double kStartAt = 0.7;                        // 到位（这时已经冲过头一点）就打开开始菜单
 constexpr double kHideMs = 170.0 * TP_ANIM_SCALE;
 constexpr double kPillMs = 160.0 * TP_ANIM_SCALE;
 constexpr UINT_PTR kTimerPreview = 5;  // 预览：松开滑块后过一会儿收起
@@ -37,7 +39,7 @@ constexpr UINT kTrayRefreshMs = 15000;
 constexpr UINT_PTR kTimerStart = 7;    // 开始菜单开着时：看它关了没有
 constexpr UINT kStartWatchMs = 100;
 constexpr DWORD kStartWaitMs = 2000;   // 补发 Win 以后等开始菜单出来的时间
-constexpr int kMaxTrayStacked = 16;    // 托盘图标最多放几格，再多最后一格换成“显示隐藏的图标”
+constexpr int kMaxTrayStacked = 16;    // 托盘图标最多放几格，再多最后一格换成“显示隐藏的图标”。堆叠时四个一组
 constexpr int kMaxTrayRow = 8;
 
 enum class Anim { None, Showing, Hiding };
@@ -74,7 +76,7 @@ struct Tile {
 struct Layout {
     float margin, pad, tile, gap, titleH, sep, clockW, emptyW, radius, rowGap, sliderH, minPanelW;
     float panelW, panelH, itemsX, itemsW, tilesX, clockX, tileY, sliderY;
-    float trayX, trayW, cellW, cellH;  // 托盘：堆叠时两行小格子，横排时一行和窗口格子一样高
+    float trayX, trayW, cellW, cellH;  // 托盘：堆叠时 2×2 一组的小格子，横排时一行和窗口格子一样高
     float bottomGap;                   // 面板底边离屏幕底边（或者露着的任务栏）多远
 };
 
@@ -204,8 +206,9 @@ void ComputeLayout() {
         L.cellH = L.tile;
         L.trayW = cells * L.cellW;
     } else {
-        L.cellW = L.cellH = Px(24);
-        L.trayW = (cells + 1) / 2 * L.cellW;
+        L.cellW = L.cellH = L.tile / 2;  // 一组和窗口格子一样大，组之间和窗口格子一样隔开
+        int groups = (cells + 3) / 4;
+        L.trayW = groups > 0 ? groups * L.tile + (groups - 1) * L.gap : 0;
     }
     float traySep = cells > 0 ? L.sep : 0;
 
@@ -292,12 +295,18 @@ int ControlAt(int x, int y) {
 
 int TrayCells() { return s_trayShown + (static_cast<int>(s_tray.size()) > s_trayShown ? 1 : 0); }
 
-// 第 i 格。堆叠时一列两个，从左往右排
+// 堆叠时第 g 组（2×2，和窗口格子一样大）
+RectF TrayGroupRect(int g) {
+    return RectF(s_L.trayX + g * (s_L.tile + s_L.gap), s_L.tileY, s_L.tile, s_L.tile);
+}
+
+// 第 i 格。堆叠时每组先上后下、从左往右
 RectF TrayCellRect(int i) {
     const Layout& L = s_L;
     if (s_trayStyle == kTrayRow) return RectF(L.trayX + i * L.cellW, L.tileY, L.cellW, L.cellH);
-    float top = L.tileY + (L.tile - 2 * L.cellH) / 2;
-    return RectF(L.trayX + (i / 2) * L.cellW, top + (i % 2) * L.cellH, L.cellW, L.cellH);
+    RectF g = TrayGroupRect(i / 4);
+    int k = i % 4;
+    return RectF(g.X + (k % 2) * L.cellW, g.Y + (k / 2) * L.cellH, L.cellW, L.cellH);
 }
 
 int TrayAt(int x, int y) {
@@ -565,6 +574,12 @@ void DrawTray(Graphics& g) {
     if (cells == 0) return;
     const Palette& pal = Colors();
     bool row = s_trayStyle == kTrayRow;
+    if (!row)  // 每组垫一块淡淡的底，看得出是一组
+        for (int group = 0; group < (cells + 3) / 4; ++group) {
+            RectF r = TrayGroupRect(group);
+            r.Inflate(-0.5f, -0.5f);
+            FillRound(g, r, Px(12), pal.pillBottom);
+        }
     if (s_hoverTray >= 0 && s_hoverTray < cells) {
         RectF r = TrayCellRect(s_hoverTray);
         r.Inflate(-Px(1), -Px(1));
@@ -846,15 +861,12 @@ void Frame() {
     BYTE alpha = 255;
     bool more = false, start = false;
     if (s_anim == Anim::Showing) {
-        double t = std::min(1.0, (now - s_animStart) / kShowMs);
+        double t = std::min(1.0, (now - s_animStart) / (s_compact ? kStartShowMs : kShowMs));
         slide = static_cast<float>((1 - EaseOutBack(t)) * SlideDistance());
         alpha = static_cast<BYTE>(std::lround(255 * std::min(1.0, t * 3)));
-        if (t >= 1) {
-            s_anim = Anim::None;
-            start = s_startPending;  // 第二段：画完这一帧打开开始菜单
-        } else {
-            more = true;
-        }
+        start = s_startPending && t >= kStartAt;  // 第二段：画完这一帧打开开始菜单
+        if (t >= 1) s_anim = Anim::None;
+        else more = true;
     } else if (s_anim == Anim::Hiding) {
         double t = std::min(1.0, (now - s_animStart) / kHideMs);
         if (t >= 1) {
