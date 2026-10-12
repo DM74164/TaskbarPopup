@@ -225,10 +225,30 @@ long CountDiff(const DWORD* a, const DWORD* b, int w) {
 }
 
 std::unique_ptr<Dib> s_maskShot;  // 照片里只留要盖的地方（其余全透明），盖着的就是它
+std::unique_ptr<Dib> s_bare;      // 诊断日志开着时留着：图标藏起来以后拍的那张（只有壁纸）
 
 void ReleaseMask() {
     s_mask.clear();
     s_maskShot.reset();
+    s_bare.reset();
+}
+
+// 诊断用：照片没盖的地方（只露真桌面），现在拍到的和只有壁纸的那张有百分之几不一样（隔三个点比一个）。
+// 图标窗口显示出来还没画好时，如果在别处露出了东西（旧画面、黑块），这里会变大
+long BareDiffPct(const DWORD* now, int w) {
+    if (!s_bare || s_bare->w != w) return -1;
+    LONG ox = s_shotArea.left - s_shotWindow.left, oy = s_shotArea.top - s_shotWindow.top;
+    LONG aw = s_shotArea.right - s_shotArea.left, ah = s_shotArea.bottom - s_shotArea.top;
+    bool masked = s_mask.size() == static_cast<size_t>(aw) * ah;
+    long n = 0, bad = 0;
+    for (LONG y = 0; y < ah; y += 4)
+        for (LONG x = 0; x < aw; x += 4) {
+            if (masked && s_mask[static_cast<size_t>(y) * aw + x]) continue;
+            size_t i = static_cast<size_t>(y + oy) * w + x + ox;
+            ++n;
+            if (!Near(now[i], s_bare->bits[i])) ++bad;
+        }
+    return n ? (bad * 100 + n - 1) / n : 0;
 }
 
 LRESULT CALLBACK CoverProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -368,7 +388,11 @@ void CoverAndHide() {
         return;
     }
     if (!IsWindow(s_savedList) || !WillHide(s_savedList)) return;
-    if (ShowCover()) WaitForVBlank();
+    if (ShowCover()) {  // 刚建的分层窗口要一两帧才真正上屏（DWM 先要拿到它的画面），多等两帧，免得先看到图标没了
+        WaitForVBlank();
+        WaitForVBlank();
+        WaitForVBlank();
+    }
     HideIcons();
     if (!s_hiddenList) HideCover();
 }
@@ -417,7 +441,8 @@ void MaskCover() {
     LONG ox = s_shotArea.left - s_shotWindow.left, oy = s_shotArea.top - s_shotWindow.top;
     double start = NowMs();
     WaitForVBlank();  // 图标窗口藏起来要等一帧才从画面上消失
-    Dib bare;
+    auto bareShot = std::make_unique<Dib>();
+    Dib& bare = *bareShot;
     if (!bare.Create(w, h) || !PrintWindow(s_desktopRoot, bare.dc, PW_RENDERFULLCONTENT)) return;
     GdiFlush();
 
@@ -487,6 +512,7 @@ void MaskCover() {
     if (!UpdateLayeredWindow(s_cover, nullptr, &dst, &size, masked->dc, &src, 0, &blend, ULW_ALPHA)) return;
     s_mask = std::move(diff);
     s_maskShot = std::move(masked);
+    if (g_settings.debugLog) s_bare = std::move(bareShot);
     Log(L"照片改成只盖图标（%.1f%% 的地方%ls），用了 %.0f 毫秒", 100.0 * covered / (static_cast<double>(aw) * ah),
         cells ? L"" : L"，没读到图标格子", NowMs() - start);
 }
@@ -514,18 +540,22 @@ long WaitLikeShot(HWND list, DWORD ms, std::wstring& trace) {
     long tiny = (s_shotArea.right - s_shotArea.left) * (s_shotArea.bottom - s_shotArea.top) / 4 / 2000;
     long total = std::max(1L, CountSamples());
     Dib now;
-    long diff = -1, last = -1, shownPct = -1;
+    long diff = -1, last = -1, shownPct = -1, shownOutside = -2;
     bool nudged = false;
     for (double start = NowMs();;) {
         if (!now.Create(w, h) || !PrintWindow(s_desktopRoot, now.dc, PW_RENDERFULLCONTENT)) return diff;
         GdiFlush();
         diff = CountDiff(now.bits, s_shotBits, w);
-        long pct = (diff * 100 + total - 1) / total;
-        if (pct != shownPct) {  // 一样的不重复记
-            wchar_t step[24];
-            swprintf(step, 24, trace.empty() ? L"%ld%%" : L"→%ld%%", pct);
+        long pct = (diff * 100 + total - 1) / total, outside = BareDiffPct(now.bits, w);
+        if (pct != shownPct || outside != shownOutside) {  // 一样的不重复记
+            wchar_t step[48];
+            if (outside >= 0)
+                swprintf(step, 48, trace.empty() ? L"%ld%%（别处 %ld%%）" : L"→%ld%%（别处 %ld%%）", pct, outside);
+            else
+                swprintf(step, 48, trace.empty() ? L"%ld%%" : L"→%ld%%", pct);
             trace += step;
             shownPct = pct;
+            shownOutside = outside;
         }
         if (diff <= tiny) return diff;
         bool stuck = last >= 0 && diff >= last - total / 200;  // 和上一张比没怎么变好
