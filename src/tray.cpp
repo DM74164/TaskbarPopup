@@ -6,7 +6,9 @@
 //     迷你任务栏弹出时直接用读好的（每 15 秒、每次收起后重新读一遍）
 //   - 点击：在后台线程上用 UI 自动化在系统托盘里找到对应的按钮。左键先直接“调用”它（和在托盘里按回车一样，
 //     不用把系统任务栏、隐藏的图标弹出来）；不行或者是右键，就展开“隐藏的图标”，在它上面模拟一次真的鼠标单击，
-//     这样程序自己的窗口和右键菜单照常弹出来。都找不到时左键改成再启动一次这个程序（多数托盘程序会把开着的窗口调出来），
+//     这样程序自己的窗口和右键菜单照常弹出来。任务栏被本程序藏着时 UI 自动化看不到里面的按钮：先从它的子窗口找，
+//     还找不到就临时把它显示出来（自动隐藏开着，只在屏幕底边露一条线），点完、菜单关了再藏回去。
+//     都找不到时左键改成再启动一次这个程序（多数托盘程序会把开着的窗口调出来），
 //     右键改成弹出迷你任务栏自己的菜单（打开、打开文件所在的位置、结束程序）
 #include "common.h"
 
@@ -256,6 +258,36 @@ std::vector<Button> ButtonsIn(IUIAutomation* uia, HWND hwnd) {
     return out;
 }
 
+// 任务栏里所有按钮。任务栏被藏起来时从它往下一个都找不到（UI 自动化不进看不见的窗口），
+// 就从它的每个子窗口分别找（Win11 任务栏的内容在 XAML 的子窗口里）
+std::vector<Button> TaskbarButtons(IUIAutomation* uia, HWND tray) {
+    std::vector<Button> out = ButtonsIn(uia, tray);
+    if (!out.empty() || !tray) return out;
+    std::vector<HWND> children;
+    EnumChildWindows(
+        tray,
+        [](HWND h, LPARAM lp) -> BOOL {
+            reinterpret_cast<std::vector<HWND>*>(lp)->push_back(h);
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&children));
+    std::set<std::wstring> seen;  // 子窗口套着子窗口时同一个按钮会找到两次
+    std::wstring found;
+    for (HWND child : children) {
+        std::vector<Button> buttons = ButtonsIn(uia, child);
+        found += GetClassNameStr(child) + L" " + std::to_wstring(buttons.size()) + L" 个；";
+        for (Button& b : buttons) {
+            wchar_t key[96];
+            swprintf(key, 96, L"%ld,%ld,%ld,%ld|", b.rect.left, b.rect.top, b.rect.right, b.rect.bottom);
+            if (seen.insert(key + b.cls + L"|" + b.name).second) out.push_back(std::move(b));
+        }
+    }
+    if (g_settings.debugLog)
+        Log(L"托盘：任务栏%ls，从它的 %d 个子窗口里找：%ls", IsWindowVisible(tray) ? L"显示着" : L"藏着",
+            static_cast<int>(children.size()), found.c_str());
+    return out;
+}
+
 bool OnScreen(const RECT& r) {
     if (r.right - r.left < 4 || r.bottom - r.top < 4) return false;
     POINT c = {(r.left + r.right) / 2, (r.top + r.bottom) / 2};
@@ -266,6 +298,13 @@ bool IsChevron(const Button& b) {
     std::wstring all = Lower(b.cls + L" " + b.id + L" " + b.name);
     return all.find(L"chevron") != std::wstring::npos || all.find(L"隐藏的图标") != std::wstring::npos ||
            all.find(L"hidden icons") != std::wstring::npos;
+}
+
+const Button* FindChevron(const std::vector<Button>& buttons) {
+    const Button* chevron = nullptr;
+    for (const Button& b : buttons)
+        if (IsChevron(b)) chevron = &b;
+    return chevron;
 }
 
 const Button* BestMatch(const std::vector<Button>& buttons, const TrayApp& app, bool needOnScreen) {
@@ -334,10 +373,23 @@ void ClickAt(const RECT& rect, bool right) {
 
 HWND OverflowWindow() { return FindWindowW(L"TopLevelWindowForOverflowXamlIsland", nullptr); }
 
+bool OverflowShowing() {
+    HWND overflow = OverflowWindow();
+    return overflow && IsWindowVisible(overflow);
+}
+
+// 有弹出菜单开着（系统画的菜单）
+bool MenuShowing() {
+    for (HWND h = FindWindowExW(nullptr, nullptr, L"#32768", nullptr); h; h = FindWindowExW(nullptr, h, L"#32768", nullptr))
+        if (IsWindowVisible(h)) return true;
+    return false;
+}
+
 struct Job {
     TrayApp app;
     bool right = false;
     bool overflowOnly = false;  // 只展开“隐藏的图标”
+    HWND notify = nullptr;      // 右键弹不出程序自己的菜单时通知谁
 };
 std::atomic<bool> s_clicking{false};
 
@@ -346,15 +398,17 @@ void LaunchInstead(const TrayApp& app) {
     PostMessageW(g_mainWnd, WM_APP_TRAY_LAUNCH, 0, reinterpret_cast<LPARAM>(new std::wstring(app.exe)));
 }
 
-void MenuInstead(const TrayApp& app) {
-    Log(L"托盘：弹不出 %ls 自己的菜单，改用迷你任务栏的菜单", app.name.c_str());
-    PostMessageW(g_mainWnd, WM_APP_TRAY_MENU, 0, reinterpret_cast<LPARAM>(new TrayApp(app)));
+void MenuInstead(const Job& job) {
+    Log(L"托盘：弹不出 %ls 自己的菜单，改用迷你任务栏的菜单", job.app.name.c_str());
+    HWND to = job.notify && IsWindow(job.notify) ? job.notify : g_mainWnd;
+    auto* app = new TrayApp(job.app);
+    if (!PostMessageW(to, WM_APP_TRAY_MENU, 0, reinterpret_cast<LPARAM>(app))) delete app;
 }
 
 // 点不中时：左键再启动一次，右键弹迷你任务栏自己的菜单
-void Instead(const TrayApp& app, bool right) {
-    if (right) MenuInstead(app);
-    else LaunchInstead(app);
+void Instead(const Job& job) {
+    if (job.right) MenuInstead(job);
+    else LaunchInstead(job.app);
 }
 
 void Names(const wchar_t* where, const std::vector<Button>& buttons) {
@@ -367,16 +421,17 @@ void Names(const wchar_t* where, const std::vector<Button>& buttons) {
     Log(L"托盘：%ls里的按钮 %d 个：%ls", where, static_cast<int>(buttons.size()), list.c_str());
 }
 
-void RunJob(const Job& job) {
+// 返回 true = 在系统托盘里点了（或者展开了隐藏的图标），false = 改成了别的办法
+bool RunJob(const Job& job) {
     Ref<IUIAutomation> uia;
     if (FAILED(CoCreateInstance(kClsidUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIidUIAutomation,
                                 reinterpret_cast<void**>(&uia.p))) || !uia.p) {
         Log(L"托盘：用不了 UI 自动化");
-        if (!job.overflowOnly) Instead(job.app, job.right);
-        return;
+        if (!job.overflowOnly) Instead(job);
+        return false;
     }
     HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
-    std::vector<Button> onTaskbar = ButtonsIn(uia.p, tray);
+    std::vector<Button> onTaskbar = TaskbarButtons(uia.p, tray);
     std::vector<Button> inOverflow = ButtonsIn(uia.p, OverflowWindow());
     Names(L"任务栏", onTaskbar);
     Names(L"隐藏的图标", inOverflow);
@@ -388,7 +443,7 @@ void RunJob(const Job& job) {
             if (!b) b = BestMatch(onTaskbar, job.app, false);
             if (b && Press(*b)) {
                 Log(L"托盘：调用了 %ls 的托盘图标", b->name.c_str());
-                return;
+                return true;
             }
         }
         // 任务栏露着、图标就在上面：直接点
@@ -396,20 +451,33 @@ void RunJob(const Job& job) {
             if (const Button* b = BestMatch(onTaskbar, job.app, true)) {
                 Log(L"托盘：点任务栏上的 %ls", b->name.c_str());
                 ClickAt(b->rect, job.right);
-                return;
+                return true;
             }
     }
 
     // 展开“隐藏的图标”，在里面点
     HWND overflow = OverflowWindow();
     if (!overflow || !IsWindowVisible(overflow)) {
-        const Button* chevron = nullptr;
-        for (const Button& b : onTaskbar)
-            if (IsChevron(b)) chevron = &b;
+        const Button* chevron = FindChevron(onTaskbar);
+        DWORD_PTR ours = 0;
+        if (!chevron && tray && !IsWindowVisible(tray) &&
+            SendMessageTimeoutW(g_mainWnd, WM_APP_TRAY_PEEK, 1, reinterpret_cast<LPARAM>(tray), SMTO_ABORTIFHUNG, 1000,
+                                &ours) &&
+            ours) {
+            // 任务栏是本程序藏的：临时显示出来再找（点完、菜单关了以后 ClickThread 让主线程藏回去）
+            for (int i = 0; i < 20 && !IsWindowVisible(tray); ++i) Sleep(50);
+            for (int i = 0; i < 5 && !chevron; ++i) {  // 显示出来以后 XAML 可能还要一会儿才把按钮报出来
+                Sleep(100);
+                onTaskbar = TaskbarButtons(uia.p, tray);
+                chevron = FindChevron(onTaskbar);
+            }
+            Log(L"托盘：临时显示任务栏以后%ls“显示隐藏的图标”按钮", chevron ? L"找到了" : L"还是找不到");
+            Names(L"临时显示的任务栏", onTaskbar);
+        }
         if (!chevron || !Press(*chevron)) {
             Log(L"托盘：没能展开隐藏的图标（%ls）", chevron ? L"按钮按不动" : L"找不到按钮");
-            if (!job.overflowOnly) Instead(job.app, job.right);
-            return;
+            if (!job.overflowOnly) Instead(job);
+            return false;
         }
         for (int i = 0; i < 20; ++i) {  // 最多等 1 秒
             Sleep(50);
@@ -418,29 +486,41 @@ void RunJob(const Job& job) {
         }
         if (!overflow || !IsWindowVisible(overflow)) {
             Log(L"托盘：按了展开隐藏的图标，但没有展开");
-            if (!job.overflowOnly) Instead(job.app, job.right);
-            return;
+            if (!job.overflowOnly) Instead(job);
+            return false;
         }
         Sleep(200);  // 等展开动画放完，按钮到位
     }
-    if (job.overflowOnly) return;
+    if (job.overflowOnly) return true;
     inOverflow = ButtonsIn(uia.p, overflow);
     Names(L"展开后隐藏的图标", inOverflow);
     if (const Button* b = BestMatch(inOverflow, job.app, true)) {
-        Log(L"托盘：%ls隐藏图标里的 %ls", job.right ? L"右键" : L"点", b->name.c_str());
-        ClickAt(b->rect, job.right);
-        return;
+        RECT r = b->rect;
+        Log(L"托盘：%ls隐藏图标里的 %ls（%ld,%ld - %ld,%ld）", job.right ? L"右键" : L"点", b->name.c_str(), r.left,
+            r.top, r.right, r.bottom);
+        ClickAt(r, job.right);
+        return true;
     }
     Log(L"托盘：隐藏的图标里找不到 %ls", job.app.name.c_str());
-    Instead(job.app, job.right);
+    Instead(job);
+    return false;
 }
 
 DWORD WINAPI ClickThread(LPVOID param) {
     std::unique_ptr<Job> job(static_cast<Job*>(param));
+    HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    bool trayHidden = tray && !IsWindowVisible(tray);
     HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    RunJob(*job);
+    bool clicked = RunJob(*job);
     if (SUCCEEDED(co)) CoUninitialize();
     s_clicking = false;
+    // 任务栏本来藏着：为了点隐藏的图标临时显示了，或者资源管理器展开隐藏的图标时自己把它显示了出来。
+    // 点了的话等隐藏的图标和程序的菜单都关了，没点成就马上，让主线程藏回去（不是本程序藏的、已经不用藏了的主线程不管）
+    if (trayHidden) {
+        for (int i = 0; clicked && i < 600 && (OverflowShowing() || MenuShowing()); ++i) Sleep(100);  // 最多等 1 分钟
+        if (!s_clicking && IsWindowVisible(tray))
+            PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
+    }
     return 0;
 }
 
@@ -524,35 +604,34 @@ void EndApp(const TrayApp& app) {
     if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.exe, app.name}, 0, nullptr)) CloseHandle(h);
 }
 
-enum TrayCmd : UINT { kTrayAppMenu = 1, kTrayOpen, kTrayLocation, kTrayEnd };
+enum TrayCmd : UINT { kTrayOpen = 1, kTrayLocation, kTrayEnd };
 
 }  // namespace
 
-void Tray_Menu(const TrayApp& app, bool offerAppMenu) {
+bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)()) {
     std::wstring name = app.name.size() > 40 ? app.name.substr(0, 39) + L"…" : app.name;
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    if (offerAppMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, L"程序自己的菜单");
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"打开");
     if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
         AppendMenuW(menu, MF_STRING, kTrayLocation, L"打开文件所在的位置");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayEnd, L"结束程序");
-    SetMenuDefaultItem(menu, offerAppMenu ? kTrayAppMenu : kTrayOpen, FALSE);
-    POINT pt;
-    GetCursorPos(&pt);
-    SetForegroundWindow(g_mainWnd);  // 不然点别处菜单不会消失
-    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, pt.x, pt.y, 0,
-                              g_mainWnd, nullptr);
-    PostMessageW(g_mainWnd, WM_NULL, 0, 0);
+    SetMenuDefaultItem(menu, kTrayOpen, FALSE);
+    if (!SetForegroundWindow(owner)) ForceForeground(owner);  // 不然点别处菜单不会消失
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, at.x, at.y, 0,
+                              owner, nullptr);
+    PostMessageW(owner, WM_NULL, 0, 0);
     DestroyMenu(menu);
+    if (!cmd) return false;
+    if (picked) picked();
     switch (cmd) {
-        case kTrayAppMenu: Tray_Click(app, true); break;
         case kTrayOpen: Tray_Click(app, false); break;
         case kTrayLocation: OpenFileLocation(app.exe); break;
         case kTrayEnd: EndApp(app); break;
     }
+    return true;
 }
 
 void Tray_Refresh() {
@@ -569,14 +648,18 @@ std::vector<TrayApp> Tray_Hidden() {
     return hidden;
 }
 
-void Tray_Click(const TrayApp& app, bool right) { StartJob(new Job{app, right, false}); }
+void Tray_Click(const TrayApp& app, bool right, HWND notify) { StartJob(new Job{app, right, false, notify}); }
 
-void Tray_ShowHidden() { StartJob(new Job{TrayApp{}, false, true}); }
+void Tray_ShowHidden() { StartJob(new Job{TrayApp{}, false, true, nullptr}); }
+
+bool Tray_Busy() { return s_clicking; }
 
 bool Tray_OnMessage(UINT msg, LPARAM lParam) {
     if (msg == WM_APP_TRAY_MENU) {
         std::unique_ptr<TrayApp> app(reinterpret_cast<TrayApp*>(lParam));
-        if (app) Tray_Menu(*app, false);
+        POINT pt;
+        GetCursorPos(&pt);
+        if (app) Tray_Menu(*app, g_mainWnd, pt, nullptr);
         return true;
     }
     if (msg != WM_APP_TRAY_LAUNCH) return false;

@@ -215,6 +215,9 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Tray_OnMessage(msg, lParam);
             return 0;
 
+        case WM_APP_TRAY_PEEK:
+            return Fullscreen_PeekTaskbar(reinterpret_cast<HWND>(lParam), wParam != 0) ? 1 : 0;
+
         case WM_DISPLAYCHANGE:
             DesktopIcons_DisplayChanged();
             break;

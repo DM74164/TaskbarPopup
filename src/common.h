@@ -109,7 +109,9 @@ constexpr UINT WM_APP_AUTOHIDE_ON = WM_APP + 4;   // 动画线程通知：开自
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // 检查更新的线程通知：结果出来了，交给 Update_OnResult
 constexpr UINT WM_APP_TRAY_LAUNCH = WM_APP + 7;   // 点托盘图标的线程通知：找不到图标，再启动一次程序，交给 Tray_OnMessage
 constexpr UINT WM_APP_WINTAP = WM_APP + 8;        // 钩子线程通知：任务栏藏着时短按了 Win（wParam 是键码），交给 Popup_StartMenu
-constexpr UINT WM_APP_TRAY_MENU = WM_APP + 9;     // 点托盘图标的线程通知：程序自己的菜单弹不出来，交给 Tray_OnMessage
+constexpr UINT WM_APP_TRAY_MENU = WM_APP + 9;     // 点托盘图标的线程通知：程序自己的菜单弹不出来（发给 Tray_Click 的 notify）
+constexpr UINT WM_APP_TRAY_PEEK = WM_APP + 10;    // 点托盘图标的线程要求：wParam 非 0 = 临时显示藏着的任务栏 lParam，0 = 藏回去。
+                                                  // 交给 Fullscreen_PeekTaskbar，返回 1 = 是本程序藏的
 
 // ---------------- 最大化 / 全屏时隐藏任务栏 ----------------
 void Fullscreen_SetEnabled(bool enabled);
@@ -119,6 +121,9 @@ void Fullscreen_OnAutoHideOn(UINT seq, bool done);   // 收到 WM_APP_AUTOHIDE_O
 void Fullscreen_OnTaskbarCreated();                  // 资源管理器（重新）启动了
 void Fullscreen_QuietStartMenu();                    // 接下来打开的开始菜单是迷你任务栏点的：不把藏着的任务栏放出来
 bool Fullscreen_TaskbarHidden();                     // 本程序现在藏着任务栏（有窗口最大化或全屏）
+// 托盘图标那边要去“隐藏的图标”里点：show 时临时显示本程序藏着的任务栏 tb（UI 自动化看不到藏着的窗口里的按钮），
+// 否则把它藏回去。都不放动画。tb 不是本程序藏着的返回 false
+bool Fullscreen_PeekTaskbar(HWND tb, bool show);
 void Taskbar_RestoreAll();        // 启动、退出时：显示所有任务栏，关掉本程序打开的自动隐藏，窗口和桌面图标还原
 void Taskbar_EmergencyRestore();  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
 bool Taskbar_IsShownOn(HMONITOR monitor);  // 这块屏幕上的任务栏现在是否显示着（没被本程序藏起来）
@@ -266,10 +271,14 @@ struct TrayApp {
 };
 void Tray_Refresh();                    // 在后台重新读一遍（已经在读就不管）
 std::vector<TrayApp> Tray_Hidden();     // 最近读到的、正在运行、收在“隐藏的图标”里的
-void Tray_Click(const TrayApp& app, bool right);  // 在后台线程上去系统托盘里点它
+// 在后台线程上去系统托盘里点它。右键弹不出程序自己的菜单时给 notify（为空则是主窗口）发 WM_APP_TRAY_MENU，
+// lParam 是 new 出来的 TrayApp，收到的一方负责 delete
+void Tray_Click(const TrayApp& app, bool right, HWND notify = nullptr);
 void Tray_ShowHidden();                 // 展开系统的“隐藏的图标”
-// 迷你任务栏自己的菜单（在鼠标处）：打开、打开文件所在的位置、结束程序；offerAppMenu 时第一项是“程序自己的菜单”
-void Tray_Menu(const TrayApp& app, bool offerAppMenu);
+bool Tray_Busy();                       // 还在系统托盘里找、点
+// 迷你任务栏自己的菜单：打开、打开文件所在的位置、结束程序。由 owner 弹出，底边对着屏幕坐标 at。
+// 选了一项时先调用 picked（可以为空，比如收起迷你任务栏）再去做；返回选没选
+bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)());
 bool Tray_OnMessage(UINT msg, LPARAM lParam);  // 主窗口收到 WM_APP_TRAY_LAUNCH、WM_APP_TRAY_MENU 时交给它
 
 // ---------------- 迷你任务栏 ----------------
