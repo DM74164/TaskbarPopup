@@ -4,6 +4,8 @@
 // 右键弹出和系统任务栏差不多的菜单（开始按钮上是 Win+X 菜单），方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
 // 鼠标停在窗口图标上时在上方显示它的实时缩略图。
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音（可以在设置里关掉）。
+// 时钟左边是系统托盘“隐藏的图标”里的程序（可以在设置里关掉、选两行小图标还是一行大图标），左键右键和在托盘里点一样。
+// 任务栏藏着时短按 Win：迷你任务栏只留一行格子贴着屏幕底边弹上来，弹完再打开开始菜单，开始菜单关了一起收起。
 #include "common.h"
 
 #include <climits>
@@ -30,6 +32,13 @@ constexpr double kHideMs = 170.0 * TP_ANIM_SCALE;
 constexpr double kPillMs = 160.0 * TP_ANIM_SCALE;
 constexpr UINT_PTR kTimerPreview = 5;  // 预览：松开滑块后过一会儿收起
 constexpr UINT kPreviewHideMs = 1200;
+constexpr UINT_PTR kTimerTray = 6;     // 每隔一会儿在后台重新读一遍托盘图标，弹出时直接用
+constexpr UINT kTrayRefreshMs = 15000;
+constexpr UINT_PTR kTimerStart = 7;    // 开始菜单开着时：看它关了没有
+constexpr UINT kStartWatchMs = 100;
+constexpr DWORD kStartWaitMs = 2000;   // 补发 Win 以后等开始菜单出来的时间
+constexpr int kMaxTrayStacked = 16;    // 托盘图标最多放几格，再多最后一格换成“显示隐藏的图标”
+constexpr int kMaxTrayRow = 8;
 
 enum class Anim { None, Showing, Hiding };
 
@@ -65,6 +74,8 @@ struct Tile {
 struct Layout {
     float margin, pad, tile, gap, titleH, sep, clockW, emptyW, radius, rowGap, sliderH, minPanelW;
     float panelW, panelH, itemsX, itemsW, tilesX, clockX, tileY, sliderY;
+    float trayX, trayW, cellW, cellH;  // 托盘：堆叠时两行小格子，横排时一行和窗口格子一样高
+    float bottomGap;                   // 面板底边离屏幕底边（或者露着的任务栏）多远
 };
 
 // 调节条：0 是音量，1 是亮度
@@ -128,6 +139,20 @@ int s_hoverControl = kNone;
 int s_drag = kNone;  // 正在拖的槽
 int s_wheelRest = 0;  // 触控板、高精度滚轮一次只给零点几格，攒够一格再动
 
+// 托盘里隐藏的图标（弹出时按设置定下来）
+std::vector<TrayApp> s_tray;
+int s_trayShown = 0;           // 放了几个图标；比 s_tray 少时后面还有一格“显示隐藏的图标”
+int s_trayStyle = kTrayStacked;
+int s_hoverTray = -1;          // 鼠标下的托盘格子
+
+// 任务栏藏着时短按 Win：迷你任务栏弹完再打开开始菜单，开始菜单开着时它一直在
+bool s_compact = false;       // 这次弹出只有一行格子、贴着屏幕底边，给开始菜单让地方
+bool s_startPending = false;  // 弹出动画放完就打开开始菜单
+bool s_startMode = false;     // 开始菜单打开了（或者正在打开），迷你任务栏跟着它收起
+bool s_startSeen = false;     // 开始菜单到过前台
+DWORD s_startAt = 0;          // 补发 Win 的时间
+double s_startClosedAt = -1e9;  // 开始菜单开着时点到迷你任务栏上（开始菜单自己关了）的时间
+
 // 玻璃和画布
 Glass s_glass;
 std::vector<DWORD> s_base;  // 静止时的阴影 + 玻璃，悬停、时钟等重绘直接复用
@@ -155,10 +180,10 @@ const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 void ComputeLayout() {
     Layout& L = s_L;
     L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕底边的距离
-    L.pad = Px(8);
+    L.pad = s_compact ? Px(4) : Px(8);
     L.tile = Px(48);
     L.gap = Px(4);
-    L.titleH = Px(24);
+    L.titleH = s_compact ? 0 : Px(24);
     L.sep = Px(9);
     L.clockW = Px(72);
     L.emptyW = Px(130);
@@ -166,15 +191,32 @@ void ComputeLayout() {
     L.rowGap = s_levels ? Px(2) : 0;
     L.sliderH = s_levels ? Px(34) : 0;
     L.minPanelW = s_levels ? Px(380) : Px(260);  // 两根调节条要有地方拖；没有调节条时标题也要放得下
+    // 开始菜单模式：面板差不多贴着屏幕底边，和系统任务栏一样高，开始菜单才不会盖住它
+    L.bottomGap = s_compact ? Px(4) : L.margin;
 
-    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + L.clockW;
+    // 托盘图标放不下的收进最后一格“显示隐藏的图标”
+    int trayCount = static_cast<int>(s_tray.size());
+    int maxTray = s_trayStyle == kTrayRow ? kMaxTrayRow : kMaxTrayStacked;
+    s_trayShown = trayCount > maxTray ? maxTray - 1 : trayCount;
+    int cells = s_trayShown + (trayCount > s_trayShown ? 1 : 0);
+    if (s_trayStyle == kTrayRow) {
+        L.cellW = Px(40);
+        L.cellH = L.tile;
+        L.trayW = cells * L.cellW;
+    } else {
+        L.cellW = L.cellH = Px(24);
+        L.trayW = (cells + 1) / 2 * L.cellW;
+    }
+    float traySep = cells > 0 ? L.sep : 0;
+
+    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockW;
     float avail = (s_bounds.right - s_bounds.left) * 0.85f - fixed;
     int maxFit = std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap)));
     int n = static_cast<int>(s_items.size());
     s_visible = std::min(n, maxFit);
 
     // 格子少的时候面板按最小宽度来，格子在中间那段里居中
-    float others = 2 * L.pad + L.tile + 2 * L.sep + L.clockW;
+    float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockW;
     if (s_lockedItemsW > 0) {
         int fit = std::max(1, static_cast<int>((s_lockedItemsW + L.gap) / (L.tile + L.gap)));
         s_visible = std::min(n, fit);
@@ -185,7 +227,8 @@ void ComputeLayout() {
     L.panelH = 2 * L.pad + L.titleH + L.tile + L.rowGap + L.sliderH;
     L.itemsX = L.margin + L.pad + L.tile + L.sep;
     L.tilesX = L.itemsX + (L.itemsW - tilesW) / 2;
-    L.clockX = L.itemsX + L.itemsW + L.sep;
+    L.trayX = L.itemsX + L.itemsW + L.sep;
+    L.clockX = L.trayX + L.trayW + traySep;
     L.tileY = L.margin + L.pad + L.titleH;
     L.sliderY = L.tileY + L.tile + L.rowGap;
 
@@ -199,7 +242,7 @@ void ComputeLayout() {
     s_sliders[1] = make(mid + Px(8), right);
 
     s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin));
-    s_height = static_cast<int>(std::ceil(L.panelH + 2 * L.margin));
+    s_height = static_cast<int>(std::ceil(L.panelH + L.margin + L.bottomGap));
 }
 
 // 面板水平居中、贴着底边（屏幕底边，或者露着的任务栏的上沿）
@@ -208,7 +251,7 @@ void UpdatePlacement() {
     s_baseValid = false;
 }
 
-float SlideDistance() { return s_L.panelH + s_L.margin + Px(8); }
+float SlideDistance() { return s_L.panelH + s_L.bottomGap + Px(8); }
 
 int ItemCount() { return static_cast<int>(s_items.size()); }
 
@@ -243,6 +286,33 @@ int ControlAt(int x, int y) {
         if (track.Contains(fx, fy)) return i == 0 ? kVolumeTrack : kBrightTrack;
     }
     return kNone;
+}
+
+// ---- 托盘图标 ----
+
+int TrayCells() { return s_trayShown + (static_cast<int>(s_tray.size()) > s_trayShown ? 1 : 0); }
+
+// 第 i 格。堆叠时一列两个，从左往右排
+RectF TrayCellRect(int i) {
+    const Layout& L = s_L;
+    if (s_trayStyle == kTrayRow) return RectF(L.trayX + i * L.cellW, L.tileY, L.cellW, L.cellH);
+    float top = L.tileY + (L.tile - 2 * L.cellH) / 2;
+    return RectF(L.trayX + (i / 2) * L.cellW, top + (i % 2) * L.cellH, L.cellW, L.cellH);
+}
+
+int TrayAt(int x, int y) {
+    REAL fx = static_cast<REAL>(x), fy = static_cast<REAL>(y);
+    for (int i = 0; i < TrayCells(); ++i)
+        if (TrayCellRect(i).Contains(fx, fy)) return i;
+    return -1;
+}
+
+std::wstring TrayTitle(int i) {
+    if (i >= 0 && i < s_trayShown) return s_tray[i].name;
+    if (i != s_trayShown) return L"";
+    wchar_t text[64];
+    swprintf(text, 64, L"显示隐藏的图标（还有 %d 个）", static_cast<int>(s_tray.size()) - s_trayShown);
+    return text;
 }
 
 void EnsureVisible(int index) {
@@ -489,6 +559,34 @@ void DrawSlider(Graphics& g, int which) {
     g.FillEllipse(&dot, x - core, sl.cy - core, 2 * core, 2 * core);
 }
 
+// 托盘图标；放不下时最后一格画个向上的尖角（展开系统的“隐藏的图标”）
+void DrawTray(Graphics& g) {
+    int cells = TrayCells();
+    if (cells == 0) return;
+    const Palette& pal = Colors();
+    bool row = s_trayStyle == kTrayRow;
+    if (s_hoverTray >= 0 && s_hoverTray < cells) {
+        RectF r = TrayCellRect(s_hoverTray);
+        r.Inflate(-Px(1), -Px(1));
+        FillRound(g, r, row ? Px(10) : Px(6), pal.pillTop);
+    }
+    float icon = row ? Px(24) : Px(16);
+    for (int i = 0; i < s_trayShown; ++i) {
+        RectF r = TrayCellRect(i);
+        RectF iconRect(r.X + (r.Width - icon) / 2, r.Y + (r.Height - icon) / 2, icon, icon);
+        if (s_tray[i].icon) g.DrawImage(s_tray[i].icon.get(), iconRect);
+        else FillRound(g, iconRect, Px(3), pal.separator);
+    }
+    if (cells > s_trayShown) {
+        RectF c = TrayCellRect(s_trayShown);
+        float cx = c.X + c.Width / 2, cy = c.Y + c.Height / 2, w = row ? Px(5) : Px(4);
+        Pen pen(pal.text, Px(1.5f));
+        RoundCaps(pen);
+        PointF chevron[3] = {PointF(cx - w, cy + w / 2), PointF(cx, cy - w / 2), PointF(cx + w, cy + w / 2)};
+        g.DrawLines(&pen, chevron, 3);
+    }
+}
+
 void DrawContent(Graphics& g) {
     const Layout& L = s_L;
     const Palette& pal = Colors();
@@ -507,6 +605,7 @@ void DrawContent(Graphics& g) {
     int shown = s_hover >= 0 ? s_hover : s_sel;
     if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
+    else if (s_hoverTray >= 0) title = TrayTitle(s_hoverTray);
     else if (shown == 0) title = L"开始";
     else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
     StringFormat oneLine(StringFormatFlagsNoWrap);
@@ -514,7 +613,9 @@ void DrawContent(Graphics& g) {
     oneLine.SetLineAlignment(StringAlignmentCenter);
     oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
     RectF titleRect(L.margin + L.pad + Px(10), L.margin + L.pad, L.panelW - 2 * L.pad - Px(20), L.titleH);
-    if (!s_filter.empty()) {
+    if (L.titleH <= 0) {
+        // 开始菜单模式没有标题这一行
+    } else if (!s_filter.empty()) {
         // 打字筛选：左边一个搜索框显示打的字，右边是选中项的名字
         StringFormat left(StringFormatFlagsNoWrap);
         left.SetLineAlignment(StringAlignmentCenter);
@@ -560,7 +661,9 @@ void DrawContent(Graphics& g) {
     Pen sepPen(pal.separator, 1.0f);
     float y1 = L.tileY + Px(10), y2 = L.tileY + L.tile - Px(10);
     g.DrawLine(&sepPen, L.itemsX - L.sep / 2, y1, L.itemsX - L.sep / 2, y2);
+    if (L.trayW > 0) g.DrawLine(&sepPen, L.trayX - L.sep / 2, y1, L.trayX - L.sep / 2, y2);
     g.DrawLine(&sepPen, L.clockX - L.sep / 2, y1, L.clockX - L.sep / 2, y2);
+    DrawTray(g);
 
     if (s_items.empty())
         DrawLabel(g, s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用", titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
@@ -624,7 +727,7 @@ void HideThumb() {
 
 // 鼠标所指的格子（用键盘选时是选中的格子）是打开的窗口时显示它的缩略图；弹出、收起动画期间和右键菜单开着时不显示
 int ThumbIndex() {
-    if (!s_open || s_anim != Anim::None || s_drag != kNone || s_menuOpen) return -1;
+    if (!s_open || s_anim != Anim::None || s_drag != kNone || s_menuOpen || s_startMode) return -1;  // 开始菜单会盖住缩略图
     int idx = s_hover >= 0 ? s_hover : s_keyNav ? s_sel : -1;
     if (idx <= 0 || idx > ItemCount() || !IsTileVisible(idx) || !IsWindow(s_items[idx - 1].hwnd)) return -1;
     return idx;
@@ -715,11 +818,18 @@ bool MouseButtonDown() {
     return false;
 }
 
+void EndStartMode() {
+    s_startPending = s_startMode = false;
+    KillTimer(s_hwnd, kTimerStart);
+}
+
 void HideNow() {
     HideThumb();
+    EndStartMode();
     s_open = false;
     s_preview = false;
     KillTimer(s_hwnd, kTimerPreview);
+    if (g_settings.trayIcons) Tray_Refresh();  // 下次弹出时用新的
     s_anim = Anim::None;
     s_drag = kNone;
     if (GetCapture() == s_hwnd) ReleaseCapture();
@@ -727,18 +837,24 @@ void HideNow() {
     ShowWindow(s_hwnd, SW_HIDE);
 }
 
+void BeginStart();
+
 // 动画的一帧：按时间算出位置画出来，还没播完就等下一次屏幕刷新再画下一帧
 void Frame() {
     double now = NowMs();
     float slide = 0;
     BYTE alpha = 255;
-    bool more = false;
+    bool more = false, start = false;
     if (s_anim == Anim::Showing) {
         double t = std::min(1.0, (now - s_animStart) / kShowMs);
         slide = static_cast<float>((1 - EaseOutBack(t)) * SlideDistance());
         alpha = static_cast<BYTE>(std::lround(255 * std::min(1.0, t * 3)));
-        if (t >= 1) s_anim = Anim::None;
-        else more = true;
+        if (t >= 1) {
+            s_anim = Anim::None;
+            start = s_startPending;  // 第二段：画完这一帧打开开始菜单
+        } else {
+            more = true;
+        }
     } else if (s_anim == Anim::Hiding) {
         double t = std::min(1.0, (now - s_animStart) / kHideMs);
         if (t >= 1) {
@@ -757,6 +873,7 @@ void Frame() {
     s_lastSlide = slide;
     s_lastAlpha = alpha;
     Render(slide, alpha);
+    if (start) BeginStart();
     if (more) {
         WaitForVBlank();
         RequestFrame();
@@ -775,6 +892,7 @@ void MoveSelection(int delta) {
     s_sel = ((s_sel + delta) % count + count) % count;
     s_hover = -1;
     s_hoverControl = kNone;  // 鼠标停在调节条上时，标题也要换成选中的窗口
+    s_hoverTray = -1;
     s_keyNav = true;
     EnsureVisible(s_sel);
     Redraw();
@@ -815,6 +933,7 @@ void ApplyFilter() {
     s_first = 0;
     s_hover = -1;
     s_hoverControl = kNone;
+    s_hoverTray = -1;
     s_pillIndex = -1;
     s_sel = f.empty() ? DefaultSelection() : (s_items.empty() ? -1 : 1);  // 没有匹配的就什么都不选
     s_keyNav = !f.empty();
@@ -830,7 +949,10 @@ void Launch(const std::wstring& target) {
 
 void ActivateIndex(int idx, bool newInstance = false) {
     if (idx == 0) {
+        // 开始菜单开着时点的开始按钮：和系统的一样是关掉它（它已经因为点到这里关了），不再打开
+        bool closing = NowMs() - s_startClosedAt < 500;
         HideNow();
+        if (closing) return;
         Fullscreen_QuietStartMenu();
         SendStartMenu();
         return;
@@ -906,6 +1028,7 @@ void CloseItem(int idx) {
     s_first = std::max(0, std::min(s_first, ItemCount() - s_visible));
     s_sel = std::min(s_sel, ItemCount());
     s_hover = -1;
+    s_hoverTray = -1;  // 托盘格子跟着挪了
     s_pillIndex = -1;
     s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
     Redraw();
@@ -1096,6 +1219,71 @@ void ShowSelectedMenu() {
     ShowItemMenu(s_sel, POINT{static_cast<LONG>(r.X + r.Width / 2), static_cast<LONG>(r.Y)});
 }
 
+// 点托盘格子：先收起迷你任务栏，再去系统托盘里点它（右键弹出它自己的菜单）
+void ActivateTray(int i, bool right) {
+    if (i < 0 || i >= TrayCells()) return;
+    if (i < s_trayShown) {
+        TrayApp app = s_tray[i];
+        HideNow();
+        Tray_Click(app, right);
+    } else if (!right) {
+        HideNow();
+        Tray_ShowHidden();
+    }
+}
+
+bool IsStartUi(HWND h) { return h && GetClassNameStr(h) == L"Windows.UI.Core.CoreWindow"; }
+
+// 弹出动画放完：打开开始菜单。藏着的系统任务栏不放出来，迷你任务栏留着，开始菜单关了再收起
+void BeginStart() {
+    s_startPending = false;
+    if (!s_open) return;
+    s_startMode = true;
+    s_startSeen = false;
+    s_startAt = GetTickCount();
+    Fullscreen_QuietStartMenu();
+    SendStartMenu();
+    SetTimer(s_hwnd, kTimerStart, kStartWatchMs, nullptr);
+}
+
+void NoteStartSeen(HWND start) {
+    if (s_startSeen) return;
+    s_startSeen = true;
+    RECT r = {};
+    GetWindowRect(start, &r);
+    Log(L"开始菜单出来了（%ld,%ld - %ld,%ld），迷你任务栏面板顶边在 %d", r.left, r.top, r.right, r.bottom,
+        s_pos.y + static_cast<int>(s_L.margin));
+}
+
+// 开始菜单关了（按 Win、Esc，点了别处，或者从里面打开了程序）：迷你任务栏一起收起。
+// 前台退回到迷你任务栏上的话（开始菜单是在它前台时打开的），交还给原来的窗口
+void StartClosed(HWND fg) {
+    Log(L"开始菜单关了（前台换成 %ls），收起迷你任务栏", fg == s_hwnd ? L"迷你任务栏" : GetClassNameStr(fg).c_str());
+    EndStartMode();
+    Popup_Hide();
+    if (fg == s_hwnd && s_prevForeground && IsWindow(s_prevForeground)) ForceForeground(s_prevForeground);
+}
+
+// 开始菜单开着时每隔一会儿看一眼前台
+void WatchStart() {
+    if (!s_open || !s_startMode) {
+        EndStartMode();
+        return;
+    }
+    HWND fg = GetForegroundWindow();
+    bool waited = GetTickCount() - s_startAt > kStartWaitMs;
+    if (IsStartUi(fg)) {
+        NoteStartSeen(fg);
+    } else if (s_startSeen) {
+        StartClosed(fg);
+    } else if (waited) {
+        // 开始菜单一直没出来：迷你任务栏还在前台就接着当平常的用，前台已经换成别的窗口就收起
+        Log(L"补发 Win 以后开始菜单没出来");
+        if (fg == s_hwnd) EndStartMode();
+        else StartClosed(fg);
+    }
+}
+
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_NCHITTEST:
@@ -1107,6 +1295,24 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_ACTIVATE:
+            if (s_open && s_startMode) {
+                // 开始菜单拿走了前台：看着它，它关了再收起
+                if (LOWORD(wParam) == WA_INACTIVE) {
+                    HWND to = reinterpret_cast<HWND>(lParam);
+                    if (IsStartUi(to)) NoteStartSeen(to);
+                    return 0;
+                }
+                if (!s_startSeen) return 0;
+                if (LOWORD(wParam) == WA_CLICKACTIVE || MouseButtonDown()) {
+                    // 开始菜单开着时点了迷你任务栏：开始菜单自己关了，接着当平常的迷你任务栏用
+                    s_startClosedAt = NowMs();
+                    EndStartMode();
+                    SetFocus(hwnd);
+                } else {
+                    StartClosed(hwnd);  // 开始菜单关了，前台退回到迷你任务栏上
+                }
+                return 0;
+            }
             if (LOWORD(wParam) == WA_INACTIVE && s_open) {
                 HWND to = reinterpret_cast<HWND>(lParam);
                 if (!to) to = GetForegroundWindow();
@@ -1149,6 +1355,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else if (wParam == kTimerThumb) {
                 if (s_thumbWant) ShowThumbNow();
                 else HideThumb();
+            } else if (wParam == kTimerStart) {
+                WatchStart();
+            } else if (wParam == kTimerTray) {
+                if (g_settings.trayIcons && !s_open) Tray_Refresh();
             }
             return 0;
 
@@ -1182,9 +1392,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_keyNav = false;
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
-            if (hit != s_hover || control != s_hoverControl) {
+            int tray = hit < 0 && control == kNone ? TrayAt(x, y) : -1;
+            if (hit != s_hover || control != s_hoverControl || tray != s_hoverTray) {
                 s_hover = hit;
                 s_hoverControl = control;
+                s_hoverTray = tray;
                 if (hit >= 0) s_sel = hit;
                 Redraw();
             }
@@ -1197,6 +1409,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_hover = -1;
             s_hoverControl = kNone;
+            s_hoverTray = -1;
             Redraw();
             return 0;
 
@@ -1227,6 +1440,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             int hit = HitTest(x, y);
             if (hit >= 0) ActivateIndex(hit, (wParam & MK_SHIFT) != 0);
+            else ActivateTray(TrayAt(x, y), false);
             return 0;
         }
 
@@ -1243,7 +1457,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_RBUTTONUP: {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            ShowItemMenu(HitTest(pt.x, pt.y), pt);
+            int hit = HitTest(pt.x, pt.y);
+            if (hit >= 0) ShowItemMenu(hit, pt);
+            else ActivateTray(TrayAt(pt.x, pt.y), true);
             return 0;  // 不交给 DefWindowProc，免得它再发一次 WM_CONTEXTMENU
         }
 
@@ -1316,6 +1532,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CHAR: {
+            if (s_compact) return 0;  // 开始菜单模式没有显示打的字的地方
             wchar_t ch = static_cast<wchar_t>(wParam);
             if (ch == L'\b') {
                 if (s_filter.empty()) return 0;
@@ -1395,6 +1612,10 @@ void Popup_Init() {
     }
     if (!s_fontFamily) s_fontFamily.reset(FontFamily::GenericSansSerif()->Clone());
 
+    // 托盘图标在后台读，之后每隔一会儿再读一遍
+    if (g_settings.trayIcons) Tray_Refresh();
+    if (s_hwnd) SetTimer(s_hwnd, kTimerTray, kTrayRefreshMs, nullptr);
+
     // 提前读一遍固定的应用和图标，第一次弹出时就不卡
     if (g_settings.showPinnedApps) {
         POINT origin = {0, 0};
@@ -1407,6 +1628,7 @@ void Popup_Destroy() {
     Thumb_Destroy();
     s_items.clear();
     s_allItems.clear();
+    s_tray.clear();
     Pinned_ClearCache();
     s_fontFamily.reset();
     ReleaseCanvas();
@@ -1416,11 +1638,15 @@ void Popup_Destroy() {
 
 namespace {
 
-// 弹出。preview：设置窗口里调大小时的预览，不抢前台
-void Open(bool preview) {
+// 弹出。preview：设置窗口里调大小时的预览，不抢前台。
+// startMenu：任务栏藏着时短按了 Win，只留一行格子贴着底边弹出来，弹完打开开始菜单
+void Open(bool preview, bool startMenu = false) {
     if (!s_hwnd) return;
     s_preview = preview;
     KillTimer(s_hwnd, kTimerPreview);
+    EndStartMode();
+    s_compact = startMenu;
+    s_startPending = startMenu;
     HWND fg = GetForegroundWindow();
     if (fg != s_hwnd) s_prevForeground = fg;
 
@@ -1434,7 +1660,7 @@ void Open(bool preview) {
     s_scale = PopupScale(mon);
 
     // 音量马上就能读到；亮度在后台读，读到之前先显示上次的值
-    s_levels = g_settings.showLevels;
+    s_levels = g_settings.showLevels && !s_compact;
     s_monitor = mon;
     s_brightness = -2;
     for (const auto& known : s_knownBrightness)
@@ -1447,6 +1673,12 @@ void Open(bool preview) {
     s_hoverControl = kNone;
     s_drag = kNone;
     s_wheelRest = 0;
+
+    // 托盘图标用后台读好的（面板宽度弹出时就定了，弹出期间读到的新结果留到下次）
+    s_tray = g_settings.trayIcons ? Tray_Hidden() : std::vector<TrayApp>();
+    s_trayStyle = g_settings.trayStyle;
+    s_hoverTray = -1;
+    if (g_settings.trayIcons && !preview) Tray_Refresh();
 
     s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, static_cast<int>(std::lround(Px(32)))));
     s_items = s_allItems;
@@ -1529,6 +1761,7 @@ void Popup_EndPreview() {
 
 void Popup_Hide() {
     if (!s_open) return;
+    EndStartMode();
     s_open = false;
     bool atRest = s_anim == Anim::None;
     s_hideFromSlide = atRest ? 0 : s_lastSlide;
@@ -1542,6 +1775,24 @@ void Popup_Hide() {
 void Popup_Toggle() {
     if (s_open) Popup_Hide();
     else Popup_Show();
+}
+
+void Popup_StartMenu(DWORD vk) {
+    POINT pt;
+    GetCursorPos(&pt);
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    // 任务栏已经放出来了、这块屏的任务栏露着，或者开始菜单已经开着（这一下是关掉它）：照常交给系统
+    if (!s_hwnd || !Fullscreen_TaskbarHidden() || Taskbar_IsShownOn(mon) || IsStartUi(GetForegroundWindow()) ||
+        s_startMode) {
+        SendWinTap(vk);
+        return;
+    }
+    if (s_open && !s_preview) {
+        ActivateIndex(0);  // 迷你任务栏已经开着：和点它上面的开始按钮一样
+        return;
+    }
+    Log(L"任务栏藏着时短按 Win：先弹出迷你任务栏，再打开开始菜单");
+    Open(false, true);
 }
 
 }  // namespace app

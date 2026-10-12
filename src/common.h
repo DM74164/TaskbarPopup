@@ -39,6 +39,7 @@ namespace app {
 enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / 毛玻璃
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
+enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
@@ -48,6 +49,8 @@ struct Settings {
     int longPressMs = 1000;
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
     bool showLevels = true;      // 迷你任务栏里显示音量和亮度调节
+    bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
+    int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
@@ -104,6 +107,8 @@ constexpr UINT WM_APP_LONGPRESS = WM_APP + 2;  // 钩子线程通知：Win 键�
 constexpr UINT WM_APP_AUTOHIDE_OFF = WM_APP + 3;  // 动画线程通知：关自动隐藏的结果，wParam 是请求编号，lParam 非 0 = 关掉了
 constexpr UINT WM_APP_AUTOHIDE_ON = WM_APP + 4;   // 动画线程通知：开自动隐藏的结果，wParam 是请求编号，lParam 非 0 = 开了
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // 检查更新的线程通知：结果出来了，交给 Update_OnResult
+constexpr UINT WM_APP_TRAY_LAUNCH = WM_APP + 7;   // 点托盘图标的线程通知：找不到图标，再启动一次程序，交给 Tray_OnMessage
+constexpr UINT WM_APP_WINTAP = WM_APP + 8;        // 钩子线程通知：任务栏藏着时短按了 Win（wParam 是键码），交给 Popup_StartMenu
 
 // ---------------- 最大化 / 全屏时隐藏任务栏 ----------------
 void Fullscreen_SetEnabled(bool enabled);
@@ -112,6 +117,7 @@ void Fullscreen_OnAutoHideOff(UINT seq, bool done);  // 收到 WM_APP_AUTOHIDE_O
 void Fullscreen_OnAutoHideOn(UINT seq, bool done);   // 收到 WM_APP_AUTOHIDE_ON
 void Fullscreen_OnTaskbarCreated();                  // 资源管理器（重新）启动了
 void Fullscreen_QuietStartMenu();                    // 接下来打开的开始菜单是迷你任务栏点的：不把藏着的任务栏放出来
+bool Fullscreen_TaskbarHidden();                     // 本程序现在藏着任务栏（有窗口最大化或全屏）
 void Taskbar_RestoreAll();        // 启动、退出时：显示所有任务栏，关掉本程序打开的自动隐藏，窗口和桌面图标还原
 void Taskbar_EmergencyRestore();  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
 bool Taskbar_IsShownOn(HMONITOR monitor);  // 这块屏幕上的任务栏现在是否显示着（没被本程序藏起来）
@@ -155,7 +161,10 @@ void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程�
 bool Hook_Install();
 void Hook_Uninstall();
 void Hook_Configure(bool enabled, int thresholdMs);
+// 任务栏藏着时短按 Win 不直接交给系统，通知主线程（WM_APP_WINTAP）先弹迷你任务栏再打开开始菜单
+void Hook_SetTaskbarHidden(bool hidden);
 void SendStartMenu();
+void SendWinTap(DWORD vk);  // 补发一次 Win 单击（钩子不拦）
 void SendWinX();  // 打开 Win+X 菜单（右键开始按钮的那个）
 
 // ---------------- 窗口列表 ----------------
@@ -248,12 +257,27 @@ bool Thumb_Show(HWND source, int centerX, int bottomY, const RECT& bounds, float
 void Thumb_Hide();
 void Thumb_Destroy();
 
+// ---------------- 系统托盘里隐藏的图标（tray.cpp）----------------
+struct TrayApp {
+    std::wstring name, exe;
+    std::shared_ptr<Gdiplus::Bitmap> icon;
+    bool promoted = false;  // 用户设成在任务栏上一直显示
+};
+void Tray_Refresh();                    // 在后台重新读一遍（已经在读就不管）
+std::vector<TrayApp> Tray_Hidden();     // 最近读到的、正在运行、收在“隐藏的图标”里的
+void Tray_Click(const TrayApp& app, bool right);  // 在后台线程上去系统托盘里点它
+void Tray_ShowHidden();                 // 展开系统的“隐藏的图标”
+bool Tray_OnMessage(UINT msg, LPARAM lParam);  // 主窗口收到 WM_APP_TRAY_LAUNCH 时交给它
+
 // ---------------- 迷你任务栏 ----------------
 void Popup_Init();
 void Popup_Destroy();
 void Popup_Show();
 void Popup_Hide();
 void Popup_Toggle();
+// 任务栏藏着时短按了 Win：先弹出迷你任务栏，弹完再打开开始菜单（开始菜单开着时迷你任务栏一直在）；
+// 任务栏没藏着、开始菜单已经开着时照常补发 Win
+void Popup_StartMenu(DWORD vk);
 // 设置窗口里调“迷你任务栏大小”时按 percent 弹出预览（不抢前台，点不到）。hold：还按着滑块，
 // 先不收起；否则过一会儿自己收起
 void Popup_Preview(int percent, bool hold);

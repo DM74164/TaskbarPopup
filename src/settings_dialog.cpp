@@ -36,7 +36,7 @@ constexpr float kRowPad = 14;  // 卡片里左右的边距
 constexpr float kChipH = 28;
 
 // 开关
-enum Toggle { kAutoHide, kKeepFloats, kLongPress, kPinned, kLevels, kAutoStart, kUpdates, kToggleCount };
+enum Toggle { kAutoHide, kKeepFloats, kLongPress, kPinned, kLevels, kTray, kAutoStart, kUpdates, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -47,6 +47,7 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"长按 Win 键弹出迷你任务栏", L"左键单击托盘图标也能弹出"},
     {L"显示固定在任务栏的应用", nullptr},
     {L"显示音量和亮度调节", nullptr},
+    {L"显示托盘里隐藏的图标", L"左键、右键和在系统托盘里点一样"},
     {L"开机自动启动", nullptr},
     {L"自动检查更新", L"每天看一次 GitHub 上有没有新版本"},
 };
@@ -65,7 +66,7 @@ const SliderSpec kSliderSpec[kSliderCount] = {
 };
 
 // 几选一（分段按钮）
-enum SegId { kSegStyle, kSegTheme, kSegCount };
+enum SegId { kSegStyle, kSegTheme, kSegTray, kSegCount };
 struct SegSpec {
     const wchar_t* label;
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
@@ -73,6 +74,7 @@ struct SegSpec {
 const SegSpec kSegSpec[kSegCount] = {
     {L"材质", {L"液态玻璃", L"毛玻璃"}},
     {L"颜色", {L"跟随系统", L"浅色", L"深色"}},
+    {L"托盘图标", {L"小图标堆叠", L"横向完整展示"}},  // 下标是 TrayStyle
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -322,6 +324,8 @@ void BuildLayout() {
     mini.push_back([](float x, float y, float w) { return SliderRow(kScale, x, y, w); });
     mini.push_back([](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); });
     mini.push_back([](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); });
+    mini.push_back([](float x, float y, float w) { return ToggleRow(kTray, x, y, w); });
+    if (s_v.on[kTray]) mini.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });  // 托盘图标关着时收起样式
     left = AddGroup(px0, left, L"迷你任务栏", mini);
     left = AddGroup(px0, left, L"外观",
                     {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
@@ -1060,7 +1064,7 @@ void SetToggle(int which, bool on) {
     s_knobFrom[which] = s_knob[which];
     s_knobStart[which] = NowMs();
     StartAnimation();
-    if (which == kLongPress) Relayout(true);  // 长按时长跟着收起 / 放出来
+    if (which == kLongPress || which == kTray) Relayout(true);  // 长按时长、托盘图标样式跟着收起 / 放出来
 }
 
 void SetSlider(int which, int value) {
@@ -1304,6 +1308,7 @@ void Apply() {
     if (changed(kLongPress)) g_settings.longPressPopup = s_v.on[kLongPress];
     if (changed(kPinned)) g_settings.showPinnedApps = s_v.on[kPinned];
     if (changed(kLevels)) g_settings.showLevels = s_v.on[kLevels];
+    if (changed(kTray)) g_settings.trayIcons = s_v.on[kTray];
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
@@ -1312,6 +1317,7 @@ void Apply() {
             g_settings.hotkeyHoldMs[i] = s_v.slider[kPopupHoldMs + i];
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
+    if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) g_settings.trayStyle = s_v.seg[kSegTray];
     for (int i = 0; i < kHotkeyCount; ++i) {
         if (s_v.hotkey[i] != s_initial.hotkey[i]) g_settings.hotkey[i] = s_v.hotkey[i];
         if (s_v.hold[i] != s_initial.hold[i]) g_settings.hotkeyHold[i] = s_v.hold[i];
@@ -1737,12 +1743,14 @@ void SettingsDialog_Show() {
     s_initial.on[kLongPress] = g_settings.longPressPopup;
     s_initial.on[kPinned] = g_settings.showPinnedApps;
     s_initial.on[kLevels] = g_settings.showLevels;
+    s_initial.on[kTray] = g_settings.trayIcons;
     s_initial.on[kAutoStart] = IsAutoStartEnabled();
     s_initial.on[kUpdates] = g_settings.checkUpdates;
     s_initial.slider[kLongPressMs] = g_settings.longPressMs;
     s_initial.slider[kScale] = g_settings.popupScale;
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;
+    s_initial.seg[kSegTray] = g_settings.trayStyle;
     for (int i = 0; i < kHotkeyCount; ++i) {
         s_initial.hotkey[i] = g_settings.hotkey[i];
         s_initial.hold[i] = g_settings.hotkeyHold[i];

@@ -24,6 +24,7 @@ add_executable(TaskbarPopup WIN32
     src/update.cpp
     src/float_windows.cpp
     src/hotkeys.cpp
+    src/tray.cpp
     src/app.rc
 )
 
