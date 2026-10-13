@@ -121,6 +121,7 @@ int s_sel = 0;      // 选中的格子（键盘焦点），编号同上
 bool s_open = false;
 bool s_preview = false;      // 设置窗口里调大小时的预览：不抢前台、鼠标点不到，过一会儿自己收起
 int s_previewPercent = 100;  // 预览用的大小，百分比
+int s_previewAlign = kAlignSystem;  // 预览用的位置，见 PopupAlign
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
@@ -264,8 +265,28 @@ void ComputeLayout() {
 }
 
 // 面板水平居中、贴着底边（屏幕底边，或者露着的任务栏的上沿）
+// 系统任务栏的图标是不是居中：Win11 看设置里的“任务栏对齐方式”（没改过是居中），Win10 一直靠左
+bool SystemTaskbarCentered() {
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
+    OSVERSIONINFOW ver = {sizeof(ver)};
+    if (rtlGetVersion && rtlGetVersion(&ver) == 0 && ver.dwBuildNumber < 22000) return false;
+    DWORD value = 1, size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"TaskbarAl",
+                     RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)
+        return true;
+    return value != 0;
+}
+
+// 贴着底边，按设置居中、靠左或靠右。靠边时面板离屏幕侧边和离底边一样远（窗口四周留的阴影位置）
 void UpdatePlacement() {
-    s_pos = {s_bounds.left + (s_bounds.right - s_bounds.left - s_width) / 2, s_bounds.bottom - s_height};
+    int align = s_preview ? s_previewAlign : g_settings.popupAlign;
+    if (align == kAlignSystem) align = SystemTaskbarCentered() ? kAlignCenter : kAlignLeft;
+    int x = s_bounds.left + (s_bounds.right - s_bounds.left - s_width) / 2;
+    if (align == kAlignLeft) x = s_bounds.left;
+    else if (align == kAlignRight) x = s_bounds.right - s_width;
+    s_pos = {x, s_bounds.bottom - s_height};
     s_baseValid = false;
 }
 
@@ -1993,14 +2014,16 @@ void Open(bool preview, bool startMenu = false) {
 
 void Popup_Show() { Open(false); }
 
-void Popup_Preview(int percent, bool hold) {
+void Popup_Preview(int percent, int align, bool hold) {
     if (!s_hwnd || (s_open && !s_preview)) return;  // 真的弹出着就不打扰
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
     if (!s_open) {
         s_previewPercent = percent;
+        s_previewAlign = align;
         Open(true);
-    } else if (percent != s_previewPercent) {
+    } else if (percent != s_previewPercent || align != s_previewAlign) {
         s_previewPercent = percent;
+        s_previewAlign = align;
         s_scale = PopupScale(s_monitor);
         ComputeLayout();
         UpdatePlacement();

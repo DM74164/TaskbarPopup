@@ -66,7 +66,7 @@ const SliderSpec kSliderSpec[kSliderCount] = {
 };
 
 // 几选一（分段按钮）
-enum SegId { kSegStyle, kSegTheme, kSegTray, kSegCount };
+enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegCount };
 struct SegSpec {
     const wchar_t* label;
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
@@ -75,6 +75,7 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"材质", {L"液态玻璃", L"毛玻璃"}},
     {L"颜色", {L"跟随系统", L"浅色", L"深色"}},
     {L"托盘图标", {L"小图标堆叠", L"横向完整展示"}},  // 下标是 TrayStyle
+    {L"位置", {L"跟随系统", L"居中", L"靠左", L"靠右"}},  // 下标是 PopupAlign
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -322,6 +323,7 @@ void BuildLayout() {
     std::vector<float (*)(float, float, float)> mini = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
     if (s_v.on[kLongPress]) mini.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
     mini.push_back([](float x, float y, float w) { return SliderRow(kScale, x, y, w); });
+    mini.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });
     mini.push_back([](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); });
     mini.push_back([](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); });
     mini.push_back([](float x, float y, float w) { return ToggleRow(kTray, x, y, w); });
@@ -1071,7 +1073,7 @@ void SetSlider(int which, int value) {
     const SliderSpec& spec = kSliderSpec[which];
     value = spec.minValue + (value - spec.minValue + spec.step / 2) / spec.step * spec.step;
     s_v.slider[which] = std::clamp(value, spec.minValue, spec.maxValue);
-    if (which == kScale) Popup_Preview(s_v.slider[kScale], s_drag == kScale);  // 弹出迷你任务栏看看大小
+    if (which == kScale) Popup_Preview(s_v.slider[kScale], s_v.seg[kSegAlign], s_drag == kScale);  // 弹出迷你任务栏看看大小
 }
 
 void SetSliderFromX(int which, int x) {
@@ -1318,6 +1320,7 @@ void Apply() {
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
     if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) g_settings.trayStyle = s_v.seg[kSegTray];
+    if (s_v.seg[kSegAlign] != s_initial.seg[kSegAlign]) g_settings.popupAlign = s_v.seg[kSegAlign];
     for (int i = 0; i < kHotkeyCount; ++i) {
         if (s_v.hotkey[i] != s_initial.hotkey[i]) g_settings.hotkey[i] = s_v.hotkey[i];
         if (s_v.hold[i] != s_initial.hold[i]) g_settings.hotkeyHold[i] = s_v.hold[i];
@@ -1350,6 +1353,7 @@ void Activate(const Item& it) {
         case kSegment:
             s_v.seg[it.index / kSegStride] = it.index % kSegStride;
             ApplyLook();  // 马上换上看看效果，取消时不保存
+            if (it.index / kSegStride == kSegAlign) Popup_Preview(s_v.slider[kScale], s_v.seg[kSegAlign], false);  // 弹在选的位置看看
             break;
         case kHotkeyRow:
             if (s_capture == it.index) EndCapture();  // 再点一下不录了
@@ -1631,7 +1635,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             s_press = {};
             s_drag = -1;
             if (GetCapture() == hwnd) ReleaseCapture();
-            if (draggedSlider == kScale) Popup_Preview(s_v.slider[kScale], false);  // 松开了：预览过一会儿收起
+            if (draggedSlider == kScale) Popup_Preview(s_v.slider[kScale], s_v.seg[kSegAlign], false);  // 松开了：预览过一会儿收起
             if (dragged || pressed.kind == kSliderRow) {
                 Render();
                 return 0;
@@ -1648,7 +1652,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
             if ((s_drag >= 0 || s_press.kind != kNoItem) && reinterpret_cast<HWND>(lParam) != hwnd) {
-                if (s_drag == kScale) Popup_Preview(s_v.slider[kScale], false);
+                if (s_drag == kScale) Popup_Preview(s_v.slider[kScale], s_v.seg[kSegAlign], false);
                 s_drag = -1;
                 s_press = {};
                 Render();
@@ -1751,6 +1755,7 @@ void SettingsDialog_Show() {
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;
     s_initial.seg[kSegTray] = g_settings.trayStyle;
+    s_initial.seg[kSegAlign] = g_settings.popupAlign;
     for (int i = 0; i < kHotkeyCount; ++i) {
         s_initial.hotkey[i] = g_settings.hotkey[i];
         s_initial.hold[i] = g_settings.hotkeyHold[i];

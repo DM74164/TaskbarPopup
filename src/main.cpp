@@ -358,6 +358,8 @@ void LoadSettings() {
     g_settings.trayIcons = GetPrivateProfileIntW(L"General", L"TrayIcons", 1, f.c_str()) != 0;
     g_settings.trayStyle = GetPrivateProfileIntW(L"General", L"TrayStyle", kTrayStacked, f.c_str()) == kTrayRow ? kTrayRow : kTrayStacked;
     int scale = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupScale", kDefaultPopupScale, f.c_str()));
+    int align = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupAlign", kAlignSystem, f.c_str()));
+    g_settings.popupAlign = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
     g_settings.popupScale = std::max(kMinPopupScale, std::min(scale, kMaxPopupScale));
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
@@ -400,6 +402,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"TrayIcons", g_settings.trayIcons ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"TrayStyle", std::to_wstring(g_settings.trayStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupAlign", std::to_wstring(g_settings.popupAlign).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"CheckUpdates", g_settings.checkUpdates ? L"1" : L"0", f.c_str());

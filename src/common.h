@@ -40,6 +40,7 @@ enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / �
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
+enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight };  // 迷你任务栏弹出位置：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
@@ -52,6 +53,7 @@ struct Settings {
     bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
+    int popupAlign = kAlignSystem;  // 迷你任务栏弹出位置，见 PopupAlign
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
@@ -291,9 +293,9 @@ void Popup_Toggle();
 // 任务栏藏着时短按了 Win：先弹出迷你任务栏，弹完再打开开始菜单（开始菜单开着时迷你任务栏一直在）；
 // 任务栏没藏着、开始菜单已经开着时照常补发 Win
 void Popup_StartMenu(DWORD vk);
-// 设置窗口里调“迷你任务栏大小”时按 percent 弹出预览（不抢前台，点不到）。hold：还按着滑块，
-// 先不收起；否则过一会儿自己收起
-void Popup_Preview(int percent, bool hold);
+// 设置窗口里调“迷你任务栏大小”或“位置”时按 percent、align（PopupAlign）弹出预览（不抢前台，点不到）。
+// hold：还按着滑块，先不收起；否则过一会儿自己收起
+void Popup_Preview(int percent, int align, bool hold);
 void Popup_EndPreview();  // 马上收起预览
 
 // ---------------- 音量和亮度 ----------------
