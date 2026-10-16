@@ -309,11 +309,11 @@ RECT Inflate(const RECT& r, const RECT& by) {
     return {r.left - by.left, r.top - by.top, r.right + by.right, r.bottom + by.bottom};
 }
 
-// cur 伸出 work 的量。负的或太大说明窗口不是照 work 最大化的
-bool BorderAround(const RECT& work, const RECT& cur, LONG limit, RECT& border) {
+// cur 伸出 work 的量。太大，或者缩进 work 超过 slack，说明窗口不是照 work 最大化的
+bool BorderAround(const RECT& work, const RECT& cur, LONG limit, RECT& border, LONG slack = 0) {
     border = {work.left - cur.left, work.top - cur.top, cur.right - work.right, cur.bottom - work.bottom};
     for (LONG b : {border.left, border.top, border.right, border.bottom})
-        if (b < 0 || b > limit) return false;
+        if (b < -slack || b > limit) return false;
     return true;
 }
 
@@ -323,9 +323,11 @@ bool MaximizedBorder(HMONITOR monitor, const MONITORINFO& mi, const RECT& cur, R
     LONG limit = BorderLimit(monitor);
     if (BorderAround(mi.rcWork, cur, limit, border)) return true;
     const Before* b = FindBefore(monitor);
-    if (!b) return false;
-    if (BorderAround(b->work, cur, limit, border)) return true;
-    return !IsRectEmpty(&b->during) && BorderAround(b->during, cur, limit, border);
+    if (b && (BorderAround(b->work, cur, limit, border) ||
+              (!IsRectEmpty(&b->during) && BorderAround(b->during, cur, limit, border))))
+        return true;
+    // 任务栏自动隐藏时，有的程序（拓竹切片等）最大化时在那一边故意少盖几个像素，好让鼠标移到屏幕边上时任务栏滑得出来
+    return BorderAround(mi.rcWork, cur, limit, border, 2 * Tolerance(monitor));
 }
 
 // 窗口要铺满的范围：工作区朝任务栏那一边扩到任务栏的外沿。
@@ -962,6 +964,15 @@ void EvaluateNow(bool enforce) {
     if (!enforce && !changed) return;
     if (changed) {
         if (g_settings.debugLog) Log(L"目标 %ls（前台 %ls）", Describe(window).c_str(), Describe(fg).c_str());
+        // 原来的目标还在前台却不算了：记下它现在的样子，好查是程序自己还原了还是最大化成了别的大小
+        if (g_settings.debugLog && !window && fg && fg == s_targetWindow) {
+            RECT r = {};
+            GetWindowRect(fg, &r);
+            MONITORINFO mi = {sizeof(mi)};
+            GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi);
+            Log(L"诊断：%ls %ls %ls，工作区 %ls", Describe(fg).c_str(), IsZoomed(fg) ? L"最大化着" : L"没最大化",
+                RectText(r).c_str(), RectText(mi.rcWork).c_str());
+        }
         // 换了目标：旧目标还在等结果的拉伸请求作废，免得以后被当成它拒绝
         if (s_targetWindow && window != s_targetWindow)
             for (Attempt& a : s_attempts)
