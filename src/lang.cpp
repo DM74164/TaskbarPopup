@@ -37,7 +37,7 @@ const wchar_t* const kEnglish[][2] = {
     {L"显示固定在任务栏的应用", L"Show pinned apps"},
     {L"显示音量和亮度调节", L"Show volume and brightness"},
     {L"显示 Wi-Fi 和蓝牙开关", L"Show Wi-Fi and Bluetooth toggles"},
-    {L"右键按钮打开系统设置", L"Right-click a toggle to open its settings"},
+    {L"右键按钮弹出网络、蓝牙列表", L"Right-click a toggle for the network or device list"},
     {L"显示托盘里隐藏的图标", L"Show hidden tray icons"},
     {L"左键、右键和在系统托盘里点一样", L"Left and right clicks work like in the system tray"},
     {L"开机自动启动", L"Start with Windows"},
