@@ -46,6 +46,7 @@ enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
+constexpr int kDefaultGlassTransparency = 60;  // 液态玻璃的透明度（0 – 100%），60 是原来的样子
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool longPressPopup = true;
@@ -69,6 +70,8 @@ struct Settings {
     int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
+    int lightTransparency = kDefaultGlassTransparency;  // 迷你任务栏浅色液态玻璃的透明度，百分比
+    int darkTransparency = kDefaultGlassTransparency;   // 深色的
     // 名单里是小写的程序文件名，如 notepad.exe。“最大化或全屏时隐藏任务栏”开着时用 excludeApps，关着时用 includeApps
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序
     std::vector<std::wstring> includeApps;  // 最大化时隐藏任务栏的程序
@@ -310,6 +313,8 @@ void Popup_StartMenu(DWORD vk);
 // 设置窗口里调“迷你任务栏大小”“位置”“对齐”时按 percent、edge（PopupEdge）、align（PopupAlign）弹出预览
 // （不抢前台，点不到）。hold：还按着滑块，先不收起；否则过一会儿自己收起
 void Popup_Preview(int percent, int edge, int align, bool hold);
+// 预览用的玻璃：毛玻璃还是液态玻璃、浅色还是深色、液态玻璃的透明度。在 Popup_Preview 之前调用，预览开着时马上换上
+void Popup_PreviewGlass(bool frosted, bool light, int transparency);
 void Popup_EndPreview();  // 马上收起预览
 
 // ---------------- 音量和亮度 ----------------
@@ -413,6 +418,8 @@ public:
     void SetScale(float scale) { m_scale = scale; }  // 只换边缘、阴影等的尺寸，背景不重新截
     void SetFrosted(bool frosted) { m_frosted = frosted; }  // 毛玻璃：没有边缘折射和高光，着色更浓
     bool Frosted() const { return m_frosted; }
+    // 液态玻璃的透明度（0 – 100%）：越透明着色越淡。默认 kDefaultGlassTransparency
+    void SetTransparency(int percent) { m_transparency = percent; }
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
     // width×height：窗口像素大小；panel：面板在窗口里的位置；radius：圆角半径
@@ -441,6 +448,7 @@ private:
     float m_scale = 1;
     bool m_light = false;
     bool m_frosted = false;
+    int m_transparency = kDefaultGlassTransparency;
 
     std::vector<Texel> m_texels;  // 面板静止时窗口里每个像素的材质
     int m_texW = 0, m_texH = 0;

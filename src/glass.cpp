@@ -332,7 +332,14 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
     const int w = m_texW, h = m_texH;
     const float tintL = m_light ? 252.0f : 16.0f;
     const float tint[3] = {tintL, tintL, m_light ? 255.0f : 20.0f};
-    const float tintAlpha = m_frosted ? (m_light ? 0.58f : 0.62f) : (m_light ? 0.36f : 0.38f);
+    float tintAlpha = m_frosted ? (m_light ? 0.58f : 0.62f) : (m_light ? 0.36f : 0.38f);
+    // 液态玻璃的透明度：默认（60%）时 k = 1；更透明时着色变淡，下面看得清文字的保底也跟着放松
+    float guard = 1;
+    if (!m_frosted) {
+        float k = (100 - std::clamp(m_transparency, 0, 100)) / static_cast<float>(100 - kDefaultGlassTransparency);
+        tintAlpha = std::min(0.94f, tintAlpha * k);
+        guard = std::min(1.0f, k);
+    }
     const float shadowAlpha = m_light ? 0.22f : 0.32f;
     const float sheen = (m_light ? 0.12f : 0.07f) / 255.0f;
     // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清
@@ -370,7 +377,7 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
             }
             float lum = 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
             float ta = tintAlpha;
-            if (m_light ? lum < bound : lum > bound) ta = std::min(0.94f, std::max(ta, (bound - lum) / (tintL - lum)));
+            if (m_light ? lum < bound : lum > bound) ta = std::min(0.94f, std::max(ta, (bound - lum) / (tintL - lum) * guard));
             float light = std::min(1.0f, t.light / 255.0f + t.gloss * sheen), cover = t.cover / 255.0f;
             float a = cover + t.shadow * shadowAlpha / 255.0f * (1 - cover);
             DWORD out = static_cast<DWORD>(a * 255 + 0.5f) << 24;

@@ -45,6 +45,8 @@ const wchar_t* const kEnglish[][2] = {
     {L"每天看一次 GitHub 上有没有新版本", L"Checks GitHub once a day"},
     {L"长按时长", L"Hold time"},
     {L"迷你任务栏大小", L"Mini taskbar size"},
+    {L"浅色透明度", L"Light transparency"},
+    {L"深色透明度", L"Dark transparency"},
     {L"%d 毫秒", L"%d ms"},
     {L"材质", L"Material"},
     {L"液态玻璃", L"Liquid glass"},
