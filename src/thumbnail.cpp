@@ -62,7 +62,7 @@ void Unregister() {
 
 }  // namespace
 
-bool Thumb_Show(HWND source, int centerX, int bottomY, const RECT& bounds, float scale, bool light) {
+bool Thumb_Show(HWND source, POINT at, int place, const RECT& bounds, float scale, bool light) {
     if (!source || !IsWindow(source) || !EnsureWindow()) {
         Thumb_Hide();
         return false;
@@ -92,8 +92,10 @@ bool Thumb_Show(HWND source, int centerX, int bottomY, const RECT& bounds, float
     int pad = static_cast<int>(6 * scale);
     int winW = w + 2 * pad, winH = h + 2 * pad;
     int edge = static_cast<int>(8 * scale);
-    int x = std::max<int>(bounds.left + edge, std::min<int>(centerX - winW / 2, bounds.right - edge - winW));
-    int y = std::max<int>(bounds.top + edge, bottomY - winH);
+    int x = place == kThumbAbove ? at.x - winW / 2 : place == kThumbRight ? at.x : at.x - winW;
+    int y = place == kThumbAbove ? at.y - winH : at.y;
+    x = std::max<int>(bounds.left + edge, std::min<int>(x, bounds.right - edge - winW));
+    y = std::max<int>(bounds.top + edge, std::min<int>(y, bounds.bottom - edge - winH));
 
     COLORREF background = light ? RGB(243, 243, 243) : RGB(44, 44, 44);
     if (background != s_background) {
