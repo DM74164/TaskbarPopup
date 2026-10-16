@@ -64,7 +64,7 @@ const ToggleText kToggleText[kToggleCount] = {
 
 // 滑块
 // kPopupHoldMs、kPinHoldMs = kPopupHoldMs + HotkeyId
-enum SliderId { kLongPressMs, kScale, kPopupHoldMs, kPinHoldMs, kLightAlpha, kDarkAlpha, kSliderCount };
+enum SliderId { kLongPressMs, kScale, kPopupHoldMs, kPinHoldMs, kGlassAlpha, kSliderCount };
 struct SliderSpec {
     const wchar_t* label;
     int minValue, maxValue, step;
@@ -74,8 +74,7 @@ const SliderSpec kSliderSpec[kSliderCount] = {
     {L"迷你任务栏大小", kMinPopupScale, kMaxPopupScale, 10},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
-    {L"浅色透明度", 0, 100, 5},
-    {L"深色透明度", 0, 100, 5},
+    {L"透明度", 0, 100, 5},
 };
 
 // 几选一（分段按钮）
@@ -209,7 +208,7 @@ bool SliderEnabled(int which) {
 
 std::wstring SliderText(int which) {
     wchar_t text[32];
-    if (which == kScale || which == kLightAlpha || which == kDarkAlpha) swprintf(text, 32, L"%d%%", s_v.slider[which]);
+    if (which == kScale || which == kGlassAlpha) swprintf(text, 32, L"%d%%", s_v.slider[which]);
     else swprintf(text, 32, Tr(L"%d 毫秒"), s_v.slider[which]);
     return text;
 }
@@ -356,10 +355,8 @@ float BuildPage(int page, float x, float y) {
                           [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); },
                           [](float x, float y, float w) { return SegRow(kSegLang, x, y, w); }});
             std::vector<RowFn> place = {[](float x, float y, float w) { return SliderRow(kScale, x, y, w); }};
-            if (s_v.seg[kSegStyle] == kGlassLiquid) {  // 毛玻璃时收起透明度
-                place.push_back([](float x, float y, float w) { return SliderRow(kLightAlpha, x, y, w); });
-                place.push_back([](float x, float y, float w) { return SliderRow(kDarkAlpha, x, y, w); });
-            }
+            if (s_v.seg[kSegStyle] == kGlassLiquid)  // 毛玻璃时收起透明度
+                place.push_back([](float x, float y, float w) { return SliderRow(kGlassAlpha, x, y, w); });
             place.push_back([](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); });
             if (s_v.seg[kSegEdge] == kEdgeBottom) place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });  // 竖排时收起对齐
             return AddGroup(x, y, L"迷你任务栏", place);
@@ -1174,13 +1171,11 @@ void SetPage(int page) {
 }
 
 // 调这个滑块时弹出迷你任务栏预览
-bool PreviewsPopup(int which) { return which == kScale || which == kLightAlpha || which == kDarkAlpha; }
+bool PreviewsPopup(int which) { return which == kScale || which == kGlassAlpha; }
 
-// 按窗口里现在选的大小、位置、对齐、材质和透明度弹出迷你任务栏预览。
-// which：正在调的滑块，调浅色 / 深色透明度时用那种颜色的玻璃，否则按选的颜色。hold：还按着滑块，先不收起
-void PreviewPopup(int which, bool hold) {
-    bool light = which == kLightAlpha || (which != kDarkAlpha && ThemeIsLight(s_v.seg[kSegTheme], true));
-    Popup_PreviewGlass(s_v.seg[kSegStyle] == kGlassFrosted, light, s_v.slider[light ? kLightAlpha : kDarkAlpha]);
+// 按窗口里现在选的大小、位置、对齐、材质、颜色和透明度弹出迷你任务栏预览。hold：还按着滑块，先不收起
+void PreviewPopup(bool hold) {
+    Popup_PreviewGlass(s_v.seg[kSegStyle] == kGlassFrosted, ThemeIsLight(s_v.seg[kSegTheme], true), s_v.slider[kGlassAlpha]);
     Popup_Preview(s_v.slider[kScale], s_v.seg[kSegEdge], s_v.seg[kSegAlign], hold);
 }
 
@@ -1188,7 +1183,7 @@ void SetSlider(int which, int value) {
     const SliderSpec& spec = kSliderSpec[which];
     value = spec.minValue + (value - spec.minValue + spec.step / 2) / spec.step * spec.step;
     s_v.slider[which] = std::clamp(value, spec.minValue, spec.maxValue);
-    if (PreviewsPopup(which)) PreviewPopup(which, s_drag == which);  // 弹出迷你任务栏看看大小、透明度
+    if (PreviewsPopup(which)) PreviewPopup(s_drag == which);  // 弹出迷你任务栏看看大小、透明度
 }
 
 void SetSliderFromX(int which, int x) {
@@ -1434,8 +1429,7 @@ void Apply() {
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
-    if (s_v.slider[kLightAlpha] != s_initial.slider[kLightAlpha]) g_settings.lightTransparency = s_v.slider[kLightAlpha];
-    if (s_v.slider[kDarkAlpha] != s_initial.slider[kDarkAlpha]) g_settings.darkTransparency = s_v.slider[kDarkAlpha];
+    if (s_v.slider[kGlassAlpha] != s_initial.slider[kGlassAlpha]) g_settings.glassTransparency = s_v.slider[kGlassAlpha];
     for (int i = 0; i < kHotkeyCount; ++i)
         if (s_v.slider[kPopupHoldMs + i] != s_initial.slider[kPopupHoldMs + i])
             g_settings.hotkeyHoldMs[i] = s_v.slider[kPopupHoldMs + i];
@@ -1488,7 +1482,7 @@ void Activate(const Item& it) {
             // 竖排时收起对齐那一行；毛玻璃时收起透明度；换语言字的宽度变了
             if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegStyle || it.index / kSegStride == kSegLang)
                 Relayout(true);
-            if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) PreviewPopup(-1, false);  // 弹在选的位置看看
+            if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) PreviewPopup(false);  // 弹在选的位置看看
             break;
         case kHotkeyRow:
             if (s_capture == it.index) EndCapture();  // 再点一下不录了
@@ -1774,7 +1768,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             s_press = {};
             s_drag = -1;
             if (GetCapture() == hwnd) ReleaseCapture();
-            if (PreviewsPopup(draggedSlider)) PreviewPopup(draggedSlider, false);  // 松开了：预览过一会儿收起
+            if (PreviewsPopup(draggedSlider)) PreviewPopup(false);  // 松开了：预览过一会儿收起
             if (dragged || pressed.kind == kSliderRow) {
                 Render();
                 return 0;
@@ -1791,7 +1785,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 return 0;
             }
             if ((s_drag >= 0 || s_press.kind != kNoItem) && reinterpret_cast<HWND>(lParam) != hwnd) {
-                if (PreviewsPopup(s_drag)) PreviewPopup(s_drag, false);
+                if (PreviewsPopup(s_drag)) PreviewPopup(false);
                 s_drag = -1;
                 s_press = {};
                 Render();
@@ -1894,8 +1888,7 @@ void SettingsDialog_Show() {
     s_initial.on[kUpdates] = g_settings.checkUpdates;
     s_initial.slider[kLongPressMs] = g_settings.longPressMs;
     s_initial.slider[kScale] = g_settings.popupScale;
-    s_initial.slider[kLightAlpha] = g_settings.lightTransparency;
-    s_initial.slider[kDarkAlpha] = g_settings.darkTransparency;
+    s_initial.slider[kGlassAlpha] = g_settings.glassTransparency;
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;
     s_initial.seg[kSegTray] = g_settings.trayStyle;
