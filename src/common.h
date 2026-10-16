@@ -70,8 +70,7 @@ struct Settings {
     int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
-    int lightTransparency = kDefaultGlassTransparency;  // 迷你任务栏浅色液态玻璃的透明度，百分比
-    int darkTransparency = kDefaultGlassTransparency;   // 深色的
+    int glassTransparency = kDefaultGlassTransparency;  // 迷你任务栏液态玻璃的透明度，百分比，深浅色共用
     // 名单里是小写的程序文件名，如 notepad.exe。“最大化或全屏时隐藏任务栏”开着时用 excludeApps，关着时用 includeApps
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序
     std::vector<std::wstring> includeApps;  // 最大化时隐藏任务栏的程序

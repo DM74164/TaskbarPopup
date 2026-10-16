@@ -380,11 +380,8 @@ void LoadSettings() {
     g_settings.glassStyle = style == kGlassFrosted ? kGlassFrosted : kGlassLiquid;
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
     g_settings.theme = theme == kThemeLight || theme == kThemeDark ? theme : kThemeSystem;
-    auto transparency = [&](const wchar_t* key) {
-        return std::clamp(static_cast<int>(GetPrivateProfileIntW(L"General", key, kDefaultGlassTransparency, f.c_str())), 0, 100);
-    };
-    g_settings.lightTransparency = transparency(L"LightTransparency");
-    g_settings.darkTransparency = transparency(L"DarkTransparency");
+    g_settings.glassTransparency = std::clamp(
+        static_cast<int>(GetPrivateProfileIntW(L"General", L"GlassTransparency", kDefaultGlassTransparency, f.c_str())), 0, 100);
     std::vector<wchar_t> buf(32768);
     for (int id = 0; id < kHotkeyCount; ++id) {
         GetPrivateProfileStringW(L"General", kHotkeyKeys[id], L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
@@ -433,8 +430,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PinTopmost", g_settings.pinTopmost ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"LightTransparency", std::to_wstring(g_settings.lightTransparency).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"DarkTransparency", std::to_wstring(g_settings.darkTransparency).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"GlassTransparency", std::to_wstring(g_settings.glassTransparency).c_str(), f.c_str());
     for (int id = 0; id < kHotkeyCount; ++id) {
         WritePrivateProfileStringW(L"General", kHotkeyKeys[id], HotkeyText(g_settings.hotkey[id]).c_str(), f.c_str());
         std::wstring hold = std::wstring(kHotkeyKeys[id]) + L"Hold";

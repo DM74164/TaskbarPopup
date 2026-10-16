@@ -2363,11 +2363,9 @@ void Open(bool preview, bool startMenu = false) {
         else if (s_edge == kEdgeRight) window = {s_bounds.right - w, s_bounds.top, s_bounds.right, s_bounds.bottom};
         else window = {s_bounds.left, s_bounds.bottom - h, s_bounds.right, s_bounds.bottom};
     }
-    bool light = preview ? s_previewLight : ThemeIsLight(g_settings.theme, true);
-    s_glass.SetLight(light);
+    s_glass.SetLight(preview ? s_previewLight : ThemeIsLight(g_settings.theme, true));
     s_glass.SetFrosted(preview ? s_previewFrosted : g_settings.glassStyle == kGlassFrosted);
-    s_glass.SetTransparency(preview ? s_previewTransparency
-                                    : light ? g_settings.lightTransparency : g_settings.darkTransparency);
+    s_glass.SetTransparency(preview ? s_previewTransparency : g_settings.glassTransparency);
     s_glass.Capture(window, s_scale);
 
     s_first = 0;

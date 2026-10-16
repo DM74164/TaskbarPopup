@@ -51,7 +51,7 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass or frosted glass, a system, light or dark theme, and English or Chinese. The mini taskbar's size (50 – 200%), liquid glass transparency (separately for light and dark), position (bottom, left, right) and alignment at the bottom (system, center, left, right) preview live as you change them.
+Choose liquid glass or frosted glass, a system, light or dark theme, and English or Chinese. The mini taskbar's size (50 – 200%), liquid glass transparency, position (bottom, left, right) and alignment at the bottom (system, center, left, right) preview live as you change them.
 
 ![Liquid or frosted glass, light or dark, and size all preview live](docs/demo/en/appearance.webp)
 
