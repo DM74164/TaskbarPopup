@@ -1158,11 +1158,15 @@ void SetToggle(int which, bool on) {
 
 void EndCapture();
 
+bool PreviewsPopup(int which);
+void PreviewPopup(bool hold);
+
 // 换一页（窗口大小不变）。焦点跟到导航上新的这一项，确定、取消上的不动
 void SetPage(int page) {
     page = (page % kPageCount + kPageCount) % kPageCount;
     if (page == s_page) return;
     EndCapture();
+    if (PreviewsPopup(s_drag)) PreviewPopup(false);  // 拖着滑块换页：预览过一会儿照常收起
     s_page = page;
     s_hover = s_press = {};
     s_drag = -1;

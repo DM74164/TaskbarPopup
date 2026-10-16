@@ -404,7 +404,10 @@ bool ShowCover() {
             Log(L"照片放到 %ls 下面失败（错误 %lu），换一个", above ? GetClassNameStr(above).c_str() : L"最上面",
                 GetLastError());
             if (!above) break;
-            above = GetWindow(above, GW_HWNDPREV);
+            // 那个窗口刚好没了就从桌面窗口重新往上找。找到头了就不盖：放到最上面会盖住所有窗口
+            HWND next = IsWindow(above) ? GetWindow(above, GW_HWNDPREV) : GetWindow(s_desktopRoot, GW_HWNDPREV);
+            if (!next) break;
+            above = next;
         }
     }
     if (!placed) {
@@ -558,8 +561,13 @@ void MaskCover() {
                     if (!diff[i]) ++covered;
                     diff[i] = 1;
                 }
-    if (!covered) {  // 没拍出图标（比如桌面上没有图标）：照片没用了
-        Log(L"藏起图标后的桌面和照片一样，不盖照片");
+    if (!covered) {
+        // 桌面上有图标却没拍出来：多半是资源管理器还没把图标那块重画，照片整张接着盖着
+        if (!s_icons.empty()) {
+            Log(L"藏起图标后的桌面和照片一样（可能还没重画），照片整张盖着");
+            return;
+        }
+        Log(L"藏起图标后的桌面和照片一样，不盖照片");  // 桌面上没有图标：照片没用了
         HideCover();
         ReleaseShot();
         return;
@@ -681,8 +689,9 @@ void DiagnoseShot() {
     b.Save((dir + L"desktop-screen.png").c_str(), &png, nullptr);
 }
 
-// 显示图标；盖着照片的话等资源管理器把图标画出来、和照片对上了，再淡出照片
-void ShowIcons() {
+// 显示图标；盖着照片的话等资源管理器把图标画出来、和照片对上了，再淡出照片。
+// atSaved=false：图标没回到照片里的位置（只盖图标的照片会和真图标叠成两份），不久等
+void ShowIcons(bool atSaved = true) {
     if (!s_hiddenList) return;
     HWND list = s_hiddenList;
     if (g_settings.debugLog) LogCoverOnScreen();
@@ -694,7 +703,7 @@ void ShowIcons() {
         double start = NowMs();
         WaitPainted(list);
         std::wstring trace;
-        long diff = WaitLikeShot(list, s_maskShot ? 1500 : 600, trace);
+        long diff = WaitLikeShot(list, s_maskShot ? (atSaved ? 1500 : 300) : 600, trace);
         WaitForVBlank();  // 拍到的是画好的，等它上屏
         WaitForVBlank();
         double painted = NowMs() - start;
@@ -915,7 +924,7 @@ void RevealWhenBack(UINT session) {
     }
     if (!Current(session)) return;  // 又打开了自动隐藏：图标接着藏着
     Log(L"关掉自动隐藏后 %.0f 毫秒图标排回原位", NowMs() - start);
-    ShowIcons();
+    ShowIcons(AtSaved(last));
 }
 
 // 这一轮用完了：会话没变（没有又打开自动隐藏）就丢掉记下的位置，下次打开前重新记

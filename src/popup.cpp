@@ -116,6 +116,7 @@ HWND s_thumbShown = nullptr;   // 正显示着缩略图的窗口
 int s_thumbIdx = -1;
 HWND s_prevForeground = nullptr;
 RECT s_bounds = {};  // 弹窗摆放的范围：任务栏露着时是工作区，藏起来时是整块屏幕
+int s_trayRowMax = 8;  // 一行大图标时托盘图标最多同时显示几个（竖排时屏幕放不下就少显示几个）
 float s_scale = 1.0f;
 Layout s_L = {};
 int s_width = 0, s_height = 0;
@@ -188,6 +189,7 @@ bool s_compact = false;       // 这次弹出只有一行格子、贴着屏幕�
 bool s_startPending = false;  // 弹出动画放完就打开开始菜单
 bool s_startMode = false;     // 开始菜单打开了（或者正在打开），迷你任务栏跟着它收起
 bool s_startSeen = false;     // 开始菜单到过前台
+std::wstring s_startTyped;    // 开始菜单出来之前打的字（回车记成 \r），出来以后补发给它
 DWORD s_startAt = 0;          // 补发 Win 的时间
 double s_startClosedAt = -1e9;  // 开始菜单开着时点到迷你任务栏上（开始菜单自己关了）的时间
 
@@ -248,10 +250,11 @@ void ComputeLayout() {
     // 托盘图标：一行大图标时最多同时显示 kMaxTrayRow 个，多的滚着看；堆叠时 2×2 一页，和窗口格子一样大，多的翻页看。
     // 竖排时“一行大图标”样式的格子竖着一个个往下排
     int trayCount = static_cast<int>(s_tray.size());
+    s_trayRowMax = kMaxTrayRow;
     if (s_trayStyle == kTrayRow) {
         L.cellW = vertical ? L.tile : Px(40);
         L.cellH = vertical ? Px(40) : L.tile;
-        L.trayW = std::min(trayCount, kMaxTrayRow) * (vertical ? L.cellH : L.cellW);
+        L.trayW = std::min(trayCount, s_trayRowMax) * (vertical ? L.cellH : L.cellW);
     } else {
         L.cellW = L.cellH = L.tile / 2;
         L.trayW = trayCount > 0 ? L.tile : 0;
@@ -262,6 +265,15 @@ void ComputeLayout() {
     if (vertical) {
         // 从上到下：开始按钮、格子、托盘图标、时钟、两根竖的调节条、Wi-Fi 和蓝牙按钮
         float radiosH = s_radioCount > 0 ? Px(8) + s_radioCount * L.radioH + (s_radioCount - 1) * L.radioGap : 0;
+        // 屏幕不够高时至少留一个窗口格子：托盘图标少显示几个（多的滚着看），还不够就把调节条变短
+        float room = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - L.tile -
+                     (2 * L.pad + L.tile + 2 * L.sep + traySep + L.clockH + L.rowGap + L.sliderH + radiosH);
+        if (s_trayStyle == kTrayRow && trayCount > 0 && L.trayW > room) {
+            s_trayRowMax = std::clamp(static_cast<int>(room / L.cellH), 1, kMaxTrayRow);
+            L.trayW = std::min(trayCount, s_trayRowMax) * L.cellH;
+        }
+        if (s_levels && L.trayW > room) L.sliderH = std::max(Px(72), L.sliderH - (L.trayW - room));
+        s_trayFirst = std::clamp(s_trayFirst, 0, std::max(0, trayCount - s_trayRowMax));
         float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockH + L.rowGap + L.sliderH + radiosH;
         float avail = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - others;
         s_visible = std::min(n, std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap))));
@@ -428,12 +440,12 @@ int RadioAt(int x, int y) {
 int TrayCells() { return static_cast<int>(s_tray.size()); }
 
 // 一行大图标时同时显示几个
-int TrayRowVisible() { return std::min(TrayCells(), kMaxTrayRow); }
+int TrayRowVisible() { return std::min(TrayCells(), s_trayRowMax); }
 
 int TrayPages() { return s_trayStyle == kTrayRow ? 1 : (static_cast<int>(s_tray.size()) + 3) / 4; }
 
 // 托盘图标多到要翻页（堆叠）或者滚动（一行大图标）
-bool TrayScrolls() { return s_trayStyle == kTrayRow ? TrayCells() > kMaxTrayRow : TrayPages() > 1; }
+bool TrayScrolls() { return s_trayStyle == kTrayRow ? TrayCells() > s_trayRowMax : TrayPages() > 1; }
 
 // 托盘图标那一段的左上角
 PointF TrayOrigin() { return Vertical() ? PointF(s_L.colX, s_L.trayY) : PointF(s_L.trayX, s_L.tileY); }
@@ -1229,6 +1241,7 @@ bool MouseButtonDown() {
 
 void EndStartMode() {
     s_startPending = s_startMode = false;
+    s_startTyped.clear();
     KillTimer(s_hwnd, kTimerStart);
 }
 
@@ -1855,6 +1868,10 @@ void BeginStart() {
 void NoteStartSeen(HWND start) {
     if (s_startSeen) return;
     s_startSeen = true;
+    if (!s_startTyped.empty()) {  // 弹出期间就开始打字了：补发给开始菜单的搜索框
+        SendText(s_startTyped);
+        s_startTyped.clear();
+    }
     RECT r = {};
     GetWindowRect(start, &r);
     Log(L"开始菜单出来了（%ld,%ld - %ld,%ld），迷你任务栏面板顶边在 %d", r.left, r.top, r.right, r.bottom,
@@ -2157,6 +2174,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_KEYDOWN:
+            // 短按 Win 弹出、开始菜单还没出来：回车、空格是要给开始菜单的（在 WM_CHAR 里记下），别打开或最小化选中的窗口
+            if (s_compact && !s_startSeen && (s_startPending || s_startMode) && (wParam == VK_RETURN || wParam == VK_SPACE))
+                return 0;
             switch (wParam) {
                 case VK_LEFT:
                     if (!FlipTrayUnderMouse(-1)) MoveSelection(-1);
@@ -2197,8 +2217,14 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CHAR: {
-            if (s_compact) return 0;  // 开始菜单模式没有显示打的字的地方
             wchar_t ch = static_cast<wchar_t>(wParam);
+            if (s_compact) {  // 开始菜单模式没有显示打的字的地方：开始菜单还没出来就先记下，出来以后补发给它
+                if (!s_startSeen && (s_startPending || s_startMode) && (ch >= 0x20 || ch == L'\r')) {
+                    s_startTyped += ch;
+                    if (s_startPending) BeginStart();  // 打字了就不等动画，马上打开开始菜单
+                }
+                return 0;
+            }
             if (ch == L'\b') {
                 if (s_filter.empty()) return 0;
                 s_filter.pop_back();
@@ -2311,6 +2337,8 @@ void Open(bool preview, bool startMenu = false) {
     if (!s_hwnd) return;
     s_preview = preview;
     s_edge = preview ? s_previewEdge : g_settings.popupEdge;
+    // 开始菜单靠左时会盖住贴在左边的那一列：这时从底边弹
+    if (startMenu && s_edge == kEdgeLeft && !SystemTaskbarCentered()) s_edge = kEdgeBottom;
     KillTimer(s_hwnd, kTimerPreview);
     EndStartMode();
     s_compact = startMenu;
@@ -2434,6 +2462,7 @@ void Popup_PreviewGlass(bool frosted, bool light, int transparency) {
     if (!s_hwnd || !s_open || !s_preview) return;
     if (restyle) {  // 毛玻璃模糊得更厉害，要重新截背景：收起，接下来的 Popup_Preview 再弹出来
         HideNow();
+        WaitForVBlank();  // 等屏幕上没了它再截，不然新背景里会有它的残影
         return;
     }
     s_glass.SetLight(light);
@@ -2445,7 +2474,10 @@ void Popup_PreviewGlass(bool frosted, bool light, int transparency) {
 void Popup_Preview(int percent, int edge, int align, bool hold) {
     if (!s_hwnd || (s_open && !s_preview)) return;  // 真的弹出着就不打扰
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
-    if (s_open && edge != s_previewEdge) HideNow();  // 换了边：重新截背景，从新的那条边弹出来
+    if (s_open && edge != s_previewEdge) {  // 换了边：重新截背景，从新的那条边弹出来
+        HideNow();
+        WaitForVBlank();
+    }
     if (!s_open) {
         s_previewPercent = percent;
         s_previewEdge = edge;

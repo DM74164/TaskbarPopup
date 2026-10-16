@@ -82,6 +82,7 @@ UINT s_autoHideSeq = 0;       // 给动画线程的开 / 关请求编号：动�
 DWORD s_autoHideAskedAt = 0;  // 上次让动画线程打开自动隐藏的时间
 HMONITOR s_targetMonitor = nullptr;
 HWND s_targetWindow = nullptr;
+DWORD s_selfSizedAt = 0;  // 目标从什么时候起自己缩成了没铺满的大小，0 = 没有
 HWND s_minimizing = nullptr;  // 刚开始最小化的目标窗口（事件比窗口状态变化早一点到）
 DWORD s_minimizingTick = 0;
 bool s_enabled = false;
@@ -977,7 +978,10 @@ void EvaluateNow(bool enforce) {
     // 目标自己缩成了没铺满的大小：刚打开自动隐藏时先接着藏着任务栏、请它铺满；
     // 过了这段时间还不行就算它不肯，不然任务栏会一直上下伸缩
     if (!target && SelfSized(fg)) {
-        if (InSelfSizeGrace()) {
+        // 刚打开自动隐藏的那段时间以外，要一直这样半秒才算（改分辨率之类时窗口会短暂不对）
+        DWORD now = GetTickCount();
+        if (!s_selfSizedAt) s_selfSizedAt = now ? now : 1;
+        if (InSelfSizeGrace() || now - s_selfSizedAt < 500) {
             target = s_targetMonitor;
             window = fg;
         } else {
@@ -987,6 +991,8 @@ void EvaluateNow(bool enforce) {
             a.last = 0;
             Log(L"%ls 自己缩成了没铺满的大小，在它还原或换屏幕之前不再为它隐藏任务栏", Describe(fg).c_str());
         }
+    } else {
+        s_selfSizedAt = 0;
     }
     // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
     // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏。
