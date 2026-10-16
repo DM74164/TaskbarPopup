@@ -7,7 +7,7 @@ It should also work on Windows 10, since every system function it uses exists th
 
 A Windows 11 taskbar enhancement: when a window is maximized, the taskbar hides and the window fills the whole screen. Hold the Win key and a liquid-glass mini taskbar pops up from the bottom of the screen. Single exe, no runtime to install.
 
-> The app's interface is in Chinese. Menu and setting names below are given in English with the Chinese label in parentheses.
+> The app's interface is in Chinese. The clips below show it translated to English for illustration, and menu and setting names are given in English with the Chinese label in parentheses.
 
 Demo video: [Bilibili](https://www.bilibili.com/video/BV1BLp963E7e/)
 
@@ -17,43 +17,43 @@ Demo video: [Bilibili](https://www.bilibili.com/video/BV1BLp963E7e/)
 
 Maximize a window and the taskbar slides away while the window fills the screen. Restore, minimize or close it and the taskbar slides back, with your desktop icons right where they were.
 
-![The taskbar slides away and the maximized window fills the screen](docs/demo/fullscreen.webp)
+![The taskbar slides away and the maximized window fills the screen](docs/demo/en/fullscreen.webp)
 
 ### Hold Win for the mini taskbar
 
 Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom: pinned apps, open windows, hidden tray icons, the clock, plus volume and brightness sliders. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
 
-![Hold Win and the mini taskbar rises from the bottom](docs/demo/popup.webp)
+![Hold Win and the mini taskbar rises from the bottom](docs/demo/en/popup.webp)
 
 ### Type to filter
 
 Start typing once it's open to filter windows and pinned apps. Programs from the Start menu show up too. Press Enter to open.
 
-![Type to filter, including Start menu programs](docs/demo/filter.webp)
+![Type to filter, including Start menu programs](docs/demo/en/filter.webp)
 
 ### Right-click menu
 
 Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Tick "Don't hide the taskbar when maximized" (最大化时不隐藏任务栏) to exclude an app. Middle-click an icon to close the window.
 
-![Right-click menu with recent files, run as admin, open file location and close all](docs/demo/menu.webp)
+![Right-click menu with recent files, run as admin, open file location and close all](docs/demo/en/menu.webp)
 
 ### Keep small windows on top
 
 Double-click a small floating window (or use a hotkey) and it stays on top even when you click the full-screen window behind it.
 
-![Double-click a small window and it is no longer covered by the full-screen window](docs/demo/pin.webp)
+![Double-click a small window and it is no longer covered by the full-screen window](docs/demo/en/pin.webp)
 
 ### Hotkeys
 
 Set one hotkey to open the mini taskbar and one to pin a small window. Key combos, single keys and mouse buttons all work, triggered by a tap or a hold. None are set by default.
 
-![Hotkeys can be key combos, single keys or mouse buttons](docs/demo/hotkeys.webp)
+![Hotkeys can be key combos, single keys or mouse buttons](docs/demo/en/hotkeys.webp)
 
 ### Appearance
 
 Choose liquid glass or frosted glass, and follow-system, light or dark colors. The mini taskbar's size (50 – 200%) and position (follow system, center, left, right) preview live as you change them.
 
-![Liquid or frosted glass, light or dark, and size all preview live](docs/demo/appearance.webp)
+![Liquid or frosted glass, light or dark, and size all preview live](docs/demo/en/appearance.webp)
 
 ## Download
 
