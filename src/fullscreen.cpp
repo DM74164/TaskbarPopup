@@ -847,15 +847,17 @@ bool IsTransient(HWND hwnd) {
     return IsOwnProcess(hwnd) || InList(GetClassNameStr(hwnd), kTransientClasses);
 }
 
-// 窗口属于排除名单里的程序（最大化时不隐藏任务栏）。按进程记住上一次的结果，不用每次都查程序路径
+// 这个窗口最大化时不隐藏任务栏：“最大化或全屏时隐藏任务栏”开着时是名单里的程序，关着时是名单外的程序。
+// 按进程记住上一次的程序名，不用每次都查程序路径
 bool IsExcluded(HWND hwnd) {
     static HWND lastApp = nullptr;
     static DWORD lastPid = 0;
     static std::wstring lastExe;
-    if (g_settings.excludeApps.empty()) {
+    bool hideByDefault = g_settings.autoHideOnFullscreen;
+    if (ExceptionApps().empty()) {
         lastApp = nullptr;
         lastPid = 0;
-        return false;
+        return !hideByDefault;
     }
     // 窗口和进程都没变才用记下的：进程号会被新进程重用
     HWND app = AppWindowTarget(hwnd);
@@ -866,7 +868,7 @@ bool IsExcluded(HWND hwnd) {
         lastPid = pid;
         lastExe = WindowExeName(app);
     }
-    return IsExcludedExe(lastExe);
+    return IsExceptionExe(lastExe) == hideByDefault;
 }
 
 // 窗口最大化或铺满整个显示器时返回该显示器，否则返回 nullptr
@@ -949,7 +951,7 @@ void EvaluateNow(bool enforce) {
     HWND window = target ? fg : nullptr;
     // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
     // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏。
-    // 前台是排除名单里的程序、而且它自己最大化着时除外：用户要的是它在前台时看得到任务栏
+    // 前台是最大化时不隐藏任务栏的程序、而且它自己最大化着时除外：用户要的是它在前台时看得到任务栏
     bool excludedOnTop = fg && IsZoomed(fg) && IsExcluded(fg);
     if (!target && fg && !excludedOnTop && s_targetWindow && fg != s_targetWindow && IsWindow(s_targetWindow) &&
         GetTargetMonitor(s_targetWindow) == s_targetMonitor) {

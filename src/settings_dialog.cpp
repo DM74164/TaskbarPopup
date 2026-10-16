@@ -117,9 +117,14 @@ struct Values {
     int seg[kSegCount] = {};
     UINT hotkey[kHotkeyCount] = {};
     bool hold[kHotkeyCount] = {};
-    std::vector<std::wstring> exclude;
+    std::vector<std::wstring> exclude;  // 最大化时不隐藏任务栏的程序
+    std::vector<std::wstring> include;  // 最大化时隐藏任务栏的程序（关着“最大化或全屏时隐藏任务栏”时用）
 };
 Values s_v, s_initial;
+
+// 窗口里现在显示的名单：跟着“最大化或全屏时隐藏任务栏”那个开关换
+std::vector<std::wstring>& ShownApps() { return s_v.on[kAutoHide] ? s_v.exclude : s_v.include; }
+const wchar_t* AppsTitle() { return s_v.on[kAutoHide] ? L"最大化时不隐藏任务栏的程序" : L"最大化时隐藏任务栏的程序"; }
 
 struct Palette {
     Color text, subtle, card, cardRim, separator, accent, onAccent, trackOff, knob, button, buttonHot, textShadow, hover,
@@ -307,8 +312,9 @@ float ChipsRow(float x, float y, float w) {
         cx += chipW + Px(8);
         return r;
     };
-    for (size_t i = 0; i < s_v.exclude.size(); ++i) {
-        float chipW = MeasureWidth(s_v.exclude[i], Px(12.5f)) + Px(12 + 6 + 14);
+    const std::vector<std::wstring>& apps = ShownApps();
+    for (size_t i = 0; i < apps.size(); ++i) {
+        float chipW = MeasureWidth(apps[i], Px(12.5f)) + Px(12 + 6 + 14);
         s_items.push_back({kChip, static_cast<int>(i), place(chipW)});
     }
     s_items.push_back({kAddChip, 0, place(MeasureWidth(Tr(L"＋ 添加程序"), Px(12.5f)) + Px(24))});
@@ -327,7 +333,7 @@ float BuildPage(int page, float x, float y) {
             std::vector<RowFn> floats = {[](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
             if (s_v.on[kKeepFloats]) floats.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
             y = AddGroup(x, y, L"小窗口", floats);
-            return AddGroup(x, y, L"最大化时不隐藏任务栏的程序", {ChipsRow});
+            return AddGroup(x, y, AppsTitle(), {ChipsRow});
         }
         case kPageMini: {
             // 长按 Win 关着时收起长按时长
@@ -687,7 +693,7 @@ void DrawChip(Graphics& g, const Item& it) {
     }
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
     RectF textRect(r.X + Px(12), r.Y, r.Width - Px(12 + 6 + 14), r.Height);
-    DrawText(g, s_v.exclude[it.index], Px(12.5f), FontStyleRegular, textRect, pal.text);
+    DrawText(g, ShownApps()[it.index], Px(12.5f), FontStyleRegular, textRect, pal.text);
     // 右边的小叉：鼠标放上去时变成强调色
     float cx = r.X + r.Width - Px(13), cy = r.Y + r.Height / 2, a = Px(3.5f);
     Pen pen(hot ? pal.accent : pal.subtle, Px(1.4f));
@@ -1142,7 +1148,8 @@ void SetToggle(int which, bool on) {
     s_knobFrom[which] = s_knob[which];
     s_knobStart[which] = NowMs();
     StartAnimation();
-    if (which == kKeepFloats || which == kLongPress || which == kTray) Relayout(true);  // 跟着收起 / 放出来的行
+    // 跟着收起 / 放出来的行；“最大化或全屏时隐藏任务栏”换的是下面那个名单
+    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kTray) Relayout(true);
 }
 
 void EndCapture();
@@ -1305,18 +1312,20 @@ void SetHotkeyMode(int which, bool hold) {
 
 void AddExclude(const std::wstring& path) {
     std::wstring name = NormalizeExeName(path);
-    if (name.empty() || std::find(s_v.exclude.begin(), s_v.exclude.end(), name) != s_v.exclude.end()) return;
-    s_v.exclude.push_back(name);
+    std::vector<std::wstring>& apps = ShownApps();
+    if (name.empty() || std::find(apps.begin(), apps.end(), name) != apps.end()) return;
+    apps.push_back(name);
     Relayout(true);
 }
 
 void RemoveExclude(int index) {
-    if (index < 0 || index >= static_cast<int>(s_v.exclude.size())) return;
-    s_v.exclude.erase(s_v.exclude.begin() + index);
+    std::vector<std::wstring>& apps = ShownApps();
+    if (index < 0 || index >= static_cast<int>(apps.size())) return;
+    apps.erase(apps.begin() + index);
     s_hover = s_press = {};
     // 焦点在被去掉的那个上：移到同一位置的下一个（没有了就落到“添加程序”上）
-    if (s_focus.kind == kChip && s_focus.index >= static_cast<int>(s_v.exclude.size()))
-        s_focus = s_v.exclude.empty() ? Item{kAddChip, 0, {}} : Item{kChip, static_cast<int>(s_v.exclude.size()) - 1, {}};
+    if (s_focus.kind == kChip && s_focus.index >= static_cast<int>(apps.size()))
+        s_focus = apps.empty() ? Item{kAddChip, 0, {}} : Item{kChip, static_cast<int>(apps.size()) - 1, {}};
     Relayout(true);
 }
 
@@ -1327,7 +1336,7 @@ std::wstring BrowseExe() {
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return result;
     COMDLG_FILTERSPEC filter[] = {{Tr(L"程序 (*.exe)"), L"*.exe"}};
     dialog->SetFileTypes(1, filter);
-    dialog->SetTitle(Tr(L"选择最大化时不隐藏任务栏的程序"));
+    dialog->SetTitle(Tr(s_v.on[kAutoHide] ? L"选择最大化时不隐藏任务栏的程序" : L"选择最大化时隐藏任务栏的程序"));
     if (SUCCEEDED(dialog->Show(s_hwnd))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item))) {
@@ -1361,8 +1370,9 @@ std::vector<std::wstring> RunningExeNames() {
         },
         reinterpret_cast<LPARAM>(&ctx));
     std::vector<std::wstring> list;
+    const std::vector<std::wstring>& apps = ShownApps();
     for (const std::wstring& name : ctx.names)
-        if (std::find(s_v.exclude.begin(), s_v.exclude.end(), name) == s_v.exclude.end()) list.push_back(name);
+        if (std::find(apps.begin(), apps.end(), name) == apps.end()) list.push_back(name);
     std::sort(list.begin(), list.end());
     if (list.size() > 20) list.resize(20);
     return list;
@@ -1424,11 +1434,15 @@ void Apply() {
     auto contains = [](const std::vector<std::wstring>& list, const std::wstring& name) {
         return std::find(list.begin(), list.end(), name) != list.end();
     };
-    std::vector<std::wstring>& current = g_settings.excludeApps;
-    for (const std::wstring& name : s_initial.exclude)
-        if (!contains(s_v.exclude, name)) current.erase(std::remove(current.begin(), current.end(), name), current.end());
-    for (const std::wstring& name : s_v.exclude)
-        if (!contains(s_initial.exclude, name) && !contains(current, name)) current.push_back(name);
+    auto merge = [&](const std::vector<std::wstring>& before, const std::vector<std::wstring>& after,
+                     std::vector<std::wstring>& current) {
+        for (const std::wstring& name : before)
+            if (!contains(after, name)) current.erase(std::remove(current.begin(), current.end(), name), current.end());
+        for (const std::wstring& name : after)
+            if (!contains(before, name) && !contains(current, name)) current.push_back(name);
+    };
+    merge(s_initial.exclude, s_v.exclude, g_settings.excludeApps);
+    merge(s_initial.include, s_v.include, g_settings.includeApps);
 
     SaveSettings();
     if (changed(kAutoStart)) SetAutoStart(s_v.on[kAutoStart]);
@@ -1872,6 +1886,7 @@ void SettingsDialog_Show() {
         s_hotkeyError[i].clear();
     }
     s_initial.exclude = g_settings.excludeApps;
+    s_initial.include = g_settings.includeApps;
     s_v = s_initial;
     for (int i = 0; i < kToggleCount; ++i) s_knob[i] = s_v.on[i] ? 1.0f : 0.0f;
     s_hover = s_press = s_focus = {};

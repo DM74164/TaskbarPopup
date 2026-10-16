@@ -69,12 +69,17 @@ struct Settings {
     int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
-    std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序：小写的程序文件名，如 notepad.exe
+    // 名单里是小写的程序文件名，如 notepad.exe。“最大化或全屏时隐藏任务栏”开着时用 excludeApps，关着时用 includeApps
+    std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序
+    std::vector<std::wstring> includeApps;  // 最大化时隐藏任务栏的程序
 };
 
 std::wstring NormalizeExeName(const std::wstring& text);  // 路径或名字 → 小写文件名，没写扩展名的补上 .exe
-bool IsExcludedExe(const std::wstring& exeName);           // exeName 已经是 NormalizeExeName 的结果
-void SetExcluded(const std::wstring& exeName, bool excluded);  // 改排除名单、保存并重新判断要不要藏任务栏
+bool InAppList(const std::vector<std::wstring>& list, const std::wstring& exeName);  // exeName 已经是 NormalizeExeName 的结果
+// 现在用的名单：“最大化或全屏时隐藏任务栏”开着时是不隐藏的程序，关着时是隐藏的程序
+std::vector<std::wstring>& ExceptionApps();
+bool IsExceptionExe(const std::wstring& exeName);              // 在现在用的名单里
+void SetException(const std::wstring& exeName, bool listed);  // 改现在用的名单、保存并重新判断要不要藏任务栏
 
 constexpr int kMinPopupScale = 50;
 constexpr int kMaxPopupScale = 200;

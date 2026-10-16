@@ -1569,7 +1569,7 @@ POINT MenuAnchor(const RectF& r) {  // 客户区坐标
 
 // 右键格子：尽量和系统任务栏的右键菜单一样。
 // 运行中的窗口：跳转列表的“最近”项；应用名（再开一个）、以管理员身份运行、打开文件所在的位置；
-// 还原 / 最小化 / 最大化；“最大化时不隐藏任务栏”；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
+// 还原 / 最小化 / 最大化；“最大化时不隐藏任务栏”（关着“最大化或全屏时隐藏任务栏”时是“最大化时隐藏任务栏”）；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
 // 没运行的固定应用、打字筛选出来的应用：“最近”项；打开、以管理员身份运行、打开文件所在的位置。
 // at：菜单的位置（客户区坐标），对齐方式见 MenuAlign
 void ShowItemMenu(int idx, POINT at) {
@@ -1628,7 +1628,8 @@ void ShowItemMenu(int idx, POINT at) {
         AppendMenuW(menu, MF_STRING | (iconic ? MF_GRAYED : 0), kCmdMinimize, Tr(L"最小化"));
         AppendMenuW(menu, MF_STRING | (!zoomed && canMaximize ? 0 : MF_GRAYED), kCmdMaximize, Tr(L"最大化"));
         if (!exeName.empty())
-            AppendMenuW(menu, MF_STRING | (IsExcludedExe(exeName) ? MF_CHECKED : 0), kCmdExclude, Tr(L"最大化时不隐藏任务栏"));
+            AppendMenuW(menu, MF_STRING | (IsExceptionExe(exeName) ? MF_CHECKED : 0), kCmdExclude,
+                        Tr(g_settings.autoHideOnFullscreen ? L"最大化时不隐藏任务栏" : L"最大化时隐藏任务栏"));
         separate();
         AppendMenuW(menu, MF_STRING, kCmdClose, Tr(L"关闭窗口"));
         if (same.size() > 1) {
@@ -1656,7 +1657,7 @@ void ShowItemMenu(int idx, POINT at) {
         return;
     }
     switch (cmd) {
-        case kCmdExclude: SetExcluded(exeName, !IsExcludedExe(exeName)); return;
+        case kCmdExclude: SetException(exeName, !IsExceptionExe(exeName)); return;
         case kCmdLaunch: Launch(app.launch); return;
         case kCmdRunAs:
             RunAsAdmin(s_hwnd, app.runAs);

@@ -390,16 +390,20 @@ void LoadSettings() {
         int holdMs = static_cast<int>(GetPrivateProfileIntW(L"General", (hold + L"Ms").c_str(), g_settings.longPressMs, f.c_str()));
         g_settings.hotkeyHoldMs[id] = std::max(kMinLongPressMs, std::min(holdMs, kMaxLongPressMs));
     }
-    GetPrivateProfileStringW(L"General", L"ExcludeApps", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
-    g_settings.excludeApps.clear();
-    std::wstring list = buf.data();
-    for (size_t start = 0; start <= list.size();) {
-        size_t end = list.find(L';', start);
-        if (end == std::wstring::npos) end = list.size();
-        std::wstring name = NormalizeExeName(list.substr(start, end - start));
-        if (!name.empty() && !IsExcludedExe(name)) g_settings.excludeApps.push_back(name);
-        start = end + 1;
-    }
+    auto loadList = [&](const wchar_t* key, std::vector<std::wstring>& apps) {
+        GetPrivateProfileStringW(L"General", key, L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+        apps.clear();
+        std::wstring list = buf.data();
+        for (size_t start = 0; start <= list.size();) {
+            size_t end = list.find(L';', start);
+            if (end == std::wstring::npos) end = list.size();
+            std::wstring name = NormalizeExeName(list.substr(start, end - start));
+            if (!name.empty() && !InAppList(apps, name)) apps.push_back(name);
+            start = end + 1;
+        }
+    };
+    loadList(L"ExcludeApps", g_settings.excludeApps);
+    loadList(L"IncludeApps", g_settings.includeApps);
 }
 
 void SaveSettings() {
@@ -431,9 +435,13 @@ void SaveSettings() {
         WritePrivateProfileStringW(L"General", (hold + L"Ms").c_str(), std::to_wstring(g_settings.hotkeyHoldMs[id]).c_str(),
                                    f.c_str());
     }
-    std::wstring exclude;
-    for (const std::wstring& name : g_settings.excludeApps) exclude += (exclude.empty() ? L"" : L";") + name;
-    WritePrivateProfileStringW(L"General", L"ExcludeApps", exclude.c_str(), f.c_str());
+    auto saveList = [&](const wchar_t* key, const std::vector<std::wstring>& apps) {
+        std::wstring text;
+        for (const std::wstring& name : apps) text += (text.empty() ? L"" : L";") + name;
+        WritePrivateProfileStringW(L"General", key, text.c_str(), f.c_str());
+    };
+    saveList(L"ExcludeApps", g_settings.excludeApps);
+    saveList(L"IncludeApps", g_settings.includeApps);
 }
 
 bool GetRestoreAutoHideFlag() {
@@ -486,7 +494,8 @@ void ApplySettings() {
         Shell_NotifyIconW(NIM_MODIFY, &s_nid);
         s_nid.uFlags = flags;
     }
-    Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen);
+    // 关着“最大化或全屏时隐藏任务栏”时，名单里有程序也要看着前台（只给名单里的程序藏任务栏）
+    Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen || !g_settings.includeApps.empty());
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
     Update_Configure();
     FloatWindows_Configure(g_settings.keepFloatsOnTop, g_settings.pinTopmost);
