@@ -129,6 +129,9 @@ bool s_preview = false;      // 设置窗口里调大小时的预览：不抢前
 int s_previewPercent = 100;  // 预览用的大小，百分比
 int s_previewAlign = kAlignSystem;  // 预览用的对齐，见 PopupAlign
 int s_previewEdge = kEdgeBottom;    // 预览用的边，见 PopupEdge
+bool s_previewFrosted = false;      // 预览用的玻璃，见 Popup_PreviewGlass
+bool s_previewLight = false;
+int s_previewTransparency = kDefaultGlassTransparency;
 int s_edge = kEdgeBottom;           // 这次弹在哪条边（弹出时按设置定下来）
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
@@ -2360,8 +2363,11 @@ void Open(bool preview, bool startMenu = false) {
         else if (s_edge == kEdgeRight) window = {s_bounds.right - w, s_bounds.top, s_bounds.right, s_bounds.bottom};
         else window = {s_bounds.left, s_bounds.bottom - h, s_bounds.right, s_bounds.bottom};
     }
-    s_glass.SetLight(ThemeIsLight(g_settings.theme, true));
-    s_glass.SetFrosted(g_settings.glassStyle == kGlassFrosted);
+    bool light = preview ? s_previewLight : ThemeIsLight(g_settings.theme, true);
+    s_glass.SetLight(light);
+    s_glass.SetFrosted(preview ? s_previewFrosted : g_settings.glassStyle == kGlassFrosted);
+    s_glass.SetTransparency(preview ? s_previewTransparency
+                                    : light ? g_settings.lightTransparency : g_settings.darkTransparency);
     s_glass.Capture(window, s_scale);
 
     s_first = 0;
@@ -2393,6 +2399,22 @@ void Open(bool preview, bool startMenu = false) {
 }  // namespace
 
 void Popup_Show() { Open(false); }
+
+void Popup_PreviewGlass(bool frosted, bool light, int transparency) {
+    bool restyle = frosted != s_previewFrosted;
+    s_previewFrosted = frosted;
+    s_previewLight = light;
+    s_previewTransparency = transparency;
+    if (!s_hwnd || !s_open || !s_preview) return;
+    if (restyle) {  // 毛玻璃模糊得更厉害，要重新截背景：收起，接下来的 Popup_Preview 再弹出来
+        HideNow();
+        return;
+    }
+    s_glass.SetLight(light);
+    s_glass.SetTransparency(transparency);
+    s_baseValid = false;
+    Redraw();
+}
 
 void Popup_Preview(int percent, int edge, int align, bool hold) {
     if (!s_hwnd || (s_open && !s_preview)) return;  // 真的弹出着就不打扰
