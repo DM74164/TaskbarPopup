@@ -58,6 +58,7 @@ constexpr DWORD kRequestWindowMs = 10000;
 constexpr int kMaxRequests = 3;       // kRequestWindowMs 里最多发这么多次，还要再发就算它拒绝
 constexpr DWORD kReshowMs = 3000;     // 刚藏起来又被资源管理器显示出来时，不再播动画，直接藏
 constexpr DWORD kPeekMs = 3000;       // 托盘图标那边临时显示任务栏以后，这么久之内不把它藏回去
+constexpr DWORD kSelfSizeMs = 2000;   // 打开自动隐藏以后，最大化的窗口自己缩成没铺满的大小时，这么久之内接着请它铺满
 
 std::vector<Hidden> s_hidden;
 HWND s_peekTaskbar = nullptr;  // 托盘图标那边临时显示着的任务栏（Fullscreen_PeekTaskbar）
@@ -394,6 +395,9 @@ bool CanFill(HWND hwnd, HMONITOR monitor) {
     return MaximizedBorder(monitor, mi, cur, border);
 }
 
+bool SelfSized(HWND hwnd);
+bool InSelfSizeGrace();
+
 // 算出最大化窗口铺满整块屏幕的位置。返回 false 表示这次不用发请求：
 // 已经铺满了、本来就铺满（任务栏自动隐藏或不在这块屏上）、请求还在等程序处理、或者它不肯被拉伸
 bool PlanStretch(HWND hwnd, HMONITOR monitor, RECT& want) {
@@ -422,7 +426,11 @@ bool PlanStretch(HWND hwnd, HMONITOR monitor, RECT& want) {
 
     // 最大化的窗口边框会伸出工作区几个像素，铺满屏幕时保持同样的伸出量
     RECT border;
-    if (!MaximizedBorder(monitor, mi, cur, border)) return false;
+    if (!MaximizedBorder(monitor, mi, cur, border)) {
+        // 刚打开自动隐藏它就自己缩小了（见 SelfSized）：照上次的边框接着请它铺满
+        if (!s || s->monitor != monitor || !InSelfSizeGrace() || !SelfSized(hwnd)) return false;
+        border = s->border;
+    }
     want = Inflate(FillArea(monitor, mi), border);
     if (Near(want, cur, tol)) {
         // 已经铺满了：打开自动隐藏以后，程序自己就照着新的工作区摆好了
@@ -896,6 +904,21 @@ HMONITOR GetTargetMonitor(HWND hwnd) {
     return covers ? mon : nullptr;
 }
 
+// 本程序为它打开了自动隐藏，它却还最大化在原来的屏幕上、自己缩成了没铺满的大小：
+// 拓竹切片会照任务栏原来的位置留出底边，也不理拉伸请求
+bool SelfSized(HWND hwnd) {
+    if (!hwnd || hwnd != s_targetWindow || !s_ownAutoHide || s_offRequested) return false;
+    if (!IsZoomed(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd) || IsCloaked(hwnd)) return false;
+    if (hwnd == s_minimizing && GetTickCount() - s_minimizingTick < 1000) return false;
+    if (Refuses(hwnd) || IsExcluded(hwnd) || OutranksUs(hwnd)) return false;
+    return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) == s_targetMonitor && !CanFill(hwnd, s_targetMonitor);
+}
+
+// 刚打开自动隐藏不久：任务栏挪到自动隐藏的位置以后，它可能就肯铺满了
+bool InSelfSizeGrace() {
+    return GetTickCount() - (s_autoHideConfirmed ? s_autoHideOnAt : s_autoHideAskedAt) < kSelfSizeMs;
+}
+
 void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD);
 void Evaluate(bool enforce);
 
@@ -951,6 +974,20 @@ void EvaluateNow(bool enforce) {
 
     HMONITOR target = fg ? GetTargetMonitor(fg) : nullptr;
     HWND window = target ? fg : nullptr;
+    // 目标自己缩成了没铺满的大小：刚打开自动隐藏时先接着藏着任务栏、请它铺满；
+    // 过了这段时间还不行就算它不肯，不然任务栏会一直上下伸缩
+    if (!target && SelfSized(fg)) {
+        if (InSelfSizeGrace()) {
+            target = s_targetMonitor;
+            window = fg;
+        } else {
+            Attempt& a = AttemptFor(fg);
+            a.refused = true;
+            a.monitor = s_targetMonitor;
+            a.last = 0;
+            Log(L"%ls 自己缩成了没铺满的大小，在它还原或换屏幕之前不再为它隐藏任务栏", Describe(fg).c_str());
+        }
+    }
     // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
     // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏。
     // 前台是最大化时不隐藏任务栏的程序、而且它自己最大化着时除外：用户要的是它在前台时看得到任务栏
