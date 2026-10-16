@@ -181,6 +181,7 @@ RectF s_radioRects[kRadioCount];
 RadioInfo s_radio[kRadioCount];    // 最近读到的样子
 int s_hoverRadio = -1;             // 鼠标下的按钮（第几个）
 int s_radioFailed = 0;             // 切换失败的开关（1 << RadioId）：鼠标离开那个按钮之前标题一直说失败了
+int s_radioPolls = 0;              // 弹出以后为了等 Wi-Fi 连上网络又读了几遍
 
 // 任务栏藏着时短按 Win：迷你任务栏弹完再打开开始菜单，开始菜单开着时它一直在
 bool s_compact = false;       // 这次弹出只有一行格子、贴着屏幕底边，给开始菜单让地方
@@ -1952,6 +1953,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kTimerClock) {
                 if (s_levels && s_drag != kVolumeTrack) RefreshVolume();  // 别处改了音量（键盘上的音量键）也跟着变
+                // Wi-Fi 刚打开、还没连上网络：每 2 秒再读一遍，连上了标题就显示网络名
+                const RadioInfo& wifi = s_radio[kRadioWifi];
+                if (std::find(s_radioIds, s_radioIds + s_radioCount, kRadioWifi) != s_radioIds + s_radioCount &&
+                    wifi.status == kRadioOn && !wifi.switching && wifi.network.empty() && s_radioPolls < 30 &&
+                    ++s_radioPolls % 2 == 0)
+                    Radios_Query(s_hwnd);
                 Redraw();
             } else if (wParam == kTimerRefocus) {
                 KillTimer(hwnd, kTimerRefocus);
@@ -2335,17 +2342,18 @@ void Open(bool preview, bool startMenu = false) {
     s_drag = kNone;
     s_wheelRest = 0;
 
-    // Wi-Fi 和蓝牙先用上次读到的（启动时就读过一遍），这台电脑上没有的不放按钮；弹出以后再读一遍
+    // Wi-Fi 和蓝牙先用上次读到的（启动时就读过一遍），这台电脑上没有的、还没读到的不放按钮；弹出以后再读一遍
     s_radioCount = 0;
     if (g_settings.showRadios && !s_compact) {
         for (int i = 0; i < kRadioCount; ++i) {
             s_radio[i] = Radios_Get(i);
-            if (s_radio[i].status != kRadioMissing) s_radioIds[s_radioCount++] = i;
+            if (s_radio[i].status != kRadioMissing && s_radio[i].status != kRadioReading) s_radioIds[s_radioCount++] = i;
         }
         if (!preview) Radios_Query(s_hwnd);
     }
     s_hoverRadio = -1;
     s_radioFailed = 0;
+    s_radioPolls = 0;
 
     // 托盘图标用后台读好的（面板宽度弹出时就定了，弹出期间读到的新结果留到下次）
     s_tray = g_settings.trayIcons ? Tray_Hidden() : std::vector<TrayApp>();
