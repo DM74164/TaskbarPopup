@@ -60,6 +60,7 @@ struct Settings {
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
     bool keepFloatsOnTop = true; // 点全屏（最大化）的窗口时，浮在上面的小窗口不被盖住
+    bool pinTopmost = false;     // 固定的小窗口在所有窗口上面（置顶），不只是全屏窗口
     UINT hotkey[kHotkeyCount] = {};       // 快捷键（见 MakeHotkey），下标是 HotkeyId，0 = 没设
     bool hotkeyHold[kHotkeyCount] = {};   // 长按触发，否则单按
     int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
@@ -321,7 +322,7 @@ void Brightness_Stop();                              // 退出前结束后台线
 void SettingsDialog_Show();
 
 // ---------------- 小窗口留在全屏窗口上面 ----------------
-void FloatWindows_Configure(bool enabled);
+void FloatWindows_Configure(bool enabled, bool topmost = false);  // topmost：固定的小窗口在所有窗口上面
 void FloatWindows_TogglePin(HWND target);  // 固定小窗口（和双击一样），已经固定的取消，在窗口上方提示一下。target 为空时用前台窗口
 
 // ---------------- 快捷键（hotkeys.cpp）----------------

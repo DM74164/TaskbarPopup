@@ -10,6 +10,9 @@
 //
 // 也可以设一个快捷键：按一下固定前台的小窗口（鼠标键的快捷键固定鼠标下的窗口，和双击一样），已经固定的再按一下取消，
 // 窗口上方提示一下。
+//
+// 设置里打开“固定的小窗口在所有窗口上面”时，固定的小窗口直接设成置顶，盖在所有普通窗口上面；
+// 取消固定、最小化、最大化、关掉这个设置或退出时取消置顶。
 #include "common.h"
 
 #include <algorithm>
@@ -22,12 +25,17 @@ namespace {
 // 主线程启停
 HANDLE s_thread = nullptr;
 DWORD s_threadId = 0;
-constexpr UINT kMsgTogglePin = WM_APP + 1;  // 发给小窗口线程：wParam 是要固定 / 取消固定的窗口
+constexpr UINT kMsgTogglePin = WM_APP + 1;   // 发给小窗口线程：wParam 是要固定 / 取消固定的窗口
+constexpr UINT kMsgSetTopmost = WM_APP + 2;  // 发给小窗口线程：wParam 是固定的小窗口要不要在所有窗口上面
+bool s_topmostSetting = false;               // 最近一次告诉小窗口线程的（线程启动前设好，它启动时照这个来）
 
 // 以下只在小窗口线程里访问
 HWINEVENTHOOK s_hook = nullptr;
 HHOOK s_mouseHook = nullptr;
 std::vector<HWND> s_floats;  // 双击过的小窗口，最近双击的排前面
+bool s_topmost = false;      // 固定的小窗口在所有窗口上面
+std::vector<HWND> s_raised;  // 因此被本程序设成置顶的小窗口
+UINT_PTR s_raisedTimer = 0;
 
 bool MonitorRect(HWND hwnd, RECT& out) {
     MONITORINFO mi = {sizeof(mi)};
@@ -63,7 +71,45 @@ bool IsFloatOver(HWND hwnd, HWND big) {
     return GetWindowRect(hwnd, &a) && GetWindowRect(big, &b) && IntersectRect(&overlap, &a, &b);
 }
 
-void Forget(HWND hwnd) { s_floats.erase(std::remove(s_floats.begin(), s_floats.end(), hwnd), s_floats.end()); }
+bool IsRaised(HWND hwnd) { return std::find(s_raised.begin(), s_raised.end(), hwnd) != s_raised.end(); }
+
+// 取消本程序设的置顶，放回普通窗口的最上面（还看得见）。异步，对方没响应也不会卡住
+void Lower(HWND hwnd) {
+    if (!IsRaised(hwnd)) return;
+    s_raised.erase(std::remove(s_raised.begin(), s_raised.end(), hwnd), s_raised.end());
+    if (IsWindow(hwnd))
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
+}
+
+void Forget(HWND hwnd) {
+    s_floats.erase(std::remove(s_floats.begin(), s_floats.end(), hwnd), s_floats.end());
+    Lower(hwnd);
+}
+
+// 置顶的固定小窗口最大化（或铺满屏幕）、最小化了就不再管它，关掉了就忘掉。
+// 最小化有事件，最大化不一定有（已经在前台时），所以有置顶的小窗口时隔一会儿看一眼
+constexpr UINT kRaisedCheckMs = 500;
+void CALLBACK OnRaisedCheck(HWND, UINT, UINT_PTR, DWORD) {
+    for (HWND h : std::vector<HWND>(s_raised)) {
+        if (!IsWindow(h)) s_raised.erase(std::remove(s_raised.begin(), s_raised.end(), h), s_raised.end());
+        else if (IsIconic(h) || IsZoomed(h) || IsBigWindow(h)) Forget(h);
+    }
+    if (s_raised.empty() && s_raisedTimer) {
+        KillTimer(nullptr, s_raisedTimer);
+        s_raisedTimer = 0;
+    }
+}
+
+// 设成置顶，盖在所有普通窗口上面
+void Raise(HWND hwnd) {
+    if (IsRaised(hwnd) || !IsAppWindow(hwnd) || IsBigWindow(hwnd)) return;
+    if (!SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS))
+        return;
+    s_raised.push_back(hwnd);
+    if (!s_raisedTimer) s_raisedTimer = SetTimer(nullptr, 0, kRaisedCheckMs, OnRaisedCheck);
+}
 
 // 盖在小窗口上面的大窗口要挪下去。系统发出“前台换了”的通知时，大窗口自己的线程往往还没处理完激活，
 // 马上挪会被激活时的“提到最上面”盖掉，所以过一会儿再看，分几次复查（有的程序激活后自己还会再提一次）
@@ -151,8 +197,8 @@ void Restore() {
     if (fg && std::find(s_lifted.begin(), s_lifted.end(), fg) == s_lifted.end() && !IsBigWindow(fg) &&
         !(GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST))
         after = fg;
-    for (HWND h : s_lifted)  // 从下到上一个个放，彼此的上下顺序不变
-        if (IsWindow(h) && (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST))
+    for (HWND h : s_lifted)  // 从下到上一个个放，彼此的上下顺序不变；这期间改成一直置顶的不动
+        if (IsWindow(h) && !IsRaised(h) && (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST))
             SetWindowPos(h, after, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS);
     s_lifted.clear();
@@ -186,9 +232,10 @@ void BeforeClick(HWND big) {
 void Pin(HWND hwnd, const wchar_t* how) {
     if (!IsAppWindow(hwnd) || IsBigWindow(hwnd) || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) return;
     bool known = std::find(s_floats.begin(), s_floats.end(), hwnd) != s_floats.end();
-    Forget(hwnd);
+    s_floats.erase(std::remove(s_floats.begin(), s_floats.end(), hwnd), s_floats.end());
     s_floats.insert(s_floats.begin(), hwnd);
-    if (s_floats.size() > 32) s_floats.resize(32);
+    while (s_floats.size() > 32) Forget(s_floats.back());
+    if (s_topmost) Raise(hwnd);
     if (!known) Log(L"小窗口留在上面：%ls了 %ls，记下它（共 %d 个）", how, GetClassNameStr(hwnd).c_str(),
                     static_cast<int>(s_floats.size()));
 }
@@ -398,11 +445,29 @@ void TogglePin(HWND hwnd) {
         return;
     }
     Pin(hwnd, L"按快捷键固定");
-    ShowToast(hwnd, L"已固定，点全屏窗口时它留在上面");
+    ShowToast(hwnd, s_topmost ? L"已固定，留在所有窗口上面" : L"已固定，点全屏窗口时它留在上面");
+}
+
+// 设置里开关了“固定的小窗口在所有窗口上面”：已经固定的小窗口跟着置顶 / 取消置顶
+void SetTopmost(bool on) {
+    if (on == s_topmost) return;
+    s_topmost = on;
+    if (!on) {
+        for (HWND h : std::vector<HWND>(s_raised)) Lower(h);
+        return;
+    }
+    for (auto it = s_floats.rbegin(); it != s_floats.rend(); ++it) {  // 从旧到新，最近固定的在最上面
+        HWND h = *it;
+        auto lifted = std::find(s_lifted.begin(), s_lifted.end(), h);  // 按鼠标时临时置顶的，改成一直置顶
+        if (lifted != s_lifted.end()) s_lifted.erase(lifted);
+        else if (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST) continue;  // 自己置顶的不归本程序管
+        Raise(h);
+    }
 }
 
 DWORD WINAPI FloatThread(LPVOID ready) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    s_topmost = s_topmostSetting;
     MSG msg;
     PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // 先建好消息队列
     s_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZESTART, nullptr, OnEvent, 0, 0,
@@ -413,6 +478,7 @@ DWORD WINAPI FloatThread(LPVOID ready) {
 
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (!msg.hwnd && msg.message == kMsgTogglePin) TogglePin(reinterpret_cast<HWND>(msg.wParam));
+        else if (!msg.hwnd && msg.message == kMsgSetTopmost) SetTopmost(msg.wParam != 0);
         else DispatchMessageW(&msg);
     }
 
@@ -420,6 +486,9 @@ DWORD WINAPI FloatThread(LPVOID ready) {
     if (s_toast) DestroyWindow(s_toast);
     s_toast = nullptr;
     Restore();
+    SetTopmost(false);  // 退出或关掉“小窗口留在上面”时，本程序置顶的小窗口都放回去
+    if (s_raisedTimer) KillTimer(nullptr, s_raisedTimer);
+    s_raisedTimer = 0;
     if (s_timer) KillTimer(nullptr, s_timer);
     s_timer = 0;
     if (s_mouseHook) UnhookWindowsHookEx(s_mouseHook);
@@ -433,9 +502,15 @@ DWORD WINAPI FloatThread(LPVOID ready) {
 
 }  // namespace
 
-void FloatWindows_Configure(bool enabled) {
+void FloatWindows_Configure(bool enabled, bool topmost) {
+    if (enabled && s_thread) {
+        if (topmost != s_topmostSetting) PostThreadMessageW(s_threadId, kMsgSetTopmost, topmost, 0);
+        s_topmostSetting = topmost;
+        return;
+    }
     if (enabled == (s_thread != nullptr)) return;
     if (enabled) {
+        s_topmostSetting = topmost;
         HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         s_thread = CreateThread(nullptr, 0, FloatThread, ready, 0, &s_threadId);
         if (s_thread) WaitForSingleObject(ready, INFINITE);

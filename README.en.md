@@ -39,7 +39,7 @@ Works like the system taskbar: recent files, open another window, run as adminis
 
 ### Keep small windows on top
 
-Double-click a small floating window (or use a hotkey) and it stays on top even when you click the full-screen window behind it.
+Double-click a small floating window (or use a hotkey) and it stays on top even when you click the full-screen window behind it. Turn on "Pinned windows above all windows" (固定的小窗口在所有窗口上面, off by default) in Settings to keep it above every window.
 
 ![Double-click a small window and it is no longer covered by the full-screen window](docs/demo/en/pin.webp)
 

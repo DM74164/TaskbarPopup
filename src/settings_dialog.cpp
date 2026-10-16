@@ -36,7 +36,7 @@ constexpr float kRowPad = 14;  // 卡片里左右的边距
 constexpr float kChipH = 28;
 
 // 开关
-enum Toggle { kAutoHide, kKeepFloats, kLongPress, kPinned, kLevels, kTray, kAutoStart, kUpdates, kToggleCount };
+enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kTray, kAutoStart, kUpdates, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -44,6 +44,7 @@ struct ToggleText {
 const ToggleText kToggleText[kToggleCount] = {
     {L"最大化或全屏时隐藏任务栏", L"窗口铺满整块屏幕，要用任务栏时长按 Win"},
     {L"点全屏窗口时小窗口留在上面", L"双击小窗口或按快捷键固定它，最小化就取消"},
+    {L"固定的小窗口在所有窗口上面", nullptr},
     {L"长按 Win 键弹出迷你任务栏", L"左键单击托盘图标也能弹出"},
     {L"显示固定在任务栏的应用", nullptr},
     {L"显示音量和亮度调节", nullptr},
@@ -317,9 +318,11 @@ void BuildLayout() {
     s_texts.push_back({L"TaskbarPopup 设置", RectF(margin + Px(kPad), margin + Px(12), Px(260), Px(28)), 2});
     s_items.push_back({kClose, 0, RectF(margin + panelW - Px(12) - Px(32), margin + Px(10), Px(32), Px(32))});
 
-    float left =
-        AddGroup(px0, top, L"任务栏", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
-                                        [](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }});
+    // “小窗口留在上面”关着时收起“在所有窗口上面”
+    std::vector<float (*)(float, float, float)> taskbar = {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
+                                                           [](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
+    if (s_v.on[kKeepFloats]) taskbar.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
+    float left = AddGroup(px0, top, L"任务栏", taskbar);
     // 长按 Win 关着时收起长按时长
     std::vector<float (*)(float, float, float)> mini = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
     if (s_v.on[kLongPress]) mini.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
@@ -1068,7 +1071,7 @@ void SetToggle(int which, bool on) {
     s_knobFrom[which] = s_knob[which];
     s_knobStart[which] = NowMs();
     StartAnimation();
-    if (which == kLongPress || which == kTray) Relayout(true);  // 长按时长、托盘图标样式跟着收起 / 放出来
+    if (which == kKeepFloats || which == kLongPress || which == kTray) Relayout(true);  // 跟着收起 / 放出来的行
 }
 
 void SetSlider(int which, int value) {
@@ -1309,6 +1312,7 @@ void Apply() {
     auto changed = [](int t) { return s_v.on[t] != s_initial.on[t]; };
     if (changed(kAutoHide)) g_settings.autoHideOnFullscreen = s_v.on[kAutoHide];
     if (changed(kKeepFloats)) g_settings.keepFloatsOnTop = s_v.on[kKeepFloats];
+    if (changed(kPinTopmost)) g_settings.pinTopmost = s_v.on[kPinTopmost];
     if (changed(kLongPress)) g_settings.longPressPopup = s_v.on[kLongPress];
     if (changed(kPinned)) g_settings.showPinnedApps = s_v.on[kPinned];
     if (changed(kLevels)) g_settings.showLevels = s_v.on[kLevels];
@@ -1749,6 +1753,7 @@ void SettingsDialog_Show() {
 
     s_initial.on[kAutoHide] = g_settings.autoHideOnFullscreen;
     s_initial.on[kKeepFloats] = g_settings.keepFloatsOnTop;
+    s_initial.on[kPinTopmost] = g_settings.pinTopmost;
     s_initial.on[kLongPress] = g_settings.longPressPopup;
     s_initial.on[kPinned] = g_settings.showPinnedApps;
     s_initial.on[kLevels] = g_settings.showLevels;
