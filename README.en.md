@@ -9,7 +9,7 @@ A Windows 11 taskbar enhancement: when a window is maximized, the taskbar hides 
 
 > The interface comes in English and Chinese. It follows your Windows display language; change it under Settings → Appearance → Language.
 
-Demo video: [Bilibili](https://www.bilibili.com/video/BV1BLp963E7e/)
+Demo video: [YouTube](https://youtu.be/nTGIbGz5Qlw)
 
 ## Features
 
