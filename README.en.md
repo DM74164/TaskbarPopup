@@ -21,7 +21,7 @@ Maximize a window and the taskbar slides away while the window fills the screen.
 
 ### Hold Win for the mini taskbar
 
-Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom: pinned apps, open windows, hidden tray icons, the clock, plus volume and brightness sliders. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
+Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom (or stands vertically on the left or right screen edge): pinned apps, open windows, hidden tray icons, the clock, plus volume and brightness sliders. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
 
 ![Hold Win and the mini taskbar rises from the bottom](docs/demo/en/popup.webp)
 
@@ -51,7 +51,7 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass or frosted glass, and follow-system, light or dark colors. The mini taskbar's size (50 – 200%) and position (follow system, center, left, right) preview live as you change them.
+Choose liquid glass or frosted glass, and follow-system, light or dark colors. The mini taskbar's size (50 – 200%), position (位置: bottom, left, right) and alignment at the bottom (对齐: follow system, center, left, right) preview live as you change them.
 
 ![Liquid or frosted glass, light or dark, and size all preview live](docs/demo/en/appearance.webp)
 
@@ -68,9 +68,9 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Shift + click | Open another window |
 | Right-click / Menu key | Right-click menu |
 | Middle-click / Delete | Close the window |
-| ← → / Tab, Enter | Select and open with the keyboard |
+| Arrow keys / Tab, Enter | Select and open with the keyboard |
 | Type | Filter; Esc clears, press again to close |
-| Mouse wheel | Scroll sideways; over a slider, adjust volume / brightness |
+| Mouse wheel | Scroll the icons; over a slider, adjust volume / brightness |
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" (程序菜单) opens the program's own menu |
 | Esc / click elsewhere | Close |

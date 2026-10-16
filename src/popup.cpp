@@ -83,13 +83,17 @@ struct Layout {
     float panelW, panelH, itemsX, itemsW, tilesX, clockX, tileY, sliderY;
     float trayX, trayW, cellW, cellH;  // 托盘：堆叠时 2×2 一组的小格子，横排时一行和窗口格子一样高
     float bottomGap;                   // 面板底边离屏幕底边（或者露着的任务栏）多远
+    float panelX, panelY;              // 面板在窗口里的位置
+    // 竖排（弹在屏幕左右两边）时：一列格子的左边、各段的顶边。这时 itemsW、trayW 是竖着的长度，
+    // 窗口在面板里侧多留 bubbleW 宽，放显示标题的小牌子
+    float colX, startY, itemsY, tilesY, trayY, clockY, clockH, bubbleW;
 };
 
 // 调节条：0 是音量，1 是亮度
 struct Slider {
-    RectF icon;      // 左边的图标（喇叭可以点）
-    float x0, x1;    // 槽的两端
-    float cy;        // 槽的中线
+    RectF icon;      // 图标（喇叭可以点）：横排在左边，竖排在下边
+    float a0, a1;    // 槽的两端：a0 是 0%，a1 是 100%（横排是 x，竖排是 y，下边是 0%）
+    float c;         // 槽的中线（横排是 y，竖排是 x）
 };
 
 // 鼠标下的调节条部件
@@ -121,7 +125,9 @@ int s_sel = 0;      // 选中的格子（键盘焦点），编号同上
 bool s_open = false;
 bool s_preview = false;      // 设置窗口里调大小时的预览：不抢前台、鼠标点不到，过一会儿自己收起
 int s_previewPercent = 100;  // 预览用的大小，百分比
-int s_previewAlign = kAlignSystem;  // 预览用的位置，见 PopupAlign
+int s_previewAlign = kAlignSystem;  // 预览用的对齐，见 PopupAlign
+int s_previewEdge = kEdgeBottom;    // 预览用的边，见 PopupEdge
+int s_edge = kEdgeBottom;           // 这次弹在哪条边（弹出时按设置定下来）
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
@@ -195,43 +201,82 @@ float PopupScale(HMONITOR monitor) {
 
 const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 
+// 弹在屏幕左右两边：竖着排，从侧边滑出来
+bool Vertical() { return s_edge != kEdgeBottom; }
+
 void ComputeLayout() {
     Layout& L = s_L;
-    L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕底边的距离
+    bool vertical = Vertical();
+    L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕边的距离
     L.pad = s_compact ? Px(4) : Px(8);
     L.tile = Px(48);
     L.gap = Px(4);
-    L.titleH = s_compact ? 0 : Px(24);
+    L.titleH = s_compact || vertical ? 0 : Px(24);  // 竖排时标题显示在面板旁边的小牌子上
     L.sep = Px(9);
     L.clockW = Px(72);
-    L.emptyW = Px(130);
+    L.clockH = Px(40);
+    L.emptyW = vertical ? Px(96) : Px(130);
     L.radius = Px(22);
-    L.rowGap = s_levels ? Px(2) : 0;
-    L.sliderH = s_levels ? Px(34) : 0;
+    L.rowGap = s_levels ? (vertical ? Px(4) : Px(2)) : 0;
+    L.sliderH = s_levels ? (vertical ? Px(128) : Px(34)) : 0;
     L.minPanelW = s_levels ? Px(380) : Px(260);  // 两根调节条要有地方拖；没有调节条时标题也要放得下
     // 开始菜单模式：面板差不多贴着屏幕底边，和系统任务栏一样高，开始菜单才不会盖住它
     L.bottomGap = s_compact ? Px(4) : L.margin;
+    L.bubbleW = vertical ? Px(280) : 0;
 
-    // 托盘图标：横排时放不下的收进最后一格“显示隐藏的图标”；堆叠时 2×2 一页，和窗口格子一样大，多的翻页看
+    // 托盘图标：横排时放不下的收进最后一格“显示隐藏的图标”；堆叠时 2×2 一页，和窗口格子一样大，多的翻页看。
+    // 竖排时“横排”样式的格子竖着一个个往下排
     int trayCount = static_cast<int>(s_tray.size());
     int cells;
     if (s_trayStyle == kTrayRow) {
         s_trayShown = trayCount > kMaxTrayRow ? kMaxTrayRow - 1 : trayCount;
         cells = s_trayShown + (trayCount > s_trayShown ? 1 : 0);
-        L.cellW = Px(40);
-        L.cellH = L.tile;
-        L.trayW = cells * L.cellW;
+        L.cellW = vertical ? L.tile : Px(40);
+        L.cellH = vertical ? Px(40) : L.tile;
+        L.trayW = cells * (vertical ? L.cellH : L.cellW);
     } else {
         s_trayShown = cells = trayCount;
         L.cellW = L.cellH = L.tile / 2;
         L.trayW = cells > 0 ? L.tile : 0;
     }
     float traySep = cells > 0 ? L.sep : 0;
+    int n = static_cast<int>(s_items.size());
+
+    if (vertical) {
+        // 从上到下：开始按钮、格子、托盘图标、时钟、两根竖的调节条
+        float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockH + L.rowGap + L.sliderH;
+        float avail = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - others;
+        s_visible = std::min(n, std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap))));
+        if (s_lockedItemsW > 0)
+            s_visible = std::min(n, std::max(1, static_cast<int>((s_lockedItemsW + L.gap) / (L.tile + L.gap))));
+        float tilesH = n == 0 ? L.emptyW : s_visible * (L.tile + L.gap) - L.gap;
+        L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : tilesH;
+        L.panelW = 2 * L.pad + L.tile;
+        L.panelH = others + L.itemsW;
+        L.panelX = s_edge == kEdgeLeft ? L.margin : L.bubbleW + L.margin;
+        L.panelY = L.margin;
+        L.colX = L.panelX + L.pad;
+        L.startY = L.panelY + L.pad;
+        L.itemsY = L.startY + L.tile + L.sep;
+        L.tilesY = L.itemsY + (L.itemsW - tilesH) / 2;
+        L.trayY = L.itemsY + L.itemsW + L.sep;
+        L.clockY = L.trayY + L.trayW + traySep;
+        L.sliderY = L.clockY + L.clockH + L.rowGap;
+        // 音量在左半边，亮度在右半边，图标在下面，往上拖变大
+        float icon = Px(24), half = L.tile / 2, iconY = L.sliderY + L.sliderH - icon;
+        auto make = [&](float cx) {
+            return Slider{RectF(cx - icon / 2, iconY, icon, icon), iconY - Px(10), L.sliderY + Px(10), cx};
+        };
+        s_sliders[0] = make(L.colX + half / 2);
+        s_sliders[1] = make(L.colX + half + half / 2);
+        s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin + L.bubbleW));
+        s_height = static_cast<int>(std::ceil(L.panelH + 2 * L.margin));
+        return;
+    }
 
     float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockW;
     float avail = (s_bounds.right - s_bounds.left) * 0.85f - fixed;
     int maxFit = std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap)));
-    int n = static_cast<int>(s_items.size());
     s_visible = std::min(n, maxFit);
 
     // 格子少的时候面板按最小宽度来，格子在中间那段里居中
@@ -244,6 +289,7 @@ void ComputeLayout() {
     L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : std::max(tilesW, L.minPanelW - others);
     L.panelW = others + L.itemsW;
     L.panelH = 2 * L.pad + L.titleH + L.tile + L.rowGap + L.sliderH;
+    L.panelX = L.panelY = L.margin;
     L.itemsX = L.margin + L.pad + L.tile + L.sep;
     L.tilesX = L.itemsX + (L.itemsW - tilesW) / 2;
     L.trayX = L.itemsX + L.itemsW + L.sep;
@@ -264,7 +310,6 @@ void ComputeLayout() {
     s_height = static_cast<int>(std::ceil(L.panelH + L.margin + L.bottomGap));
 }
 
-// 面板水平居中、贴着底边（屏幕底边，或者露着的任务栏的上沿）
 // 系统任务栏的图标是不是居中：Win11 看设置里的“任务栏对齐方式”（没改过是居中），Win10 一直靠左
 bool SystemTaskbarCentered() {
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
@@ -279,8 +324,16 @@ bool SystemTaskbarCentered() {
     return value != 0;
 }
 
-// 贴着底边，按设置居中、靠左或靠右。靠边时面板离屏幕侧边和离底边一样远（窗口四周留的阴影位置）
+// 贴着底边（屏幕底边，或者露着的任务栏的上沿），按设置居中、靠左或靠右，靠边时面板离屏幕侧边和离底边一样远
+// （窗口四周留的阴影位置）。竖排时贴着屏幕左边或右边，上下居中
 void UpdatePlacement() {
+    if (Vertical()) {
+        int x = s_edge == kEdgeLeft ? s_bounds.left : s_bounds.right - s_width;
+        int y = std::max<int>(s_bounds.top, s_bounds.top + (s_bounds.bottom - s_bounds.top - s_height) / 2);
+        s_pos = {x, y};
+        s_baseValid = false;
+        return;
+    }
     int align = s_preview ? s_previewAlign : g_settings.popupAlign;
     if (align == kAlignSystem) align = SystemTaskbarCentered() ? kAlignCenter : kAlignLeft;
     int x = s_bounds.left + (s_bounds.right - s_bounds.left - s_width) / 2;
@@ -290,7 +343,7 @@ void UpdatePlacement() {
     s_baseValid = false;
 }
 
-float SlideDistance() { return s_L.panelH + s_L.bottomGap + Px(8); }
+float SlideDistance() { return Vertical() ? s_L.panelW + s_L.margin + Px(8) : s_L.panelH + s_L.bottomGap + Px(8); }
 
 int ItemCount() { return static_cast<int>(s_items.size()); }
 
@@ -301,10 +354,15 @@ bool IsTileVisible(int index) {
 }
 
 RectF TileRect(int index) {
-    if (index == 0) return RectF(s_L.margin + s_L.pad, s_L.tileY, s_L.tile, s_L.tile);
+    const Layout& L = s_L;
     int slot = index - 1 - s_first;
-    return RectF(s_L.tilesX + slot * (s_L.tile + s_L.gap), s_L.tileY, s_L.tile, s_L.tile);
+    if (Vertical()) return RectF(L.colX, index == 0 ? L.startY : L.tilesY + slot * (L.tile + L.gap), L.tile, L.tile);
+    if (index == 0) return RectF(L.margin + L.pad, L.tileY, L.tile, L.tile);
+    return RectF(L.tilesX + slot * (L.tile + L.gap), L.tileY, L.tile, L.tile);
 }
+
+// 沿着格子排列方向的坐标：横排是 x，竖排是 y
+float Along(const RectF& r) { return Vertical() ? r.Y : r.X; }
 
 int HitTest(int x, int y) {
     for (int idx = 0; idx <= ItemCount(); ++idx) {
@@ -321,7 +379,8 @@ int ControlAt(int x, int y) {
     for (int i = 0; i < 2; ++i) {
         const Slider& sl = s_sliders[i];
         if (sl.icon.Contains(fx, fy)) return i == 0 ? kVolumeIcon : kBrightIcon;
-        RectF track(sl.x0 - Px(10), sl.cy - Px(15), sl.x1 - sl.x0 + Px(20), Px(30));
+        RectF track = Vertical() ? RectF(sl.c - Px(12), sl.a1 - Px(10), Px(24), sl.a0 - sl.a1 + Px(20))
+                                 : RectF(sl.a0 - Px(10), sl.c - Px(15), sl.a1 - sl.a0 + Px(20), Px(30));
         if (track.Contains(fx, fy)) return i == 0 ? kVolumeTrack : kBrightTrack;
     }
     return kNone;
@@ -333,15 +392,20 @@ int TrayCells() { return s_trayShown + (static_cast<int>(s_tray.size()) > s_tray
 
 int TrayPages() { return s_trayStyle == kTrayRow ? 1 : (static_cast<int>(s_tray.size()) + 3) / 4; }
 
-// 堆叠时的那一页（2×2，和窗口格子一样大）
-RectF TrayGroupRect() { return RectF(s_L.trayX, s_L.tileY, s_L.tile, s_L.tile); }
+// 托盘图标那一段的左上角
+PointF TrayOrigin() { return Vertical() ? PointF(s_L.colX, s_L.trayY) : PointF(s_L.trayX, s_L.tileY); }
 
-// 第 i 格。堆叠时第 i / 4 页，每页先上后下、从左往右
+// 堆叠时的那一页（2×2，和窗口格子一样大）
+RectF TrayGroupRect() { return RectF(TrayOrigin(), SizeF(s_L.tile, s_L.tile)); }
+
+// 第 i 格。堆叠时第 i / 4 页，每页先上后下、从左往右；横排样式在竖排时一格格往下排
 RectF TrayCellRect(int i) {
     const Layout& L = s_L;
-    if (s_trayStyle == kTrayRow) return RectF(L.trayX + i * L.cellW, L.tileY, L.cellW, L.cellH);
+    PointF o = TrayOrigin();
+    if (s_trayStyle == kTrayRow)
+        return Vertical() ? RectF(o.X, o.Y + i * L.cellH, L.cellW, L.cellH) : RectF(o.X + i * L.cellW, o.Y, L.cellW, L.cellH);
     int k = i % 4;
-    return RectF(L.trayX + (k % 2) * L.cellW, L.tileY + (k / 2) * L.cellH, L.cellW, L.cellH);
+    return RectF(o.X + (k % 2) * L.cellW, o.Y + (k / 2) * L.cellH, L.cellW, L.cellH);
 }
 
 bool TrayOnPage(int i) { return s_trayStyle == kTrayRow || i / 4 == s_trayPage; }
@@ -355,7 +419,9 @@ int TrayAt(int x, int y) {
 
 bool OverTray(int x, int y) {
     if (s_L.trayW <= 0) return false;
-    return RectF(s_L.trayX, s_L.tileY, s_L.trayW, s_L.tile).Contains(static_cast<REAL>(x), static_cast<REAL>(y));
+    PointF o = TrayOrigin();
+    RectF area = Vertical() ? RectF(o.X, o.Y, s_L.tile, s_L.trayW) : RectF(o.X, o.Y, s_L.trayW, s_L.tile);
+    return area.Contains(static_cast<REAL>(x), static_cast<REAL>(y));
 }
 
 // 鼠标所指的托盘格子的标题；堆叠又不止一页时带上第几页
@@ -390,7 +456,7 @@ void SyncPill() {
         s_pillIndex = -1;
         return;
     }
-    float x = TileRect(shown).X;
+    float x = Along(TileRect(shown));
     if (s_pillIndex < 0) {
         s_pillX = s_pillFrom = s_pillTo = x;
     } else if (x != s_pillTo) {
@@ -434,7 +500,7 @@ void DrawLabel(Graphics& g, const wchar_t* text, const Font& font, const RectF& 
 void DrawPill(Graphics& g) {
     if (s_pillIndex < 0) return;
     const Palette& pal = Colors();
-    RectF r(s_pillX, s_L.tileY, s_L.tile, s_L.tile);
+    RectF r = Vertical() ? RectF(s_L.colX, s_pillX, s_L.tile, s_L.tile) : RectF(s_pillX, s_L.tileY, s_L.tile, s_L.tile);
     r.Inflate(-0.5f, -0.5f);
     GraphicsPath path;
     AddRoundRect(path, r, Px(12));
@@ -468,10 +534,13 @@ void DrawTile(Graphics& g, int idx) {
     if (item.icon) g.DrawImage(item.icon.get(), iconRect);
     else FillRound(g, iconRect, Px(4), pal.separator);
 
-    // 和 Win11 任务栏一样：当前窗口是一条长的强调色短线，其它打开的窗口是短点，没运行的固定应用没有
-    float barY = r.Y + r.Height - Px(6);
-    if (item.active) FillRound(g, RectF(cx - Px(8), barY, Px(16), Px(3)), Px(1.5f), pal.accent);
-    else if (item.hwnd) FillRound(g, RectF(cx - Px(3), barY, Px(6), Px(3)), Px(1.5f), pal.running);
+    // 和 Win11 任务栏一样：当前窗口是一条长的强调色短线，其它打开的窗口是短点，没运行的固定应用没有。
+    // 竖排时竖着画在靠屏幕边的那一侧
+    float len = item.active ? Px(16) : Px(6);
+    RectF bar(cx - len / 2, r.Y + r.Height - Px(6), len, Px(3));
+    if (Vertical()) bar = RectF(s_edge == kEdgeLeft ? r.X + Px(3) : r.X + r.Width - Px(6), cy - len / 2, Px(3), len);
+    if (item.active) FillRound(g, bar, Px(1.5f), pal.accent);
+    else if (item.hwnd) FillRound(g, bar, Px(1.5f), pal.running);
 }
 
 // ---- 音量和亮度 ----
@@ -529,9 +598,12 @@ void SetSlider(int which, float value) {
     Redraw();
 }
 
-void SetSliderFromX(int which, int x) {
+// 按鼠标位置（客户区坐标）设调节条
+void SetSliderAt(int which, int x, int y) {
     const Slider& sl = s_sliders[which];
-    SetSlider(which, (x - sl.x0) / std::max(1.0f, sl.x1 - sl.x0));
+    float span = sl.a1 - sl.a0;
+    if (std::fabs(span) < 1) return;
+    SetSlider(which, ((Vertical() ? y : x) - sl.a0) / span);
 }
 
 // 滚轮一格 2%，和系统音量一样
@@ -595,27 +667,33 @@ void DrawSlider(Graphics& g, int which) {
     if (which == 0) DrawSpeaker(g, sl.icon, iconColor);
     else DrawSun(g, sl.icon, iconColor);
 
+    // 横排时槽横着，竖排时竖着（下边是 0）
+    bool vertical = Vertical();
     float h = Px(4);
-    RectF track(sl.x0, sl.cy - h / 2, sl.x1 - sl.x0, h);
-    FillRound(g, track, h / 2, pal.track);
+    auto span = [&](float from, float to) {  // 槽上从 from 到 to 的一段
+        float lo = std::min(from, to), len = std::fabs(to - from);
+        return vertical ? RectF(sl.c - h / 2, lo, h, len) : RectF(lo, sl.c - h / 2, len, h);
+    };
+    FillRound(g, span(sl.a0, sl.a1), h / 2, pal.track);
     if (!enabled) return;
 
-    float x = sl.x0 + (sl.x1 - sl.x0) * SliderValue(which);
+    float pos = sl.a0 + (sl.a1 - sl.a0) * SliderValue(which);
     bool dim = which == 0 && s_muted;
     const Color& fill = dim ? pal.subtle : pal.accent;
-    if (x > sl.x0 + 0.5f) FillRound(g, RectF(sl.x0, track.Y, x - sl.x0, h), h / 2, fill);
+    if (std::fabs(pos - sl.a0) > 0.5f) FillRound(g, span(sl.a0, pos), h / 2, fill);
 
     // 滑块：和 Win11 一样，外圈一个圆片，中间一个强调色的点，鼠标放上去时点变大
+    float x = vertical ? sl.c : pos, y = vertical ? pos : sl.c;
     float R = Px(9);
     SolidBrush shadow(Color(40, 0, 0, 0));
-    g.FillEllipse(&shadow, x - R, sl.cy - R + Px(1), 2 * R, 2 * R);
+    g.FillEllipse(&shadow, x - R, y - R + Px(1), 2 * R, 2 * R);
     SolidBrush thumb(pal.thumb);
-    g.FillEllipse(&thumb, x - R, sl.cy - R, 2 * R, 2 * R);
+    g.FillEllipse(&thumb, x - R, y - R, 2 * R, 2 * R);
     Pen rim(pal.thumbRim, std::max(1.0f, Px(1)));
-    g.DrawEllipse(&rim, x - R, sl.cy - R, 2 * R, 2 * R);
+    g.DrawEllipse(&rim, x - R, y - R, 2 * R, 2 * R);
     float core = hot ? Px(6) : Px(4.5f);
     SolidBrush dot(fill);
-    g.FillEllipse(&dot, x - core, sl.cy - core, 2 * core, 2 * core);
+    g.FillEllipse(&dot, x - core, y - core, 2 * core, 2 * core);
 }
 
 // 托盘图标。横排放不下时最后一格画个向上的尖角（展开系统的“隐藏的图标”）；
@@ -685,9 +763,77 @@ void DrawTray(Graphics& g) {
     }
 }
 
+// 打字筛选时的搜索框：放大镜加打的字，太长时显示后面的部分
+void DrawSearchBox(Graphics& g, const RectF& box, const Font& font) {
+    const Palette& pal = Colors();
+    FillRound(g, box, box.Height / 2, pal.pillTop);
+    Pen pen(pal.text, Px(1.3f));
+    float r = Px(3.5f), cx = box.X + Px(10), cy = box.Y + box.Height / 2 - Px(0.5f), d = r * 0.7f;
+    g.DrawEllipse(&pen, cx - r, cy - r, 2 * r, 2 * r);
+    g.DrawLine(&pen, cx + d, cy + d, cx + d + Px(2.5f), cy + d + Px(2.5f));
+    StringFormat left(StringFormatFlagsNoWrap);
+    left.SetLineAlignment(StringAlignmentCenter);
+    RectF measured;
+    g.MeasureString(s_filter.c_str(), -1, &font, PointF(0, 0), &left, &measured);
+    RectF textRect(box.X + Px(18), box.Y, box.Width - Px(22), box.Height);
+    left.SetAlignment(measured.Width > textRect.Width ? StringAlignmentFar : StringAlignmentNear);
+    DrawLabel(g, s_filter.c_str(), font, textRect, left, pal.text);
+}
+
+// 搜索框的宽度：放得下打的字，最多 maxW
+float SearchBoxWidth(Graphics& g, const Font& font, float maxW) {
+    StringFormat left(StringFormatFlagsNoWrap);
+    RectF measured;
+    g.MeasureString(s_filter.c_str(), -1, &font, PointF(0, 0), &left, &measured);
+    return std::min(maxW, measured.Width + Px(30));
+}
+
+// 竖排时显示标题的小牌子：贴着面板里侧，上下对着 anchorY（鼠标所指的格子、调节条等的中线）。
+// 实心底，放在什么背景上都看得清；打字筛选时前面是搜索框
+void DrawBubble(Graphics& g, float anchorY, const std::wstring& title, const Font& font) {
+    const Layout& L = s_L;
+    const Palette& pal = Colors();
+    bool filtering = !s_filter.empty();
+    if (title.empty() && !filtering) return;
+    StringFormat oneLine(StringFormatFlagsNoWrap);
+    oneLine.SetLineAlignment(StringAlignmentCenter);
+    oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
+    float maxW = L.bubbleW - Px(12), padX = Px(10), h = Px(30);
+    float searchW = filtering ? SearchBoxWidth(g, font, maxW * 0.5f) : 0;
+    float titleW = 0;
+    if (!title.empty()) {
+        RectF measured;
+        g.MeasureString(title.c_str(), -1, &font, PointF(0, 0), &oneLine, &measured);
+        titleW = measured.Width + (filtering ? Px(6) : 0);
+    }
+    float w = std::min(maxW, 2 * padX + searchW + titleW);
+    float x = s_edge == kEdgeLeft ? L.panelX + L.panelW + Px(8) : L.panelX - Px(8) - w;
+    float y = std::clamp(anchorY - h / 2, L.panelY, L.panelY + L.panelH - h);
+    RectF box(x, y, w, h);
+    RectF shadow = box;
+    shadow.Offset(0, Px(1.5f));
+    FillRound(g, shadow, h / 2, Color(50, 0, 0, 0));
+    bool light = s_glass.Light();
+    FillRound(g, box, h / 2, light ? Color(245, 250, 250, 252) : Color(240, 40, 40, 44));
+    GraphicsPath path;
+    AddRoundRect(path, box, h / 2);
+    Pen rim(light ? Color(36, 0, 0, 0) : Color(46, 255, 255, 255), std::max(1.0f, Px(1)));
+    g.DrawPath(&rim, &path);
+    float textX = box.X + padX;
+    if (filtering) {
+        DrawSearchBox(g, RectF(textX - Px(4), box.Y + Px(4), searchW, h - Px(8)), font);
+        textX += searchW + Px(2);
+    }
+    if (!title.empty()) {
+        SolidBrush brush(pal.text);
+        g.DrawString(title.c_str(), -1, &font, RectF(textX, box.Y, box.X + box.Width - padX - textX, h), &oneLine, &brush);
+    }
+}
+
 void DrawContent(Graphics& g) {
     const Layout& L = s_L;
     const Palette& pal = Colors();
+    bool vertical = Vertical();
 
     DrawPill(g);
 
@@ -711,25 +857,32 @@ void DrawContent(Graphics& g) {
     oneLine.SetLineAlignment(StringAlignmentCenter);
     oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
     RectF titleRect(L.margin + L.pad + Px(10), L.margin + L.pad, L.panelW - 2 * L.pad - Px(20), L.titleH);
-    if (L.titleH <= 0) {
+    if (vertical) {
+        // 竖排：标题在面板旁边的小牌子上，对着它说的那一项。打字筛选时只在指着或选了一项时显示名字；
+        // 开始菜单模式只在鼠标指着时显示
+        bool pointing = s_hover >= 0 || s_hoverTray >= 0 || s_overTray || s_hoverControl != kNone || s_drag != kNone;
+        float anchorY = L.itemsY + L.tile / 2;
+        if (s_drag != kNone || s_hoverControl != kNone) {
+            const Slider& sl = s_sliders[SliderOf(s_drag != kNone ? s_drag : s_hoverControl)];
+            anchorY = (sl.a0 + sl.a1) / 2;
+        } else if (s_hoverTray >= 0) {
+            RectF r = TrayCellRect(s_hoverTray);
+            anchorY = r.Y + r.Height / 2;
+        } else if (s_overTray) {
+            anchorY = L.trayY + L.trayW / 2;
+        } else if (shown >= 0 && shown <= ItemCount() && IsTileVisible(shown)) {
+            RectF r = TileRect(shown);
+            anchorY = r.Y + r.Height / 2;
+        }
+        if (!s_filter.empty() && !(s_hover >= 0 || s_sel > 0)) title.clear();
+        if (!s_compact || pointing) DrawBubble(g, anchorY, title, titleFont);
+    } else if (L.titleH <= 0) {
         // 开始菜单模式没有标题这一行
     } else if (!s_filter.empty()) {
         // 打字筛选：左边一个搜索框显示打的字，右边是选中项的名字
-        StringFormat left(StringFormatFlagsNoWrap);
-        left.SetLineAlignment(StringAlignmentCenter);
-        RectF measured;
-        g.MeasureString(s_filter.c_str(), -1, &titleFont, PointF(0, 0), &left, &measured);
-        float boxW = std::min(titleRect.Width * 0.5f, measured.Width + Px(30));
+        float boxW = SearchBoxWidth(g, titleFont, titleRect.Width * 0.5f);
         RectF box(titleRect.X - Px(6), titleRect.Y + Px(2), boxW, titleRect.Height - Px(4));
-        FillRound(g, box, box.Height / 2, pal.pillTop);
-        Pen pen(pal.text, Px(1.3f));
-        float r = Px(3.5f), cx = box.X + Px(10), cy = box.Y + box.Height / 2 - Px(0.5f), d = r * 0.7f;
-        g.DrawEllipse(&pen, cx - r, cy - r, 2 * r, 2 * r);
-        g.DrawLine(&pen, cx + d, cy + d, cx + d + Px(2.5f), cy + d + Px(2.5f));
-        // 打得太长时显示后面的部分
-        RectF textRect(box.X + Px(18), box.Y, box.Width - Px(22), box.Height);
-        left.SetAlignment(measured.Width > textRect.Width ? StringAlignmentFar : StringAlignmentNear);
-        DrawLabel(g, s_filter.c_str(), titleFont, textRect, left, pal.text);
+        DrawSearchBox(g, box, titleFont);
         float restX = box.X + box.Width + Px(6);
         if (!title.empty() && (s_hover >= 0 || s_sel > 0))
             DrawLabel(g, title.c_str(), titleFont,
@@ -742,35 +895,49 @@ void DrawContent(Graphics& g) {
     for (int idx = 0; idx <= ItemCount(); ++idx)
         if (IsTileVisible(idx)) DrawTile(g, idx);
 
-    // 窗口多到放不下时，两侧的小三角提示还能滚动
+    // 窗口多到放不下时，两头的小三角提示还能滚动
     SolidBrush hint(pal.subtle);
-    float midY = L.tileY + L.tile / 2, tri = Px(4);
-    if (s_first > 0) {
-        float x = L.itemsX - Px(2);
-        PointF pts[3] = {PointF(x - tri, midY), PointF(x, midY - tri), PointF(x, midY + tri)};
-        g.FillPolygon(&hint, pts, 3);
-    }
-    if (s_first + s_visible < ItemCount()) {
-        float x = L.itemsX + L.itemsW + Px(2);
-        PointF pts[3] = {PointF(x + tri, midY), PointF(x, midY - tri), PointF(x, midY + tri)};
-        g.FillPolygon(&hint, pts, 3);
+    float tri = Px(4);
+    bool before = s_first > 0, after = s_first + s_visible < ItemCount();
+    if (vertical) {
+        float midX = L.colX + L.tile / 2, y0 = L.itemsY - Px(2), y1 = L.itemsY + L.itemsW + Px(2);
+        PointF up[3] = {PointF(midX, y0 - tri), PointF(midX - tri, y0), PointF(midX + tri, y0)};
+        PointF down[3] = {PointF(midX, y1 + tri), PointF(midX - tri, y1), PointF(midX + tri, y1)};
+        if (before) g.FillPolygon(&hint, up, 3);
+        if (after) g.FillPolygon(&hint, down, 3);
+    } else {
+        float midY = L.tileY + L.tile / 2, x0 = L.itemsX - Px(2), x1 = L.itemsX + L.itemsW + Px(2);
+        PointF left[3] = {PointF(x0 - tri, midY), PointF(x0, midY - tri), PointF(x0, midY + tri)};
+        PointF right[3] = {PointF(x1 + tri, midY), PointF(x1, midY - tri), PointF(x1, midY + tri)};
+        if (before) g.FillPolygon(&hint, left, 3);
+        if (after) g.FillPolygon(&hint, right, 3);
     }
 
+    // 分隔线：横排是竖线，竖排是横线
     Pen sepPen(pal.separator, 1.0f);
-    float y1 = L.tileY + Px(10), y2 = L.tileY + L.tile - Px(10);
-    g.DrawLine(&sepPen, L.itemsX - L.sep / 2, y1, L.itemsX - L.sep / 2, y2);
-    if (L.trayW > 0) g.DrawLine(&sepPen, L.trayX - L.sep / 2, y1, L.trayX - L.sep / 2, y2);
-    g.DrawLine(&sepPen, L.clockX - L.sep / 2, y1, L.clockX - L.sep / 2, y2);
+    auto separator = [&](float at) {
+        if (vertical) g.DrawLine(&sepPen, L.colX + Px(10), at - L.sep / 2, L.colX + L.tile - Px(10), at - L.sep / 2);
+        else g.DrawLine(&sepPen, at - L.sep / 2, L.tileY + Px(10), at - L.sep / 2, L.tileY + L.tile - Px(10));
+    };
+    separator(vertical ? L.itemsY : L.itemsX);
+    if (L.trayW > 0) separator(vertical ? L.trayY : L.trayX);
+    separator(vertical ? L.clockY : L.clockX);
     DrawTray(g);
 
-    if (s_items.empty())
-        DrawLabel(g, s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用", titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
+    if (s_items.empty()) {
+        const wchar_t* empty = s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用";
+        if (vertical) DrawLabel(g, empty, smallFont, RectF(L.panelX + Px(4), L.itemsY, L.panelW - Px(8), L.itemsW), center, pal.subtle);
+        else DrawLabel(g, empty, titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
+    }
 
+    // 时钟：竖排时面板窄，日期只写月和日
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t clock[64];
-    swprintf(clock, 64, L"%02d:%02d\n%d/%d/%d", st.wHour, st.wMinute, st.wYear, st.wMonth, st.wDay);
-    DrawLabel(g, clock, smallFont, RectF(L.clockX, L.tileY, L.clockW, L.tile), center, pal.text);
+    if (vertical) swprintf(clock, 64, L"%02d:%02d\n%d/%d", st.wHour, st.wMinute, st.wMonth, st.wDay);
+    else swprintf(clock, 64, L"%02d:%02d\n%d/%d/%d", st.wHour, st.wMinute, st.wYear, st.wMonth, st.wDay);
+    RectF clockRect = vertical ? RectF(L.panelX, L.clockY, L.panelW, L.clockH) : RectF(L.clockX, L.tileY, L.clockW, L.tile);
+    DrawLabel(g, clock, smallFont, clockRect, center, pal.text);
 
     if (s_levels) {
         DrawSlider(g, 0);
@@ -838,11 +1005,19 @@ void ShowThumbNow() {
         HideThumb();
         return;
     }
+    // 横排时在格子上方；竖排时在面板里侧、标题小牌子下面
     RectF r = TileRect(idx);
-    int centerX = s_pos.x + static_cast<int>(r.X + r.Width / 2);
-    int bottomY = s_pos.y + static_cast<int>(s_L.margin - Px(8));
+    const Layout& L = s_L;
+    POINT at = {s_pos.x + static_cast<int>(r.X + r.Width / 2), s_pos.y + static_cast<int>(L.margin - Px(8))};
+    int place = kThumbAbove;
+    if (Vertical()) {
+        bool left = s_edge == kEdgeLeft;
+        at = {s_pos.x + static_cast<int>(left ? L.panelX + L.panelW + Px(8) : L.panelX - Px(8)),
+              s_pos.y + static_cast<int>(r.Y + r.Height / 2 + Px(21))};
+        place = left ? kThumbRight : kThumbLeft;
+    }
     HWND h = s_items[idx - 1].hwnd;
-    s_thumbShown = Thumb_Show(h, centerX, bottomY, s_bounds, s_scale, s_glass.Light()) ? h : nullptr;
+    s_thumbShown = Thumb_Show(h, at, place, s_bounds, s_scale, s_glass.Light()) ? h : nullptr;
     s_thumbWant = h;
     s_thumbIdx = idx;
 }
@@ -866,14 +1041,19 @@ void SyncThumb() {
 void Render(float slide, BYTE alpha) {
     if (!s_hwnd || s_width <= 0 || s_height <= 0 || !EnsureCanvas()) return;
 
-    int dy = static_cast<int>(std::lround(slide));
+    // 横排时往下滑出去，竖排时往屏幕边那一侧滑出去
+    int moved = static_cast<int>(std::lround(slide)), dx = 0, dy = moved;
+    if (Vertical()) {
+        dy = 0;
+        dx = s_edge == kEdgeLeft ? -moved : moved;
+    }
     size_t count = static_cast<size_t>(s_width) * s_height;
-    if (dy == 0 && s_baseValid && s_base.size() == count) {
+    if (moved == 0 && s_baseValid && s_base.size() == count) {
         memcpy(s_bits, s_base.data(), count * sizeof(DWORD));
     } else {
-        s_glass.Prepare(s_width, s_height, RectF(s_L.margin, s_L.margin, s_L.panelW, s_L.panelH), s_L.radius);
-        s_glass.Render(s_bits, s_pos, dy);
-        if (dy == 0) {
+        s_glass.Prepare(s_width, s_height, RectF(s_L.panelX, s_L.panelY, s_L.panelW, s_L.panelH), s_L.radius);
+        s_glass.Render(s_bits, s_pos, dy, dx);
+        if (moved == 0) {
             s_base.assign(s_bits, s_bits + count);
             s_baseValid = true;
         }
@@ -886,7 +1066,7 @@ void Render(float slide, BYTE alpha) {
         g.SetTextRenderingHint(TextRenderingHintAntiAlias);
         g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         g.SetPixelOffsetMode(PixelOffsetModeHalf);
-        g.TranslateTransform(0, static_cast<REAL>(dy));
+        g.TranslateTransform(static_cast<REAL>(dx), static_cast<REAL>(dy));
         DrawContent(g);
     }
 
@@ -1221,11 +1401,24 @@ void ShowStartContextMenu() {
     SendWinX();
 }
 
+// 右键菜单从哪弹：横排在格子上方（菜单底边对着它）；竖排在面板里侧，菜单顶边和格子顶边对齐
+UINT MenuAlign() {
+    if (!Vertical()) return TPM_BOTTOMALIGN;
+    return s_edge == kEdgeLeft ? TPM_LEFTALIGN | TPM_TOPALIGN : TPM_RIGHTALIGN | TPM_TOPALIGN;
+}
+
+POINT MenuAnchor(const RectF& r) {  // 客户区坐标
+    if (!Vertical()) return {static_cast<LONG>(r.X + r.Width / 2), static_cast<LONG>(r.Y)};
+    const Layout& L = s_L;
+    float x = s_edge == kEdgeLeft ? L.panelX + L.panelW + Px(4) : L.panelX - Px(4);
+    return {static_cast<LONG>(x), static_cast<LONG>(r.Y)};
+}
+
 // 右键格子：尽量和系统任务栏的右键菜单一样。
 // 运行中的窗口：跳转列表的“最近”项；应用名（再开一个）、以管理员身份运行、打开文件所在的位置；
 // 还原 / 最小化 / 最大化；“最大化时不隐藏任务栏”；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
 // 没运行的固定应用、打字筛选出来的应用：“最近”项；打开、以管理员身份运行、打开文件所在的位置。
-// at：菜单的位置（客户区坐标），菜单底边对着它
+// at：菜单的位置（客户区坐标），对齐方式见 MenuAlign
 void ShowItemMenu(int idx, POINT at) {
     if (idx == 0) {
         ShowStartContextMenu();
@@ -1300,8 +1493,8 @@ void ShowItemMenu(int idx, POINT at) {
     HideThumb();
     Redraw();
     ClientToScreen(s_hwnd, &at);
-    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, at.x, at.y, 0,
-                              s_hwnd, nullptr);
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | MenuAlign(), at.x, at.y, 0, s_hwnd,
+                              nullptr);
     DestroyMenu(menu);
     s_menuOpen = false;
 
@@ -1345,8 +1538,7 @@ void ShowItemMenu(int idx, POINT at) {
 // 用键盘（菜单键、Shift+F10）打开选中格子的右键菜单，菜单从格子上方弹出
 void ShowSelectedMenu() {
     if (s_sel < 0 || s_sel > ItemCount() || !IsTileVisible(s_sel)) return;
-    RectF r = TileRect(s_sel);
-    ShowItemMenu(s_sel, POINT{static_cast<LONG>(r.X + r.Width / 2), static_cast<LONG>(r.Y)});
+    ShowItemMenu(s_sel, MenuAnchor(TileRect(s_sel)));
 }
 
 void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu);
@@ -1460,8 +1652,7 @@ void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu) {
     }
     POINT at;
     if (cell >= 0 && TrayOnPage(cell)) {
-        RectF r = TrayCellRect(cell);
-        at = {static_cast<LONG>(r.X + r.Width / 2), static_cast<LONG>(r.Y)};
+        at = MenuAnchor(TrayCellRect(cell));
         ClientToScreen(s_hwnd, &at);
     } else {
         GetCursorPos(&at);
@@ -1470,7 +1661,7 @@ void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu) {
     s_menuOpen = true;
     HideThumb();
     Redraw();
-    bool appMenu = Tray_Menu(app, s_hwnd, at, [] { HideNow(); }, offerAppMenu);
+    bool appMenu = Tray_Menu(app, s_hwnd, at, [] { HideNow(); }, offerAppMenu, MenuAlign());
     s_menuOpen = false;
     s_trayHot = -1;
     Redraw();
@@ -1643,7 +1834,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MOUSEMOVE: {
             int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
             if (s_drag != kNone) {
-                SetSliderFromX(SliderOf(s_drag), x);
+                SetSliderAt(SliderOf(s_drag), x, y);
                 return 0;
             }
             // 正在用键盘选时，位置没变的是系统补发的（比如缩略图窗口出现了、面板重新居中），不是用户在动鼠标：
@@ -1681,11 +1872,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_LBUTTONDOWN: {
-            int x = GET_X_LPARAM(lParam), control = ControlAt(x, GET_Y_LPARAM(lParam));
+            int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam), control = ControlAt(x, y);
             if ((control == kVolumeTrack || control == kBrightTrack) && SliderEnabled(SliderOf(control))) {
                 s_drag = control;
                 SetCapture(hwnd);
-                SetSliderFromX(SliderOf(control), x);
+                SetSliderAt(SliderOf(control), x, y);
             }
             return 0;
         }
@@ -1777,6 +1968,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     break;
                 case VK_RIGHT:
                     if (!FlipTrayUnderMouse(1)) MoveSelection(1);
+                    break;
+                case VK_UP:  // 竖排时上下键选
+                    if (Vertical()) MoveSelection(-1);
+                    break;
+                case VK_DOWN:
+                    if (Vertical()) MoveSelection(1);
                     break;
                 case VK_TAB: MoveSelection((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1); break;
                 case VK_HOME: MoveSelection(-s_sel); break;
@@ -1912,10 +2109,11 @@ void Popup_Destroy() {
 namespace {
 
 // 弹出。preview：设置窗口里调大小时的预览，不抢前台。
-// startMenu：任务栏藏着时短按了 Win，只留一行格子贴着底边弹出来，弹完打开开始菜单
+// startMenu：任务栏藏着时短按了 Win，只留一行格子（竖排时一列）贴着屏幕边弹出来，弹完打开开始菜单
 void Open(bool preview, bool startMenu = false) {
     if (!s_hwnd) return;
     s_preview = preview;
+    s_edge = preview ? s_previewEdge : g_settings.popupEdge;
     KillTimer(s_hwnd, kTimerPreview);
     EndStartMode();
     s_compact = startMenu;
@@ -1975,10 +2173,12 @@ void Open(bool preview, bool startMenu = false) {
     }
     RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
     if (preview) {
-        // 预览时大小会一直变：按最大的大小把底边一整条截下来，变大小时不用再截
+        // 预览时大小会一直变：按最大的大小把底边（竖排时左边或右边）一整条截下来，变大小时不用再截
         float grow = static_cast<float>(kMaxPopupScale) / std::max(1, s_previewPercent);
-        window = {s_bounds.left, s_bounds.bottom - static_cast<LONG>(std::ceil(s_height * grow)), s_bounds.right,
-                  s_bounds.bottom};
+        LONG w = static_cast<LONG>(std::ceil(s_width * grow)), h = static_cast<LONG>(std::ceil(s_height * grow));
+        if (s_edge == kEdgeLeft) window = {s_bounds.left, s_bounds.top, s_bounds.left + w, s_bounds.bottom};
+        else if (s_edge == kEdgeRight) window = {s_bounds.right - w, s_bounds.top, s_bounds.right, s_bounds.bottom};
+        else window = {s_bounds.left, s_bounds.bottom - h, s_bounds.right, s_bounds.bottom};
     }
     s_glass.SetLight(ThemeIsLight(g_settings.theme, true));
     s_glass.SetFrosted(g_settings.glassStyle == kGlassFrosted);
@@ -2014,11 +2214,13 @@ void Open(bool preview, bool startMenu = false) {
 
 void Popup_Show() { Open(false); }
 
-void Popup_Preview(int percent, int align, bool hold) {
+void Popup_Preview(int percent, int edge, int align, bool hold) {
     if (!s_hwnd || (s_open && !s_preview)) return;  // 真的弹出着就不打扰
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
+    if (s_open && edge != s_previewEdge) HideNow();  // 换了边：重新截背景，从新的那条边弹出来
     if (!s_open) {
         s_previewPercent = percent;
+        s_previewEdge = edge;
         s_previewAlign = align;
         Open(true);
     } else if (percent != s_previewPercent || align != s_previewAlign) {

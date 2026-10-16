@@ -40,7 +40,8 @@ enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / �
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
-enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight };  // 迷你任务栏弹出位置：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右
+enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight };  // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右
+enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
@@ -53,7 +54,8 @@ struct Settings {
     bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
-    int popupAlign = kAlignSystem;  // 迷你任务栏弹出位置，见 PopupAlign
+    int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
+    int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
@@ -260,8 +262,10 @@ void RunAsAdmin(HWND owner, const std::wstring& file);    // owner：UAC 提示�
 void OpenFileLocation(const std::wstring& path);          // 在资源管理器里打开所在文件夹并选中它
 
 // ---------------- 窗口缩略图（thumbnail.cpp）----------------
-// 在 (centerX, bottomY) 上方居中显示 source 的实时缩略图，不超出 bounds；DWM 不给缩略图时返回 false
-bool Thumb_Show(HWND source, int centerX, int bottomY, const RECT& bounds, float scale, bool light);
+// 在 at 旁边显示 source 的实时缩略图（见 ThumbPlace），不超出 bounds；DWM 不给缩略图时返回 false
+// 缩略图放在哪：kThumbAbove 底边中点对着 at；kThumbRight 左边对着 at.x、顶边在 at.y；kThumbLeft 右边对着 at.x、顶边在 at.y
+enum ThumbPlace { kThumbAbove, kThumbRight, kThumbLeft };
+bool Thumb_Show(HWND source, POINT at, int place, const RECT& bounds, float scale, bool light);
 void Thumb_Hide();
 void Thumb_Destroy();
 
@@ -279,9 +283,10 @@ void Tray_Click(const TrayApp& app, bool right, HWND notify = nullptr);
 void Tray_ShowHidden();                 // 展开系统的“隐藏的图标”
 bool Tray_Busy();                       // 还在系统托盘里找、点
 // 迷你任务栏自己的菜单：打开、打开文件所在的位置、结束程序，appMenu 时再加一项“程序菜单”。
-// 由 owner 弹出，底边对着屏幕坐标 at。选了别的项时先调用 picked（可以为空，比如收起迷你任务栏）再去做；
+// 由 owner 在屏幕坐标 at 弹出（默认底边对着它）。选了别的项时先调用 picked（可以为空，比如收起迷你任务栏）再去做；
 // 返回 true = 选了“程序菜单”，由调用的一方去系统托盘里右键它
-bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu = false);
+bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu = false,
+               UINT align = TPM_BOTTOMALIGN);  // align：TrackPopupMenu 的对齐方式
 bool Tray_OnMessage(UINT msg, LPARAM lParam);  // 主窗口收到 WM_APP_TRAY_LAUNCH、WM_APP_TRAY_MENU 时交给它
 
 // ---------------- 迷你任务栏 ----------------
@@ -293,9 +298,9 @@ void Popup_Toggle();
 // 任务栏藏着时短按了 Win：先弹出迷你任务栏，弹完再打开开始菜单（开始菜单开着时迷你任务栏一直在）；
 // 任务栏没藏着、开始菜单已经开着时照常补发 Win
 void Popup_StartMenu(DWORD vk);
-// 设置窗口里调“迷你任务栏大小”或“位置”时按 percent、align（PopupAlign）弹出预览（不抢前台，点不到）。
-// hold：还按着滑块，先不收起；否则过一会儿自己收起
-void Popup_Preview(int percent, int align, bool hold);
+// 设置窗口里调“迷你任务栏大小”“位置”“对齐”时按 percent、edge（PopupEdge）、align（PopupAlign）弹出预览
+// （不抢前台，点不到）。hold：还按着滑块，先不收起；否则过一会儿自己收起
+void Popup_Preview(int percent, int edge, int align, bool hold);
 void Popup_EndPreview();  // 马上收起预览
 
 // ---------------- 音量和亮度 ----------------
@@ -382,8 +387,8 @@ public:
     // width×height：窗口像素大小；panel：面板在窗口里的位置；radius：圆角半径
     void Prepare(int width, int height, const Gdiplus::RectF& panel, float radius);
     // 在预乘 BGRA 像素上画阴影和玻璃面板。origin：窗口左上角在屏幕上的位置；
-    // slide：面板往下平移的像素数（弹出 / 收起动画），背景不跟着动
-    void Render(DWORD* pixels, POINT origin, int slide) const;
+    // slide / slideX：面板往下 / 往右平移的像素数（弹出 / 收起动画），背景不跟着动
+    void Render(DWORD* pixels, POINT origin, int slide, int slideX = 0) const;
 
 private:
     struct Texel {
@@ -394,7 +399,7 @@ private:
         BYTE gloss = 0;        // 顶部光泽的位置权重，乘上深浅色各自的强度
         BYTE bevel = 0;        // 1 = 在边缘弯曲的一圈里，要折射取样
     };
-    void RenderRows(DWORD* pixels, POINT origin, int slide, int rowBegin, int rowEnd) const;
+    void RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int rowBegin, int rowEnd) const;
     void SampleBevel(float x, float y, const Texel& t, float rgb[3]) const;
     DWORD Fetch(int x, int y) const;
 

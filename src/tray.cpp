@@ -642,7 +642,7 @@ enum TrayCmd : UINT { kTrayOpen = 1, kTrayAppMenu, kTrayLocation, kTrayEnd };
 
 }  // namespace
 
-bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu) {
+bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu, UINT align) {
     std::wstring name = app.name.size() > 40 ? app.name.substr(0, 39) + L"…" : app.name;
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
@@ -655,8 +655,7 @@ bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool 
     AppendMenuW(menu, MF_STRING, kTrayEnd, L"结束程序");
     SetMenuDefaultItem(menu, kTrayOpen, FALSE);
     if (!SetForegroundWindow(owner)) ForceForeground(owner);  // 不然点别处菜单不会消失
-    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, at.x, at.y, 0,
-                              owner, nullptr);
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align, at.x, at.y, 0, owner, nullptr);
     PostMessageW(owner, WM_NULL, 0, 0);
     DestroyMenu(menu);
     if (cmd == kTrayAppMenu) return true;

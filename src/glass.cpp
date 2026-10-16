@@ -316,19 +316,19 @@ void Glass::SampleBevel(float x, float y, const Texel& t, float rgb[3]) const {
     rgb[2] = SampleChannel(m_blur, m_w, m_h, x + t.dx * 1.1f, y + t.dy * 1.1f, 0);
 }
 
-void Glass::Render(DWORD* pixels, POINT origin, int slide) const {
+void Glass::Render(DWORD* pixels, POINT origin, int slide, int slideX) const {
     // 一行行互不相干，分几段交给几个线程一起画（拖动、动画时每帧都要画一整张）
     const int h = m_texH;
     int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 4);
     if (static_cast<long long>(m_texW) * h < 200000) threads = 1;
     std::vector<std::thread> pool;
     for (int i = 1; i < threads; ++i)
-        pool.emplace_back([=] { RenderRows(pixels, origin, slide, h * i / threads, h * (i + 1) / threads); });
-    RenderRows(pixels, origin, slide, 0, h / threads);
+        pool.emplace_back([=] { RenderRows(pixels, origin, slide, slideX, h * i / threads, h * (i + 1) / threads); });
+    RenderRows(pixels, origin, slide, slideX, 0, h / threads);
     for (std::thread& t : pool) t.join();
 }
 
-void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int rowBegin, int rowEnd) const {
+void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int rowBegin, int rowEnd) const {
     const int w = m_texW, h = m_texH;
     const float tintL = m_light ? 252.0f : 16.0f;
     const float tint[3] = {tintL, tintL, m_light ? 255.0f : 20.0f};
@@ -349,7 +349,12 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int rowBegin, int
         }
         const Texel* tex = &m_texels[static_cast<size_t>(ty) * w];
         for (int x = 0; x < w; ++x) {
-            const Texel& t = tex[x];
+            int tx = x - slideX;  // 面板往右挪了 slideX 列
+            if (tx < 0 || tx >= w) {
+                row[x] = 0;
+                continue;
+            }
+            const Texel& t = tex[tx];
             if (!t.cover) {
                 row[x] = static_cast<DWORD>(t.shadow * shadowAlpha + 0.5f) << 24;
                 continue;
