@@ -92,7 +92,7 @@ std::wstring KeyName(UINT vk, bool display) {
     if (vk >= VK_F1 && vk <= VK_F24) return L"F" + std::to_wstring(vk - VK_F1 + 1);
     if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return L"Num" + std::to_wstring(vk - VK_NUMPAD0);
     for (const NamedKey& k : kNamedKeys)
-        if (k.vk == vk) return display && k.display ? k.display : k.name;
+        if (k.vk == vk) return display && k.display ? Tr(k.display) : k.name;
     return {};
 }
 
@@ -129,12 +129,12 @@ UINT ParseHotkey(const std::wstring& text) {
 
 const wchar_t* HotkeyProblem(UINT hotkey, bool hold) {
     UINT vk = HotkeyVk(hotkey), mods = HotkeyMods(hotkey);
-    if (KeyName(vk).empty()) return L"这个键不能用，换一个";
-    if (vk == VK_LBUTTON && !mods) return L"鼠标左键要配上 Ctrl、Shift 或 Alt";
+    if (KeyName(vk).empty()) return Tr(L"这个键不能用，换一个");
+    if (vk == VK_LBUTTON && !mods) return Tr(L"鼠标左键要配上 Ctrl、Shift 或 Alt");
     if (hold) return nullptr;
-    if (vk == VK_RBUTTON && !mods) return L"单按右键的话右键菜单就打不开了，配上修饰键或改成长按";
-    if (IsTypingKey(vk) && !(mods & (MOD_CONTROL | MOD_ALT))) return L"单按会打不了字，配上 Ctrl / Alt 或改成长按";
-    if (vk == VK_F12 && !mods) return L"F12 单按留给系统了，配上修饰键或改成长按";
+    if (vk == VK_RBUTTON && !mods) return Tr(L"单按右键的话右键菜单就打不开了，配上修饰键或改成长按");
+    if (IsTypingKey(vk) && !(mods & (MOD_CONTROL | MOD_ALT))) return Tr(L"单按会打不了字，配上 Ctrl / Alt 或改成长按");
+    if (vk == VK_F12 && !mods) return Tr(L"F12 单按留给系统了，配上修饰键或改成长按");
     return nullptr;
 }
 
@@ -179,7 +179,7 @@ void Hotkeys_Apply() {
         s_failed[id] = true;
         Log(L"快捷键 %ls 注册不上（错误 %lu），可能被别的程序占用了", HotkeyText(reg).c_str(), GetLastError());
         if (s_warned[id] == reg) continue;
-        std::wstring text = L"快捷键 " + HotkeyText(reg, true) + L" 被别的程序占用了，在设置里换一个吧。";
+        std::wstring text = TrF(L"快捷键 %ls 被别的程序占用了，在设置里换一个吧。", HotkeyText(reg, true).c_str());
         if (ShowTrayBalloon(L"TaskbarPopup", text.c_str())) s_warned[id] = reg;  // 托盘图标还没加上时下次再说
     }
     Hook_SetBindings(bindings);

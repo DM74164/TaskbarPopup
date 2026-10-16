@@ -28,8 +28,9 @@ constexpr double kKnobMs = 150.0 * TP_ANIM_SCALE;
 // ---- 尺寸（96 DPI 下的像素，乘 s_scale 得到物理像素） ----
 constexpr float kShadow = 28;   // 面板外面留给阴影的一圈
 constexpr float kPad = 20;      // 面板内边距
-constexpr float kColW = 360;    // 右边内容的宽度
-constexpr float kNavW = 140;    // 左边导航的宽度
+constexpr float kColW = 360;    // 右边内容的宽度（英文界面宽一些，见 ColW）
+constexpr float kColWEnglish = 430;
+constexpr float kNavW = 140;    // 左边导航至少这么宽，字长的话跟着宽
 constexpr float kNavGap = 16;   // 导航和内容之间
 constexpr float kNavItemH = 38;
 constexpr float kHeaderH = 52;  // 标题栏（可以拖动）
@@ -74,7 +75,7 @@ const SliderSpec kSliderSpec[kSliderCount] = {
 };
 
 // 几选一（分段按钮）
-enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegCount };
+enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegCount };
 struct SegSpec {
     const wchar_t* label;
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
@@ -85,6 +86,7 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"托盘图标", {L"小图标堆叠", L"横向完整展示"}},  // 下标是 TrayStyle
     {L"对齐", {L"跟随系统", L"居中", L"靠左", L"靠右"}},  // 下标是 PopupAlign
     {L"位置", {L"底部", L"左侧", L"右侧"}},  // 下标是 PopupEdge
+    {L"语言", {L"跟随系统", L"中文", L"English"}},  // 下标是 Language；“中文”“English”不翻译
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -186,6 +188,7 @@ int s_canvasW = 0, s_canvasH = 0;
 std::unique_ptr<FontFamily> s_fontFamily;
 
 float Px(float dip) { return dip * s_scale; }
+float ColW() { return Px(UiEnglish() ? kColWEnglish : kColW); }
 const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
 
 bool HotkeyEnabled(int which) { return which != kHotkeyPin || s_v.on[kKeepFloats]; }  // 固定了也要它开着才有用
@@ -197,7 +200,7 @@ bool SliderEnabled(int which) {
 
 std::wstring SliderText(int which) {
     wchar_t text[32];
-    if (which != kScale) swprintf(text, 32, L"%d 毫秒", s_v.slider[which]);
+    if (which != kScale) swprintf(text, 32, Tr(L"%d 毫秒"), s_v.slider[which]);
     else swprintf(text, 32, L"%d%%", s_v.slider[which]);
     return text;
 }
@@ -219,15 +222,15 @@ float MeasureWidth(const std::wstring& text, float sizePx) {
 using RowFn = float (*)(float, float, float);
 float AddGroup(float x, float y, const wchar_t* title, const std::vector<RowFn>& rows) {
     if (title) {
-        s_texts.push_back({title, RectF(x + Px(4), y, Px(kColW) - Px(8), Px(kGroupTitleH)), 0});
+        s_texts.push_back({Tr(title), RectF(x + Px(4), y, ColW() - Px(8), Px(kGroupTitleH)), 0});
         y += Px(kGroupTitleH);
     }
     float top = y;
     for (size_t i = 0; i < rows.size(); ++i) {
-        if (i > 0) s_rowLines.insert(s_rowLines.end(), {x + Px(kRowPad), x + Px(kColW) - Px(kRowPad), y});
-        y += rows[i](x, y, Px(kColW));
+        if (i > 0) s_rowLines.insert(s_rowLines.end(), {x + Px(kRowPad), x + ColW() - Px(kRowPad), y});
+        y += rows[i](x, y, ColW());
     }
-    s_cards.push_back(RectF(x, top, Px(kColW), y - top));
+    s_cards.push_back(RectF(x, top, ColW(), y - top));
     return y + Px(kGroupGap);
 }
 
@@ -252,11 +255,11 @@ float SliderRow(int which, float x, float y, float w) {
 float SegRow(int which, float x, float y, float w) {
     float h = Px(50), bh = Px(30);
     const SegSpec& spec = kSegSpec[which];
-    s_texts.push_back({spec.label, RectF(x + Px(kRowPad), y, Px(80), h), 4});
+    s_texts.push_back({Tr(spec.label), RectF(x + Px(kRowPad), y, Px(80), h), 4});
     std::vector<float> widths;
     float total = 0;
     for (const wchar_t* option : spec.options) {
-        widths.push_back(MeasureWidth(option, Px(12.5f)) + Px(22));
+        widths.push_back(MeasureWidth(Tr(option), Px(12.5f)) + Px(22));
         total += widths.back();
     }
     float pad = Px(3);
@@ -307,9 +310,9 @@ float ChipsRow(float x, float y, float w) {
         float chipW = MeasureWidth(s_v.exclude[i], Px(12.5f)) + Px(12 + 6 + 14);
         s_items.push_back({kChip, static_cast<int>(i), place(chipW)});
     }
-    s_items.push_back({kAddChip, 0, place(MeasureWidth(L"＋ 添加程序", Px(12.5f)) + Px(24))});
+    s_items.push_back({kAddChip, 0, place(MeasureWidth(Tr(L"＋ 添加程序"), Px(12.5f)) + Px(24))});
     float bottom = cy + Px(kChipH) + Px(8);
-    s_texts.push_back({L"也可以在迷你任务栏里右键运行中的程序来添加或去掉",
+    s_texts.push_back({Tr(L"也可以在迷你任务栏里右键运行中的程序来添加或去掉"),
                        RectF(x + Px(kRowPad), bottom, w - 2 * Px(kRowPad), Px(32)), 1});
     return bottom + Px(36) - y;
 }
@@ -318,7 +321,7 @@ float ChipsRow(float x, float y, float w) {
 float BuildPage(int page, float x, float y) {
     switch (page) {
         case kPageTaskbar: {
-            y = AddGroup(x, y, L"最大化", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); }});
+            y = AddGroup(x, y, L"全屏", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); }});
             // “小窗口留在上面”关着时收起“在所有窗口上面”
             std::vector<RowFn> floats = {[](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
             if (s_v.on[kKeepFloats]) floats.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
@@ -337,9 +340,10 @@ float BuildPage(int page, float x, float y) {
             return AddGroup(x, y, L"显示", show);
         }
         case kPageLook: {
-            y = AddGroup(x, y, L"材质和颜色",
+            y = AddGroup(x, y, L"界面",
                          {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
-                          [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
+                          [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); },
+                          [](float x, float y, float w) { return SegRow(kSegLang, x, y, w); }});
             std::vector<RowFn> place = {[](float x, float y, float w) { return SliderRow(kScale, x, y, w); },
                                         [](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); }};
             if (s_v.seg[kSegEdge] == kEdgeBottom) place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });  // 竖排时收起对齐
@@ -363,18 +367,20 @@ void BuildLayout() {
     s_rowLines.clear();
 
     float margin = Px(kShadow);
-    float panelW = Px(kPad) * 2 + Px(kNavW) + Px(kNavGap) + Px(kColW);
+    float navW = Px(kNavW);  // 导航按最长的名字放宽
+    for (const wchar_t* name : kPageNames) navW = std::max(navW, MeasureWidth(Tr(name), Px(13.5f)) + Px(36));
+    float panelW = Px(kPad) * 2 + navW + Px(kNavGap) + ColW();
     s_radius = Px(22);
-    float navX = margin + Px(kPad), contentX = navX + Px(kNavW) + Px(kNavGap);
+    float navX = margin + Px(kPad), contentX = navX + navW + Px(kNavGap);
     float top = margin + Px(kHeaderH);
 
-    s_texts.push_back({L"TaskbarPopup 设置", RectF(margin + Px(kPad), margin + Px(12), Px(260), Px(28)), 2});
+    s_texts.push_back({Tr(L"TaskbarPopup 设置"), RectF(margin + Px(kPad), margin + Px(12), Px(260), Px(28)), 2});
     s_items.push_back({kClose, 0, RectF(margin + panelW - Px(12) - Px(32), margin + Px(10), Px(32), Px(32))});
 
     // 左边的导航
     float navStep = Px(kNavItemH) + Px(4);
     for (int i = 0; i < kPageCount; ++i)
-        s_items.push_back({kNav, i, RectF(navX, top + i * navStep, Px(kNavW), Px(kNavItemH))});
+        s_items.push_back({kNav, i, RectF(navX, top + i * navStep, navW, Px(kNavItemH))});
     float navBottom = top + kPageCount * navStep - Px(4);
 
     // 右边是选中的那一页。窗口高度按最高的一页算，换页时大小不变：别的页先排一遍量出高度再扔掉
@@ -393,7 +399,7 @@ void BuildLayout() {
     // “立即检查”放在“自动检查更新”那一行的开关左边
     for (const Item& it : s_items)
         if (it.kind == kToggleRow && it.index == kUpdates) {
-            float w = MeasureWidth(L"立即检查", Px(12.5f)) + Px(16);
+            float w = MeasureWidth(Tr(L"立即检查"), Px(12.5f)) + Px(16);
             float x = it.rect.X + it.rect.Width - Px(kRowPad) - Px(40) - Px(10) - w;
             RectF r(x, it.rect.Y + (it.rect.Height - Px(26)) / 2, w, Px(26));
             s_items.push_back({kCheckNow, 0, r});
@@ -407,7 +413,7 @@ void BuildLayout() {
     s_items.push_back({kOk, 0, RectF(panelRight - bw, buttonsY, bw, bh)});
     s_items.push_back({kCancel, 0, RectF(panelRight - 2 * bw - Px(10), buttonsY, bw, bh)});
     const char* version = TP_VERSION_STR;
-    s_texts.push_back({L"版本 " + std::wstring(version, version + strlen(version)),
+    s_texts.push_back({std::wstring(Tr(L"版本")) + L" " + std::wstring(version, version + strlen(version)),
                        RectF(margin + Px(kPad) + Px(4), buttonsY, Px(200), bh), 3});
 
     float panelH = buttonsY + bh + Px(kPad) - margin;
@@ -521,10 +527,10 @@ void DrawToggleRow(Graphics& g, const Item& it) {
         if (const Item* check = FindItem({kCheckNow, 0})) textW = check->rect.X - r.X - Px(kRowPad) - Px(6);
     if (t.sub) {
         float x = r.X + Px(kRowPad);
-        DrawText(g, t.label, Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(8), textW, Px(20)), pal.text);
-        DrawText(g, t.sub, Px(11.5f), FontStyleRegular, RectF(x, r.Y + Px(29), textW, Px(17)), pal.subtle);
+        DrawText(g, Tr(t.label), Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(8), textW, Px(20)), pal.text);
+        DrawText(g, Tr(t.sub), Px(11.5f), FontStyleRegular, RectF(x, r.Y + Px(29), textW, Px(17)), pal.subtle);
     } else {
-        DrawText(g, t.label, Px(13.5f), FontStyleRegular, RectF(r.X + Px(kRowPad), r.Y, textW, r.Height), pal.text);
+        DrawText(g, Tr(t.label), Px(13.5f), FontStyleRegular, RectF(r.X + Px(kRowPad), r.Y, textW, r.Height), pal.text);
     }
 
     // 开关：和 Win11 一样，开着是强调色的槽、白色圆点在右边
@@ -549,7 +555,7 @@ void DrawSliderRow(Graphics& g, const Item& it) {
     const SliderSpec& spec = kSliderSpec[it.index];
     bool enabled = SliderEnabled(it.index);
     Color text = enabled ? pal.text : pal.subtle;
-    DrawText(g, spec.label, Px(13.5f), FontStyleRegular, sg.label, text);
+    DrawText(g, Tr(spec.label), Px(13.5f), FontStyleRegular, sg.label, text);
     DrawText(g, SliderText(it.index), Px(12.5f), FontStyleRegular, sg.label, enabled ? pal.subtle : pal.separator,
              StringAlignmentFar);
 
@@ -581,7 +587,7 @@ void DrawSegment(Graphics& g, const Item& it) {
     if (option == 0) FillRound(g, s_segTrack[which], s_segTrack[which].Height / 2, pal.trackOff);
     if (selected) DrawCard(g, r, r.Height / 2, pal.buttonHot, pal.cardRim);
     else if (s_hover == it || s_press == it) FillRound(g, r, r.Height / 2, pal.hover);
-    DrawText(g, kSegSpec[which].options[option], Px(12.5f), FontStyleRegular, r, selected ? pal.text : pal.subtle,
+    DrawText(g, Tr(kSegSpec[which].options[option]), Px(12.5f), FontStyleRegular, r, selected ? pal.text : pal.subtle,
              StringAlignmentCenter);
 }
 
@@ -606,19 +612,19 @@ void DrawHotkeyRow(Graphics& g, const Item& it) {
         FillRound(g, RectF(r.X + Px(4), r.Y + Px(3), r.Width - Px(8), r.Height - Px(6)), Px(9), pal.hover);
 
     // 说明：刚按的键不行时说为什么；录的时候说怎么取消；设的被别的程序占了也说一声。最多两行
-    std::wstring sub = t.sub;
+    std::wstring sub = Tr(t.sub);
     Color subColor = enabled ? pal.subtle : pal.separator;
     if (!s_hotkeyError[it.index].empty()) {
         sub = s_hotkeyError[it.index];
         subColor = pal.warn;
     } else if (capturing) {
-        sub = L"按下按键或鼠标键，Esc 取消";
+        sub = Tr(L"按下按键或鼠标键，Esc 取消");
     } else if (enabled && hotkey && hotkey == s_initial.hotkey[it.index] && Hotkeys_Failed(it.index)) {
-        sub = L"被别的程序占用了，换一个吧";
+        sub = Tr(L"被别的程序占用了，换一个吧");
         subColor = pal.warn;
     }
     float x = r.X + Px(kRowPad), textW = box.X - x - Px(8);
-    DrawText(g, t.label, Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(12), textW, Px(20)), enabled ? pal.text : pal.subtle);
+    DrawText(g, Tr(t.label), Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(12), textW, Px(20)), enabled ? pal.text : pal.subtle);
     DrawText(g, sub, Px(11.5f), FontStyleRegular, RectF(x, r.Y + Px(35), textW, Px(38)), subColor, StringAlignmentNear,
              true);
 
@@ -630,13 +636,13 @@ void DrawHotkeyRow(Graphics& g, const Item& it) {
     RectF textRect(box.X + Px(10), box.Y, box.Width - Px(20), box.Height);
     if (capturing) {
         std::wstring held = HeldModifiers();
-        text = held.empty() ? L"按下按键…" : held + L"…";
+        text = held.empty() ? Tr(L"按下按键…") : held + L"…";
         color = held.empty() ? pal.subtle : pal.text;
     } else if (hotkey) {
         text = HotkeyText(hotkey, true);
         textRect.Width -= box.Height - Px(10);  // 右边留给小叉
     } else {
-        text = L"未设置";
+        text = Tr(L"未设置");
         color = enabled ? pal.subtle : pal.separator;
     }
     DrawText(g, text, Px(12.5f), FontStyleRegular, textRect, color);
@@ -665,7 +671,7 @@ void DrawHotkeyMode(Graphics& g, const Item& it) {
     if (selected && enabled) DrawCard(g, r, r.Height / 2, pal.buttonHot, pal.cardRim);
     else if (enabled && (s_hover == it || s_press == it)) FillRound(g, r, r.Height / 2, pal.hover);
     Color color = !enabled ? pal.separator : selected ? pal.text : pal.subtle;
-    DrawText(g, kHotkeyModes[option], Px(12), FontStyleRegular, r, color, StringAlignmentCenter);
+    DrawText(g, Tr(kHotkeyModes[option]), Px(12), FontStyleRegular, r, color, StringAlignmentCenter);
 }
 
 void DrawChip(Graphics& g, const Item& it) {
@@ -674,7 +680,7 @@ void DrawChip(Graphics& g, const Item& it) {
     bool hot = s_hover == it || s_press == it;
     if (it.kind == kAddChip) {
         FillRound(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button);
-        DrawText(g, L"＋ 添加程序", Px(12.5f), FontStyleRegular, r, pal.accent, StringAlignmentCenter);
+        DrawText(g, Tr(L"＋ 添加程序"), Px(12.5f), FontStyleRegular, r, pal.accent, StringAlignmentCenter);
         return;
     }
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
@@ -700,7 +706,7 @@ void DrawNav(Graphics& g, const Item& it) {
     } else if (s_hover == it || s_press == it) {
         FillRound(g, r, Px(8), pal.hover);
     }
-    DrawText(g, kPageNames[it.index], Px(13.5f), FontStyleRegular, RectF(r.X + Px(16), r.Y, r.Width - Px(20), r.Height),
+    DrawText(g, Tr(kPageNames[it.index]), Px(13.5f), FontStyleRegular, RectF(r.X + Px(16), r.Y, r.Width - Px(20), r.Height),
              selected ? pal.text : pal.subtle);
 }
 
@@ -720,7 +726,7 @@ void DrawButton(Graphics& g, const Item& it) {
     }
     if (it.kind == kCheckNow) {
         if (hot) FillRound(g, r, r.Height / 2, pal.button);
-        DrawText(g, L"立即检查", Px(12.5f), FontStyleRegular, r, pal.accent, StringAlignmentCenter);
+        DrawText(g, Tr(L"立即检查"), Px(12.5f), FontStyleRegular, r, pal.accent, StringAlignmentCenter);
         return;
     }
     if (it.kind == kOk) {
@@ -731,11 +737,11 @@ void DrawButton(Graphics& g, const Item& it) {
         PointF top(0, r.Y), bottom(0, r.Y + r.Height);
         LinearGradientBrush brush(top, bottom, Mix(fill, Color(255, 255, 255, 255), 0.12f), fill);
         g.FillPath(&brush, &path);
-        DrawText(g, L"确定", Px(13.5f), FontStyleRegular, r, pal.onAccent, StringAlignmentCenter);
+        DrawText(g, Tr(L"确定"), Px(13.5f), FontStyleRegular, r, pal.onAccent, StringAlignmentCenter);
         return;
     }
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
-    DrawText(g, L"取消", Px(13.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
+    DrawText(g, Tr(L"取消"), Px(13.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
 }
 
 void DrawContent(Graphics& g) {
@@ -1199,7 +1205,7 @@ void SetHotkey(int which, UINT hotkey) {
 const wchar_t* HotkeyRefusal(int which, UINT hotkey, bool hold) {
     if (const wchar_t* problem = HotkeyProblem(hotkey, hold)) return problem;
     int other = 1 - which;
-    if (hotkey == s_v.hotkey[other] && hold == s_v.hold[other]) return L"和另一个快捷键重复了";
+    if (hotkey == s_v.hotkey[other] && hold == s_v.hold[other]) return Tr(L"和另一个快捷键重复了");
     return nullptr;
 }
 
@@ -1213,7 +1219,7 @@ void TryHotkey(UINT hotkey) {
     bool viaRegister = !hold && !IsMouseVk(vk) && !IsModifierVk(vk) && vk != VK_CAPITAL && vk != VK_NUMLOCK && vk != VK_SCROLL;
     if (!refusal && viaRegister) {
         if (RegisterHotKey(s_hwnd, 0xBFFF, HotkeyMods(hotkey) | MOD_NOREPEAT, vk)) UnregisterHotKey(s_hwnd, 0xBFFF);
-        else refusal = L"被别的程序占用了，换一个吧";
+        else refusal = Tr(L"被别的程序占用了，换一个吧");
     }
     if (refusal) {
         s_hotkeyError[which] = refusal;
@@ -1317,9 +1323,9 @@ std::wstring BrowseExe() {
     std::wstring result;
     IFileOpenDialog* dialog = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return result;
-    COMDLG_FILTERSPEC filter[] = {{L"程序 (*.exe)", L"*.exe"}};
+    COMDLG_FILTERSPEC filter[] = {{Tr(L"程序 (*.exe)"), L"*.exe"}};
     dialog->SetFileTypes(1, filter);
-    dialog->SetTitle(L"选择最大化时不隐藏任务栏的程序");
+    dialog->SetTitle(Tr(L"选择最大化时不隐藏任务栏的程序"));
     if (SUCCEEDED(dialog->Show(s_hwnd))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item))) {
@@ -1368,9 +1374,9 @@ void ShowAddMenu(const RectF& anchor) {
         for (size_t p = 0; (p = text.find(L'&', p)) != std::wstring::npos; p += 2) text.insert(p, 1, L'&');
         AppendMenuW(menu, MF_STRING, 100 + i, text.c_str());
     }
-    if (running.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"没有其它开着窗口的程序");
+    if (running.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, Tr(L"没有其它开着窗口的程序"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 1, L"浏览...");
+    AppendMenuW(menu, MF_STRING, 1, Tr(L"浏览..."));
     POINT at = {static_cast<LONG>(anchor.X), static_cast<LONG>(anchor.Y + anchor.Height + Px(4))};
     ClientToScreen(s_hwnd, &at);
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, at.x, at.y, 0, s_hwnd, nullptr);
@@ -1405,6 +1411,7 @@ void Apply() {
     if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) g_settings.trayStyle = s_v.seg[kSegTray];
     if (s_v.seg[kSegAlign] != s_initial.seg[kSegAlign]) g_settings.popupAlign = s_v.seg[kSegAlign];
     if (s_v.seg[kSegEdge] != s_initial.seg[kSegEdge]) g_settings.popupEdge = s_v.seg[kSegEdge];
+    if (s_v.seg[kSegLang] != s_initial.seg[kSegLang]) g_settings.language = s_v.seg[kSegLang];
     for (int i = 0; i < kHotkeyCount; ++i) {
         if (s_v.hotkey[i] != s_initial.hotkey[i]) g_settings.hotkey[i] = s_v.hotkey[i];
         if (s_v.hold[i] != s_initial.hold[i]) g_settings.hotkeyHold[i] = s_v.hold[i];
@@ -1437,7 +1444,11 @@ void Activate(const Item& it) {
         case kSegment:
             s_v.seg[it.index / kSegStride] = it.index % kSegStride;
             ApplyLook();  // 马上换上看看效果，取消时不保存
-            if (it.index / kSegStride == kSegEdge) Relayout(true);  // 竖排时收起对齐那一行
+            if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言看看，取消时换回去
+                SetUiEnglish(LanguageIsEnglish(s_v.seg[kSegLang]));
+                SetWindowTextW(s_hwnd, Tr(L"TaskbarPopup 设置"));
+            }
+            if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegLang) Relayout(true);  // 竖排时收起对齐那一行；换语言字的宽度变了
             if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign)
                 Popup_Preview(s_v.slider[kScale], s_v.seg[kSegEdge], s_v.seg[kSegAlign], false);  // 弹在选的位置看看
             break;
@@ -1794,6 +1805,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case WM_DESTROY:
+            SetUiEnglish(LanguageIsEnglish(g_settings.language));  // 选了语言却没按确定：换回去
             ReleaseAll();
             s_hwnd = nullptr;
             return 0;
@@ -1848,6 +1860,7 @@ void SettingsDialog_Show() {
     s_initial.seg[kSegTray] = g_settings.trayStyle;
     s_initial.seg[kSegAlign] = g_settings.popupAlign;
     s_initial.seg[kSegEdge] = g_settings.popupEdge;
+    s_initial.seg[kSegLang] = g_settings.language;
     for (int i = 0; i < kHotkeyCount; ++i) {
         s_initial.hotkey[i] = g_settings.hotkey[i];
         s_initial.hold[i] = g_settings.hotkeyHold[i];
@@ -1874,7 +1887,7 @@ void SettingsDialog_Show() {
     const RECT& work = mi.rcWork;
     s_pos = {work.left + (work.right - work.left - s_width) / 2, work.top + (work.bottom - work.top - s_height) / 2};
 
-    s_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, kClassName, L"TaskbarPopup 设置",
+    s_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_APPWINDOW, kClassName, Tr(L"TaskbarPopup 设置"),
                              WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX, s_pos.x, s_pos.y, s_width, s_height, nullptr, nullptr,
                              g_instance, nullptr);
     if (!s_hwnd) {

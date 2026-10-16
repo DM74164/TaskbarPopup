@@ -41,6 +41,7 @@ enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅�
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
 enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight };  // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右
+enum Language { kLangSystem, kLangChinese, kLangEnglish };  // 界面语言
 enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
@@ -56,6 +57,7 @@ struct Settings {
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
+    int language = kLangSystem;     // 界面语言，见 Language
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
     bool checkUpdates = false;   // 自动检查更新
@@ -441,6 +443,13 @@ std::shared_ptr<Gdiplus::Bitmap> BitmapFromIcon(HICON hIcon);
 double NowMs();        // 高精度时钟，毫秒
 // 诊断日志：g_settings.debugLog 打开时追加一行到 SettingsDir() 下的 debug.log，可以在任何线程上调用
 void Log(const wchar_t* format, ...);
+
+// lang.cpp：界面文字。代码里写中文，英文界面时 Tr 查表换成英文
+bool LanguageIsEnglish(int language);  // 这个设置（Language）下用不用英文
+void SetUiEnglish(bool english);
+bool UiEnglish();
+const wchar_t* Tr(const wchar_t* zh);
+std::wstring TrF(const wchar_t* zhFormat, ...);  // Tr 以后按格式填进参数
 std::wstring LogFile();
 void WaitForVBlank();  // 等到下一次屏幕刷新，让动画按显示器的节奏走
 bool CaptureScreen(const RECT& area, std::vector<DWORD>& pixels);  // 截屏，BGRA，不透明

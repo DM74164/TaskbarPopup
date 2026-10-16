@@ -630,9 +630,8 @@ DWORD WINAPI EndThread(LPVOID param) {
 }
 
 void EndApp(const TrayApp& app) {
-    wchar_t text[512];
-    swprintf(text, 512, L"结束“%ls”？\n它没保存的内容会丢失。", app.name.c_str());
-    if (MessageBoxW(nullptr, text, L"TaskbarPopup", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST |
+    std::wstring text = TrF(L"结束“%ls”？\n它没保存的内容会丢失。", app.name.c_str());
+    if (MessageBoxW(nullptr, text.c_str(), L"TaskbarPopup", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST |
                                                          MB_SETFOREGROUND) != IDOK)
         return;
     if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.exe, app.name}, 0, nullptr)) CloseHandle(h);
@@ -647,12 +646,12 @@ bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool 
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayOpen, L"打开");
-    if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, L"程序菜单");
+    AppendMenuW(menu, MF_STRING, kTrayOpen, Tr(L"打开"));
+    if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, Tr(L"程序菜单"));
     if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
-        AppendMenuW(menu, MF_STRING, kTrayLocation, L"打开文件所在的位置");
+        AppendMenuW(menu, MF_STRING, kTrayLocation, Tr(L"打开文件所在的位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayEnd, L"结束程序");
+    AppendMenuW(menu, MF_STRING, kTrayEnd, Tr(L"结束程序"));
     SetMenuDefaultItem(menu, kTrayOpen, FALSE);
     if (!SetForegroundWindow(owner)) ForceForeground(owner);  // 不然点别处菜单不会消失
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align, at.x, at.y, 0, owner, nullptr);

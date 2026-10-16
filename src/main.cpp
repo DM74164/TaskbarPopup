@@ -60,7 +60,7 @@ void AddTrayIcon() {
     s_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     s_nid.uCallbackMessage = WM_APP_TRAY;
     s_nid.hIcon = s_trayIcon;
-    lstrcpynW(s_nid.szTip, L"TaskbarPopup：全屏隐藏任务栏 / 长按 Win 弹出", ARRAYSIZE(s_nid.szTip));
+    lstrcpynW(s_nid.szTip, Tr(L"TaskbarPopup：全屏隐藏任务栏 / 长按 Win 弹出"), ARRAYSIZE(s_nid.szTip));
     Shell_NotifyIconW(NIM_ADD, &s_nid);
 }
 
@@ -140,23 +140,22 @@ void HandleCommand(UINT id) {
 void ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
     auto check = [](bool on) { return on ? MF_CHECKED : MF_UNCHECKED; };
-    wchar_t longPressText[64];
-    swprintf(longPressText, 64, L"长按 Win 键弹出迷你任务栏（%d 毫秒）", g_settings.longPressMs);
+    std::wstring longPressText = TrF(L"长按 Win 键弹出迷你任务栏（%d 毫秒）", g_settings.longPressMs);
 
-    AppendMenuW(menu, MF_STRING, ID_SHOW, L"显示迷你任务栏");
-    AppendMenuW(menu, MF_STRING, ID_SETTINGS, L"设置...");
-    AppendMenuW(menu, MF_STRING, ID_CHECKUPDATE, L"检查更新");
+    AppendMenuW(menu, MF_STRING, ID_SHOW, Tr(L"显示迷你任务栏"));
+    AppendMenuW(menu, MF_STRING, ID_SETTINGS, Tr(L"设置..."));
+    AppendMenuW(menu, MF_STRING, ID_CHECKUPDATE, Tr(L"检查更新"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | check(g_settings.autoHideOnFullscreen), ID_AUTOHIDE, L"窗口最大化或全屏时隐藏任务栏");
-    AppendMenuW(menu, MF_STRING | check(g_settings.longPressPopup), ID_LONGPRESS, longPressText);
-    AppendMenuW(menu, MF_STRING | check(IsAutoStartEnabled()), ID_AUTOSTART, L"开机自动启动");
-    AppendMenuW(menu, MF_STRING | check(g_settings.runAsAdmin), ID_RUNASADMIN, L"以管理员身份运行（游戏里也能长按 Win）");
+    AppendMenuW(menu, MF_STRING | check(g_settings.autoHideOnFullscreen), ID_AUTOHIDE, Tr(L"窗口最大化或全屏时隐藏任务栏"));
+    AppendMenuW(menu, MF_STRING | check(g_settings.longPressPopup), ID_LONGPRESS, longPressText.c_str());
+    AppendMenuW(menu, MF_STRING | check(IsAutoStartEnabled()), ID_AUTOSTART, Tr(L"开机自动启动"));
+    AppendMenuW(menu, MF_STRING | check(g_settings.runAsAdmin), ID_RUNASADMIN, Tr(L"以管理员身份运行（游戏里也能长按 Win）"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | check(g_settings.debugLog), ID_DEBUGLOG, L"记录诊断日志");
+    AppendMenuW(menu, MF_STRING | check(g_settings.debugLog), ID_DEBUGLOG, Tr(L"记录诊断日志"));
     if (g_settings.debugLog || GetFileAttributesW(LogFile().c_str()) != INVALID_FILE_ATTRIBUTES)
-        AppendMenuW(menu, MF_STRING, ID_OPENLOG, L"打开诊断日志所在文件夹");
+        AppendMenuW(menu, MF_STRING, ID_OPENLOG, Tr(L"打开诊断日志所在文件夹"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, ID_EXIT, L"退出");
+    AppendMenuW(menu, MF_STRING, ID_EXIT, Tr(L"退出"));
     SetMenuDefaultItem(menu, ID_SHOW, FALSE);
 
     POINT pt;
@@ -362,6 +361,13 @@ void LoadSettings() {
     g_settings.popupEdge = edge == kEdgeLeft || edge == kEdgeRight ? edge : kEdgeBottom;
     int align = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupAlign", kAlignSystem, f.c_str()));
     g_settings.popupAlign = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
+    // 没设过语言：新装的跟随系统；以前用过的（设置文件里已经有别的项）保持原来的中文界面
+    wchar_t old[8] = {};
+    bool upgraded = GetPrivateProfileStringW(L"General", L"AutoHideOnFullscreen", L"", old, ARRAYSIZE(old), f.c_str()) > 0;
+    int language = static_cast<int>(
+        GetPrivateProfileIntW(L"General", L"Language", upgraded ? kLangChinese : kLangSystem, f.c_str()));
+    g_settings.language = language >= kLangSystem && language <= kLangEnglish ? language : kLangSystem;
+    SetUiEnglish(LanguageIsEnglish(g_settings.language));
     g_settings.popupScale = std::max(kMinPopupScale, std::min(scale, kMaxPopupScale));
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
@@ -407,6 +413,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupEdge", std::to_wstring(g_settings.popupEdge).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupAlign", std::to_wstring(g_settings.popupAlign).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"Language", std::to_wstring(g_settings.language).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"CheckUpdates", g_settings.checkUpdates ? L"1" : L"0", f.c_str());
@@ -468,6 +475,14 @@ void SetAutoStart(bool enabled) {
 }
 
 void ApplySettings() {
+    SetUiEnglish(LanguageIsEnglish(g_settings.language));
+    if (s_nid.cbSize) {  // 托盘图标已经加上了：提示文字换成现在的语言
+        lstrcpynW(s_nid.szTip, Tr(L"TaskbarPopup：全屏隐藏任务栏 / 长按 Win 弹出"), ARRAYSIZE(s_nid.szTip));
+        UINT flags = s_nid.uFlags;
+        s_nid.uFlags = NIF_TIP;
+        Shell_NotifyIconW(NIM_MODIFY, &s_nid);
+        s_nid.uFlags = flags;
+    }
     Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen);
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
     Update_Configure();
@@ -547,7 +562,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ApplySettings();
     if (g_settings.debugLog) Fullscreen_LogState();
     if (!Hook_Install())
-        MessageBoxW(nullptr, L"无法安装键盘钩子，长按 Win 功能不可用。", L"TaskbarPopup", MB_ICONWARNING);
+        MessageBoxW(nullptr, Tr(L"无法安装键盘钩子，长按 Win 功能不可用。"), L"TaskbarPopup", MB_ICONWARNING);
     AddTrayIcon();
     Hotkeys_Apply();  // 快捷键注册不上时，上面那次托盘图标还没加上、气泡弹不出来，现在再试一次
 

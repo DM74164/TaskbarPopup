@@ -7,7 +7,7 @@ It should also work on Windows 10, since every system function it uses exists th
 
 A Windows 11 taskbar enhancement: when a window is maximized, the taskbar hides and the window fills the whole screen. Hold the Win key and a liquid-glass mini taskbar pops up from the bottom of the screen. Single exe, no runtime to install.
 
-> The app's interface is in Chinese. The clips below show it translated to English for illustration, and menu and setting names are given in English with the Chinese label in parentheses.
+> The interface comes in English and Chinese. It follows your Windows display language; change it under Settings → Appearance → Language.
 
 Demo video: [Bilibili](https://www.bilibili.com/video/BV1BLp963E7e/)
 
@@ -33,13 +33,13 @@ Start typing once it's open to filter windows and pinned apps. Programs from the
 
 ### Right-click menu
 
-Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Tick "Don't hide the taskbar when maximized" (最大化时不隐藏任务栏) to exclude an app. Middle-click an icon to close the window.
+Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Tick "Don't hide taskbar when maximized" to exclude an app. Middle-click an icon to close the window.
 
 ![Right-click menu with recent files, run as admin, open file location and close all](docs/demo/en/menu.webp)
 
 ### Keep small windows on top
 
-Double-click a small floating window (or use a hotkey) and it stays on top even when you click the full-screen window behind it. Turn on "Pinned windows above all windows" (固定的小窗口在所有窗口上面, off by default) in Settings to keep it above every window.
+Double-click a small floating window (or use a hotkey) and it stays on top even when you click the full-screen window behind it. Turn on "Keep pinned windows above all windows" (off by default) in Settings to keep it above every window.
 
 ![Double-click a small window and it is no longer covered by the full-screen window](docs/demo/en/pin.webp)
 
@@ -51,13 +51,13 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass or frosted glass, and follow-system, light or dark colors. The mini taskbar's size (50 – 200%), position (位置: bottom, left, right) and alignment at the bottom (对齐: follow system, center, left, right) preview live as you change them.
+Choose liquid glass or frosted glass, a system, light or dark theme, and English or Chinese. The mini taskbar's size (50 – 200%), position (bottom, left, right) and alignment at the bottom (system, center, left, right) preview live as you change them.
 
 ![Liquid or frosted glass, light or dark, and size all preview live](docs/demo/en/appearance.webp)
 
 ## Download
 
-Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and run `TaskbarPopup.exe`. A blue up-arrow icon appears in the tray: left-click it to open the mini taskbar, right-click it for the menu and Settings (设置...).
+Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and run `TaskbarPopup.exe`. A blue up-arrow icon appears in the tray: left-click it to open the mini taskbar, right-click it for the menu and Settings.
 
 ## Mini taskbar controls
 
@@ -72,20 +72,20 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Type | Filter; Esc clears, press again to close |
 | Mouse wheel | Scroll the icons; over a slider, adjust volume / brightness |
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
-| Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" (程序菜单) opens the program's own menu |
+| Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
 | Esc / click elsewhere | Close |
 
 ## Settings
 
-Right-click the tray icon → Settings (设置...). Options are grouped into Taskbar, Mini taskbar, Appearance, Hotkeys, and Startup & updates (任务栏, 迷你任务栏, 外观, 快捷键, 启动和更新); switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Appearance, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
-Check for updates (自动检查更新) is off by default. When on, it checks GitHub Releases once a day and only notifies you; it never downloads or installs anything by itself.
+"Auto-check for updates" is off by default. When on, it checks GitHub Releases once a day and only notifies you; it never downloads or installs anything by itself.
 
-**Having a problem?** In the tray menu, turn on "Record diagnostic log" (记录诊断日志), reproduce the problem, then click "Open diagnostic log folder" (打开诊断日志所在文件夹) and send the `debug.log`.
+**Having a problem?** In the tray menu, turn on "Record diagnostic log", reproduce the problem, then click "Open diagnostic log folder" and send the `debug.log`.
 
 ## Known limitations
 
-- **Holding Win does nothing in admin programs and games**: Windows doesn't pass their key presses to a normal-privilege program. Tick "Run as administrator" (以管理员身份运行) in the tray menu. With start-at-login on as well, there's no UAC prompt at startup.
+- **Holding Win does nothing in admin programs and games**: Windows doesn't pass their key presses to a normal-privilege program. Tick "Run as administrator" in the tray menu. With start-at-login on as well, there's no UAC prompt at startup.
 - **Edge / Chrome may show a thin line (about 2 px) at the bottom**: the browser leaves it for the auto-hidden taskbar and it can't be changed from outside.
 - **Multiple monitors**: system auto-hide applies to every monitor, so while a window is maximized the taskbars on other monitors auto-hide too.
 - **Notifications may not show while maximized**: go to Settings → System → Notifications → Turn on do not disturb automatically, and turn off "When using an app in full-screen mode".

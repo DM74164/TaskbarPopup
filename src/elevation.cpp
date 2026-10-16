@@ -138,9 +138,9 @@ void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND hwnd, LONG, LONG, DWORD, D
     if (!RunsAboveUs(hwnd)) return;
     s_hinted = true;
     Log(L"前台程序 %ls 的权限比本程序高，长按 Win 在它里面收不到", GetProcessPath(hwnd).c_str());
-    ShowTrayBalloon(L"这个程序里长按 Win 不起作用",
-                    L"前台程序以管理员身份运行（不少游戏是这样），普通权限的 TaskbarPopup 收不到它里面的按键。"
-                    L"在托盘菜单里勾选“以管理员身份运行”即可。");
+    ShowTrayBalloon(Tr(L"这个程序里长按 Win 不起作用"),
+                    Tr(L"前台程序以管理员身份运行（不少游戏是这样），普通权限的 TaskbarPopup 收不到它里面的按键。"
+                       L"在托盘菜单里勾选“以管理员身份运行”即可。"));
 }
 
 }  // namespace
@@ -208,9 +208,9 @@ void LaunchAsUser(const std::wstring& target, const std::wstring& args, const st
         if (ShellExecuteViaExplorer(target, args, dir)) return;
         // 资源管理器没在运行（正在重启）时不能退回到自己启动：那样启动的程序也是管理员权限
         Log(L"通过资源管理器以普通权限启动失败：%ls", target.c_str());
-        const wchar_t* text = L"资源管理器还没准备好，稍后再试一次。";
+        const wchar_t* text = Tr(L"资源管理器还没准备好，稍后再试一次。");
         // 资源管理器不在时托盘气泡也出不来，改用对话框（勿扰模式下气泡可能不弹出来，所以也响一声）
-        if (ShowTrayBalloon(L"暂时无法启动", text))
+        if (ShowTrayBalloon(Tr(L"暂时无法启动"), text))
             MessageBeep(MB_ICONWARNING);
         else
             MessageBoxW(nullptr, text, L"TaskbarPopup", MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
