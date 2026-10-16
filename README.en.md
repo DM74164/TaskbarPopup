@@ -33,7 +33,7 @@ Start typing once it's open to filter windows and pinned apps. Programs from the
 
 ### Right-click menu
 
-Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Tick "Don't hide taskbar when maximized" to exclude an app. Middle-click an icon to close the window.
+Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Tick "Don't hide taskbar when maximized" to exclude an app; if you turn off "Hide taskbar when maximized or fullscreen" in Settings, the item becomes "Hide taskbar when maximized" and only the ticked apps hide the taskbar. Middle-click an icon to close the window.
 
 ![Right-click menu with recent files, run as admin, open file location and close all](docs/demo/en/menu.webp)
 

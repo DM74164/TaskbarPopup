@@ -66,18 +66,24 @@ std::wstring NormalizeExeName(const std::wstring& text) {
     return ToLower(s);
 }
 
-bool IsExcludedExe(const std::wstring& exeName) {
-    return !exeName.empty() &&
-           std::find(g_settings.excludeApps.begin(), g_settings.excludeApps.end(), exeName) != g_settings.excludeApps.end();
+bool InAppList(const std::vector<std::wstring>& list, const std::wstring& exeName) {
+    return !exeName.empty() && std::find(list.begin(), list.end(), exeName) != list.end();
 }
 
-void SetExcluded(const std::wstring& exeName, bool excluded) {
-    if (exeName.empty() || IsExcludedExe(exeName) == excluded) return;
-    auto& list = g_settings.excludeApps;
-    if (excluded) list.push_back(exeName);
+std::vector<std::wstring>& ExceptionApps() {
+    return g_settings.autoHideOnFullscreen ? g_settings.excludeApps : g_settings.includeApps;
+}
+
+bool IsExceptionExe(const std::wstring& exeName) { return InAppList(ExceptionApps(), exeName); }
+
+void SetException(const std::wstring& exeName, bool listed) {
+    if (exeName.empty() || IsExceptionExe(exeName) == listed) return;
+    auto& list = ExceptionApps();
+    if (listed) list.push_back(exeName);
     else list.erase(std::remove(list.begin(), list.end(), exeName), list.end());
     SaveSettings();
-    Log(L"%ls %ls排除名单", exeName.c_str(), excluded ? L"加入" : L"移出");
+    Log(L"%ls %ls%ls名单", exeName.c_str(), listed ? L"加入" : L"移出",
+        g_settings.autoHideOnFullscreen ? L"最大化时不隐藏任务栏的" : L"最大化时隐藏任务栏的");
     ApplySettings();
 }
 

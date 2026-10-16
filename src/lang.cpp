@@ -23,6 +23,7 @@ const wchar_t* const kEnglish[][2] = {
     {L"全屏", L"Fullscreen"},
     {L"小窗口", L"Small windows"},
     {L"最大化时不隐藏任务栏的程序", L"Apps that keep the taskbar"},
+    {L"最大化时隐藏任务栏的程序", L"Apps that hide the taskbar"},
     {L"弹出", L"Opening"},
     {L"显示", L"Contents"},
     {L"界面", L"Interface"},
@@ -84,6 +85,7 @@ const wchar_t* const kEnglish[][2] = {
     {L"取消", L"Cancel"},
     {L"程序 (*.exe)", L"Programs (*.exe)"},
     {L"选择最大化时不隐藏任务栏的程序", L"Choose an app that keeps the taskbar"},
+    {L"选择最大化时隐藏任务栏的程序", L"Choose an app that hides the taskbar"},
     {L"没有其它开着窗口的程序", L"No other apps with open windows"},
     {L"浏览...", L"Browse..."},
 
@@ -156,6 +158,7 @@ const wchar_t* const kEnglish[][2] = {
     {L"最小化", L"Minimize"},
     {L"最大化", L"Maximize"},
     {L"最大化时不隐藏任务栏", L"Don't hide taskbar when maximized"},
+    {L"最大化时隐藏任务栏", L"Hide taskbar when maximized"},
     {L"关闭窗口", L"Close window"},
     {L"关闭全部 %d 个窗口", L"Close all %d windows"},
     {L"程序菜单", L"App menu"},
