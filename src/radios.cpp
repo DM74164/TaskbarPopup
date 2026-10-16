@@ -176,7 +176,8 @@ public:
     void Read(int status[kRadioCount], std::wstring& network) {
         network.clear();
         if (!Enumerate()) {
-            for (int i = 0; i < kRadioCount; ++i) status[i] = kRadioUnavailable;
+            // 系统里根本没有这套接口（拿不到工厂）就当没有，不放按钮
+            for (int i = 0; i < kRadioCount; ++i) status[i] = m_statics ? kRadioUnavailable : kRadioMissing;
             return;
         }
         for (int i = 0; i < kRadioCount; ++i) {
