@@ -53,6 +53,7 @@ struct Settings {
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
     bool showLevels = true;      // 迷你任务栏里显示音量和亮度调节
     bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
+    bool showRadios = true;      // 迷你任务栏里显示 Wi-Fi 和蓝牙开关
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
@@ -319,6 +320,28 @@ constexpr UINT WM_APP_BRIGHTNESS = WM_APP + 30;
 void Brightness_Query(HWND notify, HMONITOR monitor);
 void Brightness_Set(HMONITOR monitor, int percent);  // 拖动时连续调用，只执行最新的一次
 void Brightness_Stop();                              // 退出前结束后台线程
+
+// ---------------- Wi-Fi 和蓝牙（radios.cpp）----------------
+// 读和切换都在后台线程上做，做完 PostMessage(notify, WM_APP_RADIOS, 切换失败的开关（1 << RadioId，没失败为 0）, 0)，
+// 收到后用 Radios_Get 取最新的样子
+constexpr UINT WM_APP_RADIOS = WM_APP + 32;
+enum RadioId { kRadioWifi, kRadioBluetooth, kRadioCount };
+enum RadioStatus {
+    kRadioReading,      // 还没读到
+    kRadioMissing,      // 这台电脑上没有
+    kRadioUnavailable,  // 读不到，或者被禁用了（硬件开关、设备管理器）
+    kRadioOff,
+    kRadioOn,
+};
+struct RadioInfo {
+    int status = kRadioReading;  // 见 RadioStatus
+    bool switching = false;      // 正在切换，status 是要切成的样子
+    std::wstring network;        // Wi-Fi 连着的网络
+};
+void Radios_Query(HWND notify);
+void Radios_Set(int radio, bool on, HWND notify);
+RadioInfo Radios_Get(int radio);
+void Radios_Stop();  // 退出前结束后台线程
 
 // ---------------- 设置窗口 ----------------
 void SettingsDialog_Show();

@@ -44,7 +44,7 @@ enum Page { kPageTaskbar, kPageMini, kPageLook, kPageHotkeys, kPageStartup, kPag
 const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"外观", L"快捷键", L"启动和更新"};
 
 // 开关
-enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kTray, kAutoStart, kUpdates, kToggleCount };
+enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -56,6 +56,7 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"长按 Win 键弹出迷你任务栏", L"左键单击托盘图标也能弹出"},
     {L"显示固定在任务栏的应用", nullptr},
     {L"显示音量和亮度调节", nullptr},
+    {L"显示 Wi-Fi 和蓝牙开关", L"右键按钮打开系统设置"},
     {L"显示托盘里隐藏的图标", L"左键、右键和在系统托盘里点一样"},
     {L"开机自动启动", nullptr},
     {L"自动检查更新", L"每天看一次 GitHub 上有没有新版本"},
@@ -335,6 +336,7 @@ float BuildPage(int page, float x, float y) {
             y = AddGroup(x, y, L"弹出", popup);
             std::vector<RowFn> show = {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
                                        [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
+                                       [](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); },
                                        [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); }};
             if (s_v.on[kTray]) show.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });  // 托盘图标关着时收起样式
             return AddGroup(x, y, L"显示", show);
@@ -1399,6 +1401,7 @@ void Apply() {
     if (changed(kLongPress)) g_settings.longPressPopup = s_v.on[kLongPress];
     if (changed(kPinned)) g_settings.showPinnedApps = s_v.on[kPinned];
     if (changed(kLevels)) g_settings.showLevels = s_v.on[kLevels];
+    if (changed(kRadios)) g_settings.showRadios = s_v.on[kRadios];
     if (changed(kTray)) g_settings.trayIcons = s_v.on[kTray];
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
@@ -1850,6 +1853,7 @@ void SettingsDialog_Show() {
     s_initial.on[kLongPress] = g_settings.longPressPopup;
     s_initial.on[kPinned] = g_settings.showPinnedApps;
     s_initial.on[kLevels] = g_settings.showLevels;
+    s_initial.on[kRadios] = g_settings.showRadios;
     s_initial.on[kTray] = g_settings.trayIcons;
     s_initial.on[kAutoStart] = IsAutoStartEnabled();
     s_initial.on[kUpdates] = g_settings.checkUpdates;
