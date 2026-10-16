@@ -363,12 +363,16 @@ void LoadSettings() {
     g_settings.popupEdge = edge == kEdgeLeft || edge == kEdgeRight ? edge : kEdgeBottom;
     int align = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupAlign", kAlignSystem, f.c_str()));
     g_settings.popupAlign = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
-    // 没设过语言：新装的跟随系统；以前用过的（设置文件里已经有别的项）保持原来的中文界面
-    wchar_t old[8] = {};
-    bool upgraded = GetPrivateProfileStringW(L"General", L"AutoHideOnFullscreen", L"", old, ARRAYSIZE(old), f.c_str()) > 0;
-    int language = static_cast<int>(
-        GetPrivateProfileIntW(L"General", L"Language", upgraded ? kLangChinese : kLangSystem, f.c_str()));
-    g_settings.language = language >= kLangSystem && language <= kLangEnglish ? language : kLangSystem;
+    // 没设过语言：新装的跟随系统；以前用过的（设置文件里已经有东西，哪怕只有程序自己记的状态）保持原来的中文界面。
+    // 马上记下来，不然新装的用过一次、设置文件里有了东西，下次启动就被当成以前用过的
+    int language = static_cast<int>(GetPrivateProfileIntW(L"General", L"Language", -1, f.c_str()));
+    if (language < kLangSystem || language > kLangEnglish) {
+        wchar_t sections[64] = {};
+        bool upgraded = GetPrivateProfileSectionNamesW(sections, ARRAYSIZE(sections), f.c_str()) > 0;
+        language = upgraded ? kLangChinese : kLangSystem;
+        WritePrivateProfileStringW(L"General", L"Language", std::to_wstring(language).c_str(), f.c_str());
+    }
+    g_settings.language = language;
     SetUiEnglish(LanguageIsEnglish(g_settings.language));
     g_settings.popupScale = std::max(kMinPopupScale, std::min(scale, kMaxPopupScale));
     g_settings.debugLog = GetPrivateProfileIntW(L"General", L"DebugLog", 0, f.c_str()) != 0;
@@ -489,7 +493,8 @@ void SetAutoStart(bool enabled) {
 }
 
 void ApplySettings() {
-    SetUiEnglish(LanguageIsEnglish(g_settings.language));
+    // 设置窗口开着时它在预览选中的语言（关掉时会换回设置里的），别在托盘菜单里点了开关就把它打乱
+    if (!SettingsDialog_Hwnd()) SetUiEnglish(LanguageIsEnglish(g_settings.language));
     if (s_nid.cbSize) {  // 托盘图标已经加上了：提示文字换成现在的语言
         lstrcpynW(s_nid.szTip, Tr(L"TaskbarPopup：全屏隐藏任务栏 / 长按 Win 弹出"), ARRAYSIZE(s_nid.szTip));
         UINT flags = s_nid.uFlags;

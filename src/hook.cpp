@@ -552,6 +552,18 @@ void SendWinTap(DWORD vk) {
 
 void SendStartMenu() { SendWinTap(VK_LWIN); }
 
+void SendText(const std::wstring& text) {
+    std::vector<INPUT> in;
+    for (wchar_t ch : text) {
+        for (bool up : {false, true}) {
+            INPUT i = ch == L'\r' ? KeyInput(VK_RETURN, 0, up, false) : KeyInput(0, ch, up, false);
+            if (ch != L'\r') i.ki.dwFlags |= KEYEVENTF_UNICODE;
+            in.push_back(i);
+        }
+    }
+    if (!in.empty()) SendInput(static_cast<UINT>(in.size()), in.data(), sizeof(INPUT));
+}
+
 void SendWinX() {
     // Shift+F10 打开的菜单：Shift 还按着，先松开，不然成了 Win+Shift+X
     std::vector<INPUT> in;

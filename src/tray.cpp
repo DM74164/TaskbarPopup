@@ -309,11 +309,14 @@ const Button* FindChevron(const std::vector<Button>& buttons) {
     return chevron;
 }
 
+// 任务栏上程序窗口的按钮（名字是“程序名 - 1 个正在运行的窗口”，也会对上程序名），不是托盘图标
+bool IsTaskButton(const Button& b) { return Lower(b.cls).find(L"tasklist") != std::wstring::npos; }
+
 const Button* BestMatch(const std::vector<Button>& buttons, const TrayApp& app, bool needOnScreen) {
     const Button* best = nullptr;
     int bestScore = 0;
     for (const Button& b : buttons) {
-        if (IsChevron(b) || (needOnScreen && !OnScreen(b.rect))) continue;
+        if (IsChevron(b) || IsTaskButton(b) || (needOnScreen && !OnScreen(b.rect))) continue;
         int score = MatchScore(b.name, app);
         if (score > bestScore) {
             best = &b;
@@ -368,6 +371,7 @@ void ClickAt(const RECT& rect, bool right) {
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1), vh = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1);
     LONG x = (rect.left + rect.right) / 2, y = (rect.top + rect.bottom) / 2;
+    if (GetSystemMetrics(SM_SWAPBUTTON)) right = !right;  // 左右键对调了：发的是物理按键
     INPUT in[3] = {};
     for (INPUT& i : in) {
         i.type = INPUT_MOUSE;
@@ -416,6 +420,7 @@ struct Job {
     HWND notify = nullptr;      // 右键弹不出程序自己的菜单时通知谁
 };
 std::atomic<bool> s_clicking{false};
+std::atomic<bool> s_hideOwed{false};  // 临时显示的任务栏还没藏回去时又点了一个：留给那一次点完再藏
 
 void LaunchInstead(const TrayApp& app) {
     Log(L"托盘：找不到 %ls 的托盘图标，改成再启动一次它", app.name.c_str());
@@ -550,10 +555,10 @@ DWORD WINAPI ClickThread(LPVOID param) {
     s_clicking = false;
     // 任务栏本来藏着：为了点隐藏的图标临时显示了，或者资源管理器展开隐藏的图标时自己把它显示了出来。
     // 点了的话等隐藏的图标和程序的菜单都关了，没点成就马上，让主线程藏回去（不是本程序藏的、已经不用藏了的主线程不管）
-    if (trayHidden) {
+    if (trayHidden || s_hideOwed.exchange(false)) {
         for (int i = 0; clicked && i < 600 && (OverflowShowing() || MenuShowing()); ++i) Sleep(100);  // 最多等 1 分钟
-        if (!s_clicking && IsWindowVisible(tray))
-            PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
+        if (s_clicking) s_hideOwed = true;
+        else if (IsWindowVisible(tray)) PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
     }
     return 0;
 }
@@ -650,8 +655,14 @@ bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool 
     if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, Tr(L"程序菜单"));
     if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
         AppendMenuW(menu, MF_STRING, kTrayLocation, Tr(L"打开文件所在的位置"));
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayEnd, Tr(L"结束程序"));
+    // 资源管理器（“安全删除硬件”等）和本程序自己不给结束：一结束桌面、任务栏就没了，或者来不及把任务栏放回来
+    wchar_t self[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    std::wstring file = Lower(app.exe.substr(app.exe.find_last_of(L"\\/") + 1));
+    if (file != L"explorer.exe" && Lower(app.exe) != Lower(self)) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kTrayEnd, Tr(L"结束程序"));
+    }
     SetMenuDefaultItem(menu, kTrayOpen, FALSE);
     if (!SetForegroundWindow(owner)) ForceForeground(owner);  // 不然点别处菜单不会消失
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align, at.x, at.y, 0, owner, nullptr);

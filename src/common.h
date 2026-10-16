@@ -186,6 +186,7 @@ void Hook_Configure(bool enabled, int thresholdMs);
 void Hook_SetTaskbarHidden(bool hidden);
 void SendStartMenu();
 void SendWinTap(DWORD vk);  // 补发一次 Win 单击（钩子不拦）
+void SendText(const std::wstring& text);  // 把字（\r 是回车）照打字那样发给前台窗口
 void SendWinX();  // 打开 Win+X 菜单（右键开始按钮的那个）
 
 // ---------------- 窗口列表 ----------------
