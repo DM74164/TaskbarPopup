@@ -10,7 +10,60 @@
 #include "common.h"
 
 namespace app {
+
+#ifndef TP_FAKE_RADIOS
+// WinRT 接口（按 Windows SDK 里 windows.devices.radios.h 的顺序）。不能放进匿名命名空间：那样 GCC 认定没有别的类
+// 实现它们，会把对它们的虚函数调用直接换成 __cxa_pure_virtual，一调用程序就退出
+namespace radio_abi {
+
+struct IAsyncInfoAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE get_Id(UINT32* id) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Status(int* status) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ErrorCode(HRESULT* code) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Cancel() = 0;
+    virtual HRESULT STDMETHODCALLTYPE Close() = 0;
+};
+
+// IAsyncOperation<T>：不注册完成回调（那要算参数化接口的 IID），后台线程上轮询 IAsyncInfo 的状态
+template <typename T>
+struct IAsyncOperationAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE put_Completed(void* handler) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Completed(void** handler) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetResults(T* results) = 0;
+};
+
+template <typename T>
+struct IVectorViewAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE GetAt(UINT32 index, T* item) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Size(UINT32* size) = 0;
+};
+
+struct IRadioAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE SetStateAsync(int state, IAsyncOperationAbi<int>** operation) = 0;
+    virtual HRESULT STDMETHODCALLTYPE add_StateChanged(void* handler, INT64* token) = 0;
+    virtual HRESULT STDMETHODCALLTYPE remove_StateChanged(INT64 token) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_State(int* state) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Name(HSTRING* name) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Kind(int* kind) = 0;
+};
+
+using RadioList = IVectorViewAbi<IRadioAbi*>;
+
+struct IRadioStaticsAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE GetRadiosAsync(IAsyncOperationAbi<RadioList*>** operation) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDeviceSelector(HSTRING* selector) = 0;
+    virtual HRESULT STDMETHODCALLTYPE FromIdAsync(HSTRING id, void** operation) = 0;
+    virtual HRESULT STDMETHODCALLTYPE RequestAccessAsync(IAsyncOperationAbi<int>** operation) = 0;
+};
+
+}  // namespace radio_abi
+#endif
+
 namespace {
+
+#ifndef TP_FAKE_RADIOS
+using namespace radio_abi;
+#endif
 
 constexpr DWORD kQueryWaitMs = 5000;
 constexpr DWORD kSwitchWaitMs = 10000;
@@ -53,53 +106,13 @@ private:
     bool m_on[kRadioCount] = {true, false};
 };
 #else
-// ---- WinRT 接口（按 Windows SDK 里 windows.devices.radios.h 的顺序）----
+// ---- WinRT ----
 
 // RadioState / RadioKind / RadioAccessStatus 都是 32 位枚举，这里直接用 int
 enum { kStateUnknown, kStateOn, kStateOff, kStateDisabled };
 enum { kKindOther, kKindWiFi, kKindMobileBroadband, kKindBluetooth, kKindFM };
 enum { kAccessUnspecified, kAccessAllowed, kAccessDeniedByUser, kAccessDeniedBySystem };
 enum { kAsyncStarted, kAsyncCompleted, kAsyncCanceled, kAsyncError };  // AsyncStatus
-
-struct IAsyncInfoAbi : IInspectable {
-    virtual HRESULT STDMETHODCALLTYPE get_Id(UINT32* id) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Status(int* status) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_ErrorCode(HRESULT* code) = 0;
-    virtual HRESULT STDMETHODCALLTYPE Cancel() = 0;
-    virtual HRESULT STDMETHODCALLTYPE Close() = 0;
-};
-
-// IAsyncOperation<T>：不注册完成回调（那要算参数化接口的 IID），后台线程上轮询 IAsyncInfo 的状态
-template <typename T>
-struct IAsyncOperationAbi : IInspectable {
-    virtual HRESULT STDMETHODCALLTYPE put_Completed(void* handler) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Completed(void** handler) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetResults(T* results) = 0;
-};
-
-template <typename T>
-struct IVectorViewAbi : IInspectable {
-    virtual HRESULT STDMETHODCALLTYPE GetAt(UINT32 index, T* item) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Size(UINT32* size) = 0;
-};
-
-struct IRadioAbi : IInspectable {
-    virtual HRESULT STDMETHODCALLTYPE SetStateAsync(int state, IAsyncOperationAbi<int>** operation) = 0;
-    virtual HRESULT STDMETHODCALLTYPE add_StateChanged(void* handler, INT64* token) = 0;
-    virtual HRESULT STDMETHODCALLTYPE remove_StateChanged(INT64 token) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_State(int* state) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Name(HSTRING* name) = 0;
-    virtual HRESULT STDMETHODCALLTYPE get_Kind(int* kind) = 0;
-};
-
-using RadioList = IVectorViewAbi<IRadioAbi*>;
-
-struct IRadioStaticsAbi : IInspectable {
-    virtual HRESULT STDMETHODCALLTYPE GetRadiosAsync(IAsyncOperationAbi<RadioList*>** operation) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetDeviceSelector(HSTRING* selector) = 0;
-    virtual HRESULT STDMETHODCALLTYPE FromIdAsync(HSTRING id, void** operation) = 0;
-    virtual HRESULT STDMETHODCALLTYPE RequestAccessAsync(IAsyncOperationAbi<int>** operation) = 0;
-};
 
 const IID kIidAsyncInfo = {0x00000036, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 const IID kIidRadioStatics = {0x5FB6A12E, 0x67CB, 0x46AE, {0xAA, 0xE9, 0x65, 0x91, 0x9F, 0x86, 0xEF, 0xF4}};
