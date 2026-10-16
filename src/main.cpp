@@ -171,6 +171,7 @@ void Shutdown() {
     Log(L"退出");
     Hook_Uninstall();
     Brightness_Stop();
+    Radios_Stop();
     Fullscreen_SetEnabled(false);
     Log(L"退出：还原任务栏");
     Taskbar_RestoreAll();
@@ -355,6 +356,7 @@ void LoadSettings() {
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
     g_settings.showLevels = GetPrivateProfileIntW(L"General", L"ShowLevels", 1, f.c_str()) != 0;
     g_settings.trayIcons = GetPrivateProfileIntW(L"General", L"TrayIcons", 1, f.c_str()) != 0;
+    g_settings.showRadios = GetPrivateProfileIntW(L"General", L"ShowRadios", 1, f.c_str()) != 0;
     g_settings.trayStyle = GetPrivateProfileIntW(L"General", L"TrayStyle", kTrayStacked, f.c_str()) == kTrayRow ? kTrayRow : kTrayStacked;
     int scale = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupScale", kDefaultPopupScale, f.c_str()));
     int edge = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupEdge", kEdgeBottom, f.c_str()));
@@ -409,6 +411,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowLevels", g_settings.showLevels ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"TrayIcons", g_settings.trayIcons ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowRadios", g_settings.showRadios ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"TrayStyle", std::to_wstring(g_settings.trayStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupEdge", std::to_wstring(g_settings.popupEdge).c_str(), f.c_str());

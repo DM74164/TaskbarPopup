@@ -21,7 +21,7 @@ Maximize a window and the taskbar slides away while the window fills the screen.
 
 ### Hold Win for the mini taskbar
 
-Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom (or stands vertically on the left or right screen edge): pinned apps, open windows, hidden tray icons, the clock, plus volume and brightness sliders. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
+Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom (or stands vertically on the left or right screen edge): pinned apps, open windows, hidden tray icons, the clock, volume and brightness sliders, plus Wi-Fi and Bluetooth toggles. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
 
 ![Hold Win and the mini taskbar rises from the bottom](docs/demo/en/popup.webp)
 
@@ -73,6 +73,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Mouse wheel | Scroll the icons; over a slider, adjust volume / brightness |
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
+| Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the matching Settings page |
 | Esc / click elsewhere | Close |
 
 ## Settings
@@ -93,6 +94,7 @@ Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini t
 - **Taskbar settings locked** (for example by group policy on a work PC): the taskbar stays visible.
 - **Old games in exclusive full screen** cover the mini taskbar. Switch the game to borderless windowed.
 - **Brightness on external monitors** needs DDC/CI supported and turned on in the monitor; otherwise the slider is grayed out.
+- **Wi-Fi / Bluetooth button grayed out**: the adapter is turned off by a hardware switch or disabled in Device Manager. A radio the PC doesn't have isn't shown.
 - **Tray icons** are clicked for you in the system tray through UI Automation, which may miss for a few programs. If it does, try once with the diagnostic log on.
 - **The mini taskbar's glass background** is a snapshot from when it opened, so a video playing behind it won't move.
 - **Antivirus false positives**: the exe isn't signed and uses keyboard and mouse hooks (only to detect holding Win and your hotkeys; no keys are recorded or sent anywhere). Release builds are compiled from source by GitHub Actions. If it's blocked, allow it in Windows Security → Protection history.
@@ -126,6 +128,7 @@ Requires C++17. From the repository root:
 | `src/app_menu.cpp` | Right-click menu |
 | `src/windows.cpp` | List windows, get icons |
 | `src/levels.cpp` | Volume and brightness |
+| `src/radios.cpp` | Wi-Fi and Bluetooth toggles |
 | `src/elevation.cpp` | Run as administrator |
 | `src/update.cpp` | Update check |
 | `src/settings_dialog.cpp` | Settings window |

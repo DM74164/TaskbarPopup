@@ -4,6 +4,7 @@
 // 右键弹出和系统任务栏差不多的菜单（开始按钮上是 Win+X 菜单），方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
 // 鼠标停在窗口图标上时在上方显示它的实时缩略图。
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音（可以在设置里关掉）。
+// 这一行最右边是 Wi-Fi 和蓝牙开关：点一下开关，右键打开系统设置里对应的页面（也可以在设置里关掉）。
 // 时钟左边是系统托盘“隐藏的图标”里的程序（可以在设置里关掉、选两行小图标还是一行大图标），左键右键和在托盘里点一样，
 // 右键时迷你任务栏留着。两行小图标是 2×2 一页，鼠标停在上面按左右方向键或者滚滚轮翻页。
 // 任务栏藏着时短按 Win：迷你任务栏只留一行格子贴着屏幕底边弹上来，弹完再打开开始菜单，开始菜单关了一起收起。
@@ -84,6 +85,7 @@ struct Layout {
     float trayX, trayW, cellW, cellH;  // 托盘：堆叠时 2×2 一组的小格子，横排时一行和窗口格子一样高
     float bottomGap;                   // 面板底边离屏幕底边（或者露着的任务栏）多远
     float panelX, panelY;              // 面板在窗口里的位置
+    float radioW, radioH, radioGap;    // Wi-Fi 和蓝牙按钮的大小、间隔
     // 竖排（弹在屏幕左右两边）时：一列格子的左边、各段的顶边。这时 itemsW、trayW 是竖着的长度，
     // 窗口在面板里侧多留 bubbleW 宽，放显示标题的小牌子
     float colX, startY, itemsY, tilesY, trayY, clockY, clockH, bubbleW;
@@ -169,6 +171,14 @@ DWORD s_trayIdleAt = 0;        // 点完了、看不到菜单的时间；0 = 还
 int s_trayHot = -1;            // 右键的那一格，菜单开着时一直亮着
 bool s_trayRefocused = false;  // 菜单关了以后已经试过把前台拿回来
 
+// Wi-Fi 和蓝牙开关（弹出时按设置定下来；这台电脑上没有的不显示）
+int s_radioCount = 0;              // 这次显示几个按钮
+int s_radioIds[kRadioCount] = {};  // 第 k 个按钮是哪个开关（RadioId）
+RectF s_radioRects[kRadioCount];
+RadioInfo s_radio[kRadioCount];    // 最近读到的样子
+int s_hoverRadio = -1;             // 鼠标下的按钮（第几个）
+int s_radioFailed = 0;             // 切换失败的开关（1 << RadioId）：鼠标离开那个按钮之前标题一直说失败了
+
 // 任务栏藏着时短按 Win：迷你任务栏弹完再打开开始菜单，开始菜单开着时它一直在
 bool s_compact = false;       // 这次弹出只有一行格子、贴着屏幕底边，给开始菜单让地方
 bool s_startPending = false;  // 弹出动画放完就打开开始菜单
@@ -217,9 +227,16 @@ void ComputeLayout() {
     L.clockH = Px(40);
     L.emptyW = vertical ? Px(96) : Px(130);
     L.radius = Px(22);
-    L.rowGap = s_levels ? (vertical ? Px(4) : Px(2)) : 0;
-    L.sliderH = s_levels ? (vertical ? Px(128) : Px(34)) : 0;
+    // Wi-Fi 和蓝牙按钮：横排时在调节条那一行的最右边（没有调节条时这一行只有它们，居中），竖排时在最下面一个个往下排
+    L.radioW = Px(40);
+    L.radioH = Px(28);
+    L.radioGap = Px(6);
+    float radiosW = s_radioCount > 0 ? s_radioCount * L.radioW + (s_radioCount - 1) * L.radioGap : 0;
+    bool row = s_levels || (s_radioCount > 0 && !vertical);
+    L.rowGap = row ? (vertical ? Px(4) : Px(2)) : 0;
+    L.sliderH = row ? (vertical ? Px(128) : Px(34)) : 0;
     L.minPanelW = s_levels ? Px(380) : Px(260);  // 两根调节条要有地方拖；没有调节条时标题也要放得下
+    if (s_levels && radiosW > 0) L.minPanelW += radiosW + Px(12);
     // 开始菜单模式：面板差不多贴着屏幕底边，和系统任务栏一样高，开始菜单才不会盖住它
     L.bottomGap = s_compact ? Px(4) : L.margin;
     L.bubbleW = vertical ? Px(280) : 0;
@@ -243,8 +260,9 @@ void ComputeLayout() {
     int n = static_cast<int>(s_items.size());
 
     if (vertical) {
-        // 从上到下：开始按钮、格子、托盘图标、时钟、两根竖的调节条
-        float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockH + L.rowGap + L.sliderH;
+        // 从上到下：开始按钮、格子、托盘图标、时钟、两根竖的调节条、Wi-Fi 和蓝牙按钮
+        float radiosH = s_radioCount > 0 ? Px(8) + s_radioCount * L.radioH + (s_radioCount - 1) * L.radioGap : 0;
+        float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockH + L.rowGap + L.sliderH + radiosH;
         float avail = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - others;
         s_visible = std::min(n, std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap))));
         if (s_lockedItemsW > 0)
@@ -269,6 +287,9 @@ void ComputeLayout() {
         };
         s_sliders[0] = make(L.colX + half / 2);
         s_sliders[1] = make(L.colX + half + half / 2);
+        for (int k = 0; k < s_radioCount; ++k)
+            s_radioRects[k] = RectF(L.colX + (L.tile - L.radioW) / 2, L.sliderY + L.sliderH + Px(8) + k * (L.radioH + L.radioGap),
+                                    L.radioW, L.radioH);
         s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin + L.bubbleW));
         s_height = static_cast<int>(std::ceil(L.panelH + 2 * L.margin));
         return;
@@ -297,9 +318,14 @@ void ComputeLayout() {
     L.tileY = L.margin + L.pad + L.titleH;
     L.sliderY = L.tileY + L.tile + L.rowGap;
 
-    // 音量在左半边，亮度在右半边
+    // 音量在左半边，亮度在右半边，Wi-Fi 和蓝牙按钮在最右边
     float left = L.margin + L.pad + Px(2), right = L.margin + L.panelW - L.pad - Px(2);
-    float mid = (left + right) / 2, cy = L.sliderY + L.sliderH / 2, icon = Px(30);
+    float cy = L.sliderY + L.sliderH / 2, icon = Px(30);
+    float radioX = s_levels ? right - radiosW : L.margin + (L.panelW - radiosW) / 2;
+    for (int k = 0; k < s_radioCount; ++k)
+        s_radioRects[k] = RectF(radioX + k * (L.radioW + L.radioGap), cy - L.radioH / 2, L.radioW, L.radioH);
+    if (radiosW > 0) right -= radiosW + Px(12);
+    float mid = (left + right) / 2;
     auto make = [&](float x0, float x1) {
         return Slider{RectF(x0, cy - icon / 2, icon, icon), x0 + icon + Px(10), x1 - Px(10), cy};
     };
@@ -384,6 +410,13 @@ int ControlAt(int x, int y) {
         if (track.Contains(fx, fy)) return i == 0 ? kVolumeTrack : kBrightTrack;
     }
     return kNone;
+}
+
+// 鼠标下的 Wi-Fi / 蓝牙按钮（第几个），没有为 -1
+int RadioAt(int x, int y) {
+    for (int k = 0; k < s_radioCount; ++k)
+        if (s_radioRects[k].Contains(static_cast<REAL>(x), static_cast<REAL>(y))) return k;
+    return -1;
 }
 
 // ---- 托盘图标 ----
@@ -690,6 +723,81 @@ void DrawSlider(Graphics& g, int which) {
     g.FillEllipse(&dot, x - core, y - core, 2 * core, 2 * core);
 }
 
+// ---- Wi-Fi 和蓝牙 ----
+
+std::wstring RadioText(int radio) {
+    const RadioInfo& r = s_radio[radio];
+    bool wifi = radio == kRadioWifi;
+    if (s_radioFailed & (1 << radio)) return Tr(wifi ? L"Wi-Fi 切换失败" : L"蓝牙切换失败");
+    switch (r.status) {
+        case kRadioOn:
+            if (r.switching) return Tr(wifi ? L"正在打开 Wi-Fi…" : L"正在打开蓝牙…");
+            if (wifi && !r.network.empty()) return TrF(L"Wi-Fi：%ls", r.network.c_str());
+            return Tr(wifi ? L"Wi-Fi 已打开" : L"蓝牙已打开");
+        case kRadioOff:
+            if (r.switching) return Tr(wifi ? L"正在关闭 Wi-Fi…" : L"正在关闭蓝牙…");
+            return Tr(wifi ? L"Wi-Fi 已关闭" : L"蓝牙已关闭");
+        case kRadioMissing:
+            return Tr(wifi ? L"没有 Wi-Fi" : L"没有蓝牙");
+        case kRadioUnavailable:
+            return Tr(wifi ? L"Wi-Fi 不可用" : L"蓝牙不可用");
+        default:
+            return wifi ? L"Wi-Fi" : Tr(L"蓝牙");
+    }
+}
+
+bool RadioUsable(int radio) { return s_radio[radio].status == kRadioOn || s_radio[radio].status == kRadioOff; }
+
+// Wi-Fi：三道弧加一个点
+void DrawWifi(Graphics& g, const RectF& box, const Color& c) {
+    float u = Px(1);
+    float cx = box.X + box.Width / 2, by = box.Y + box.Height / 2 + 5.5f * u;
+    SolidBrush brush(c);
+    float dot = 1.4f * u;
+    g.FillEllipse(&brush, cx - dot, by - dot, 2 * dot, 2 * dot);
+    Pen pen(c, 1.6f * u);
+    RoundCaps(pen);
+    for (int i = 0; i < 3; ++i) {
+        float r = (4.5f + 3.6f * i) * u;
+        g.DrawArc(&pen, cx - r, by - r, 2 * r, 2 * r, -135.0f, 90.0f);
+    }
+}
+
+// 蓝牙的符号：一竖加两个折角
+void DrawBluetooth(Graphics& g, const RectF& box, const Color& c) {
+    float u = Px(1);
+    float cx = box.X + box.Width / 2 + 0.3f * u, cy = box.Y + box.Height / 2;
+    PointF pts[6] = {PointF(cx - 4 * u, cy - 3.5f * u), PointF(cx + 3.5f * u, cy + 3.5f * u), PointF(cx, cy + 7 * u),
+                     PointF(cx, cy - 7 * u),            PointF(cx + 3.5f * u, cy - 3.5f * u), PointF(cx - 4 * u, cy + 3.5f * u)};
+    Pen pen(c, 1.5f * u);
+    RoundCaps(pen);
+    g.DrawLines(&pen, pts, 6);
+}
+
+// 和系统快速设置里的开关一样：开着是强调色的底，关着是淡淡的底，读不到、不可用时只画暗的图标；正在切换时颜色淡一点
+void DrawRadios(Graphics& g) {
+    const Palette& pal = Colors();
+    for (int k = 0; k < s_radioCount; ++k) {
+        int id = s_radioIds[k];
+        const RadioInfo& r = s_radio[id];
+        const RectF& box = s_radioRects[k];
+        bool on = r.status == kRadioOn, usable = RadioUsable(id);
+        float radius = box.Height / 2;
+        if (on) {
+            const Color& a = pal.accent;
+            FillRound(g, box, radius, r.switching ? Color(140, a.GetR(), a.GetG(), a.GetB()) : a);
+        } else if (usable) {
+            FillRound(g, box, radius, pal.pillTop);
+        }
+        if (k == s_hoverRadio && usable) FillRound(g, box, radius, on ? Color(45, 255, 255, 255) : pal.pillBottom);
+        Color glyph = pal.subtle;
+        if (on) glyph = s_glass.Light() ? Color(255, 255, 255, 255) : Color(235, 0, 0, 0);
+        else if (usable && !r.switching) glyph = pal.text;
+        if (id == kRadioWifi) DrawWifi(g, box, glyph);
+        else DrawBluetooth(g, box, glyph);
+    }
+}
+
 // 托盘图标。横排放不下时最后一格画个向上的尖角（展开系统的“隐藏的图标”）；
 // 堆叠时只画当前这一页，垫一块淡淡的底，不止一页时底边画几个小点表示第几页，翻页时新一页从旁边滑进来
 void DrawTray(Graphics& g) {
@@ -843,6 +951,7 @@ void DrawContent(Graphics& g) {
     int shown = s_hover >= 0 ? s_hover : s_sel;
     if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
+    else if (s_hoverRadio >= 0) title = RadioText(s_radioIds[s_hoverRadio]);
     else if (s_hoverTray >= 0 || s_overTray) title = TrayTitle(s_hoverTray);
     else if (shown == 0) title = Tr(L"开始");
     else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
@@ -854,11 +963,15 @@ void DrawContent(Graphics& g) {
     if (vertical) {
         // 竖排：标题在面板旁边的小牌子上，对着它说的那一项。打字筛选时只在指着或选了一项时显示名字；
         // 开始菜单模式只在鼠标指着时显示
-        bool pointing = s_hover >= 0 || s_hoverTray >= 0 || s_overTray || s_hoverControl != kNone || s_drag != kNone;
+        bool pointing = s_hover >= 0 || s_hoverTray >= 0 || s_overTray || s_hoverControl != kNone || s_drag != kNone ||
+                        s_hoverRadio >= 0;
         float anchorY = L.itemsY + L.tile / 2;
         if (s_drag != kNone || s_hoverControl != kNone) {
             const Slider& sl = s_sliders[SliderOf(s_drag != kNone ? s_drag : s_hoverControl)];
             anchorY = (sl.a0 + sl.a1) / 2;
+        } else if (s_hoverRadio >= 0) {
+            const RectF& r = s_radioRects[s_hoverRadio];
+            anchorY = r.Y + r.Height / 2;
         } else if (s_hoverTray >= 0) {
             RectF r = TrayCellRect(s_hoverTray);
             anchorY = r.Y + r.Height / 2;
@@ -937,6 +1050,7 @@ void DrawContent(Graphics& g) {
         DrawSlider(g, 0);
         DrawSlider(g, 1);
     }
+    DrawRadios(g);
 }
 
 void ReleaseCanvas() {
@@ -1195,6 +1309,7 @@ void MoveSelection(int delta) {
     s_sel = ((s_sel + delta) % count + count) % count;
     s_hover = -1;
     s_hoverControl = kNone;  // 鼠标停在调节条上时，标题也要换成选中的窗口
+    s_hoverRadio = -1;
     s_hoverTray = -1;
     s_overTray = false;
     s_keyNav = true;
@@ -1237,6 +1352,7 @@ void ApplyFilter() {
     s_first = 0;
     s_hover = -1;
     s_hoverControl = kNone;
+    s_hoverRadio = -1;
     s_hoverTray = -1;
     s_pillIndex = -1;
     s_sel = f.empty() ? DefaultSelection() : (s_items.empty() ? -1 : 1);  // 没有匹配的就什么都不选
@@ -1249,6 +1365,23 @@ void ApplyFilter() {
 void Launch(const std::wstring& target) {
     LaunchApp(target);  // 趁本窗口还在前台时启动，新程序才能顺利拿到前台
     HideNow();
+}
+
+// 点了 Wi-Fi / 蓝牙按钮：切过去，按钮马上显示成要切成的样子（颜色淡一点），切完了后台线程再通知
+void ToggleRadio(int k) {
+    if (k < 0 || k >= s_radioCount) return;
+    int id = s_radioIds[k];
+    if (!RadioUsable(id)) return;
+    s_radioFailed &= ~(1 << id);
+    Radios_Set(id, s_radio[id].status != kRadioOn, s_hwnd);
+    s_radio[id] = Radios_Get(id);
+    Redraw();
+}
+
+// 右键 Wi-Fi / 蓝牙按钮：打开系统设置里对应的页面
+void OpenRadioSettings(int k) {
+    if (k < 0 || k >= s_radioCount) return;
+    Launch(s_radioIds[k] == kRadioWifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
 }
 
 void ActivateIndex(int idx, bool newInstance = false) {
@@ -1813,6 +1946,14 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (s_open && !s_filter.empty()) ApplyFilter();  // 应用列表刚读完：把匹配的应用补上
             return 0;
 
+        case WM_APP_RADIOS:
+            if (s_open) {
+                s_radioFailed |= static_cast<int>(wParam);
+                for (int i = 0; i < kRadioCount; ++i) s_radio[i] = Radios_Get(i);
+                Redraw();
+            }
+            return 0;
+
         case WM_APP_BRIGHTNESS:
             if (reinterpret_cast<HMONITOR>(lParam) == s_monitor && s_drag != kBrightTrack &&
                 !(s_brightnessEdited && static_cast<INT_PTR>(wParam) >= 0)) {
@@ -1839,11 +1980,15 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_keyNav = false;
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
-            int tray = hit < 0 && control == kNone ? TrayAt(x, y) : -1;
-            bool overTray = hit < 0 && control == kNone && OverTray(x, y);
-            if (hit != s_hover || control != s_hoverControl || tray != s_hoverTray || overTray != s_overTray) {
+            int radio = hit < 0 && control == kNone ? RadioAt(x, y) : -1;
+            int tray = hit < 0 && control == kNone && radio < 0 ? TrayAt(x, y) : -1;
+            bool overTray = hit < 0 && control == kNone && radio < 0 && OverTray(x, y);
+            if (hit != s_hover || control != s_hoverControl || radio != s_hoverRadio || tray != s_hoverTray ||
+                overTray != s_overTray) {
+                if (radio != s_hoverRadio && s_hoverRadio >= 0) s_radioFailed &= ~(1 << s_radioIds[s_hoverRadio]);
                 s_hover = hit;
                 s_hoverControl = control;
+                s_hoverRadio = radio;
                 s_hoverTray = tray;
                 s_overTray = overTray;
                 if (hit >= 0) s_sel = hit;
@@ -1858,6 +2003,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_hover = -1;
             s_hoverControl = kNone;
+            s_hoverRadio = -1;
+            s_radioFailed = 0;
             s_hoverTray = -1;
             s_overTray = false;
             Redraw();
@@ -1888,6 +2035,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 Redraw();
                 return 0;
             }
+            if (int radio = RadioAt(x, y); radio >= 0) {
+                ToggleRadio(radio);
+                return 0;
+            }
             int hit = HitTest(x, y);
             if (hit >= 0) ActivateIndex(hit, (wParam & MK_SHIFT) != 0);
             else ActivateTray(TrayAt(x, y), false);
@@ -1909,6 +2060,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             int hit = HitTest(pt.x, pt.y);
             if (hit >= 0) ShowItemMenu(hit, pt);
+            else if (int radio = RadioAt(pt.x, pt.y); radio >= 0) OpenRadioSettings(radio);
             else ActivateTray(TrayAt(pt.x, pt.y), true);
             return 0;  // 不交给 DefWindowProc，免得它再发一次 WM_CONTEXTMENU
         }
@@ -2076,6 +2228,8 @@ void Popup_Init() {
 
     // 托盘图标在后台读，之后每隔一会儿再读一遍
     if (g_settings.trayIcons) Tray_Refresh();
+    // Wi-Fi 和蓝牙也先读一遍：第一次弹出时就知道这台电脑上有没有
+    if (g_settings.showRadios && s_hwnd) Radios_Query(s_hwnd);
     if (s_hwnd) SetTimer(s_hwnd, kTimerTray, kTrayRefreshMs, nullptr);
 
     // 提前读一遍固定的应用和图标，第一次弹出时就不卡
@@ -2136,6 +2290,18 @@ void Open(bool preview, bool startMenu = false) {
     s_hoverControl = kNone;
     s_drag = kNone;
     s_wheelRest = 0;
+
+    // Wi-Fi 和蓝牙先用上次读到的（启动时就读过一遍），这台电脑上没有的不放按钮；弹出以后再读一遍
+    s_radioCount = 0;
+    if (g_settings.showRadios && !s_compact) {
+        for (int i = 0; i < kRadioCount; ++i) {
+            s_radio[i] = Radios_Get(i);
+            if (s_radio[i].status != kRadioMissing) s_radioIds[s_radioCount++] = i;
+        }
+        if (!preview) Radios_Query(s_hwnd);
+    }
+    s_hoverRadio = -1;
+    s_radioFailed = 0;
 
     // 托盘图标用后台读好的（面板宽度弹出时就定了，弹出期间读到的新结果留到下次）
     s_tray = g_settings.trayIcons ? Tray_Hidden() : std::vector<TrayApp>();
