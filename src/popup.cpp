@@ -4,7 +4,7 @@
 // 右键弹出和系统任务栏差不多的菜单（开始按钮上是 Win+X 菜单），方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
 // 鼠标停在窗口图标上时在上方显示它的实时缩略图。
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音（可以在设置里关掉）。
-// 这一行最右边是 Wi-Fi 和蓝牙开关：点一下开关，右键打开系统设置里对应的页面（也可以在设置里关掉）。
+// 这一行最右边是 Wi-Fi 和蓝牙开关：点一下开关，右键弹出系统自己的网络列表、蓝牙设备列表（也可以在设置里关掉）。
 // 时钟左边是系统托盘“隐藏的图标”里的程序（可以在设置里关掉、选两行小图标还是一行大图标），左键右键和在托盘里点一样，
 // 右键时迷你任务栏留着。两行小图标是 2×2 一页，鼠标停在上面按左右方向键或者滚滚轮翻页；一行大图标放不下时同样滚着看。
 // 任务栏藏着时短按 Win：迷你任务栏只留一行格子贴着屏幕底边弹上来，弹完再打开开始菜单，开始菜单关了一起收起。
@@ -335,13 +335,17 @@ void ComputeLayout() {
     s_height = static_cast<int>(std::ceil(L.panelH + L.margin + L.bottomGap));
 }
 
-// 系统任务栏的图标是不是居中：Win11 看设置里的“任务栏对齐方式”（没改过是居中），Win10 一直靠左
-bool SystemTaskbarCentered() {
+bool IsWindows11() {
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
     auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
         reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
     OSVERSIONINFOW ver = {sizeof(ver)};
-    if (rtlGetVersion && rtlGetVersion(&ver) == 0 && ver.dwBuildNumber < 22000) return false;
+    return !(rtlGetVersion && rtlGetVersion(&ver) == 0 && ver.dwBuildNumber < 22000);
+}
+
+// 系统任务栏的图标是不是居中：Win11 看设置里的“任务栏对齐方式”（没改过是居中），Win10 一直靠左
+bool SystemTaskbarCentered() {
+    if (!IsWindows11()) return false;
     DWORD value = 1, size = sizeof(value);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"TaskbarAl",
                      RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)
@@ -1407,10 +1411,26 @@ void ToggleRadio(int k) {
     Redraw();
 }
 
-// 右键 Wi-Fi / 蓝牙按钮：打开系统设置里对应的页面
-void OpenRadioSettings(int k) {
+// 右键 Wi-Fi / 蓝牙按钮：弹出系统自己的快捷列表（Wi-Fi：网络列表，Win10、Win11 都有；蓝牙：Win11 快速设置里的设备列表），
+// 打不开时（没有程序能打开这个链接，或者 Win10 的蓝牙）退回系统设置里对应的页面
+void OpenRadioPanel(int k) {
     if (k < 0 || k >= s_radioCount) return;
-    Launch(s_radioIds[k] == kRadioWifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
+    bool wifi = s_radioIds[k] == kRadioWifi;
+    const wchar_t* panel = wifi ? L"ms-availablenetworks:" : IsWindows11() ? L"ms-actioncenter:controlcenter/bluetooth" : nullptr;
+    if (panel) {
+        AllowSetForegroundWindow(ASFW_ANY);
+        SHELLEXECUTEINFOW sei = {sizeof(sei)};
+        sei.fMask = SEE_MASK_FLAG_NO_UI;  // 打不开时不弹“选择应用”，改去设置
+        sei.lpFile = panel;
+        sei.nShow = SW_SHOWNORMAL;
+        if (ShellExecuteExW(&sei)) {
+            Log(L"右键%ls按钮：打开 %ls", wifi ? L" Wi-Fi " : L"蓝牙", panel);
+            HideNow();
+            return;
+        }
+        Log(L"右键%ls按钮：打开 %ls 失败（%lu），改开系统设置", wifi ? L" Wi-Fi " : L"蓝牙", panel, GetLastError());
+    }
+    Launch(wifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
 }
 
 void ActivateIndex(int idx, bool newInstance = false) {
@@ -2084,7 +2104,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             int hit = HitTest(pt.x, pt.y);
             if (hit >= 0) ShowItemMenu(hit, pt);
-            else if (int radio = RadioAt(pt.x, pt.y); radio >= 0) OpenRadioSettings(radio);
+            else if (int radio = RadioAt(pt.x, pt.y); radio >= 0) OpenRadioPanel(radio);
             else ActivateTray(TrayAt(pt.x, pt.y), true);
             return 0;  // 不交给 DefWindowProc，免得它再发一次 WM_CONTEXTMENU
         }

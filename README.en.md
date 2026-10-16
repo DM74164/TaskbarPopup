@@ -73,7 +73,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Mouse wheel | Scroll the icons; over a slider, adjust volume / brightness |
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
-| Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the matching Settings page |
+| Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the system's network list or Bluetooth device list (Bluetooth on Windows 10 opens Settings) |
 | Esc / click elsewhere | Close |
 
 ## Settings
