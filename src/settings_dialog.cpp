@@ -28,12 +28,19 @@ constexpr double kKnobMs = 150.0 * TP_ANIM_SCALE;
 // ---- 尺寸（96 DPI 下的像素，乘 s_scale 得到物理像素） ----
 constexpr float kShadow = 28;   // 面板外面留给阴影的一圈
 constexpr float kPad = 20;      // 面板内边距
-constexpr float kColW = 330;    // 一栏的宽度
+constexpr float kColW = 360;    // 右边内容的宽度
+constexpr float kNavW = 140;    // 左边导航的宽度
+constexpr float kNavGap = 16;   // 导航和内容之间
+constexpr float kNavItemH = 38;
 constexpr float kHeaderH = 52;  // 标题栏（可以拖动）
 constexpr float kGroupTitleH = 24;
 constexpr float kGroupGap = 12;
 constexpr float kRowPad = 14;  // 卡片里左右的边距
 constexpr float kChipH = 28;
+
+// 分类：左边导航一项一页
+enum Page { kPageTaskbar, kPageMini, kPageLook, kPageHotkeys, kPageStartup, kPageCount };
+const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"外观", L"快捷键", L"启动和更新"};
 
 // 开关
 enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kTray, kAutoStart, kUpdates, kToggleCount };
@@ -91,7 +98,7 @@ const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 
 // 能点的东西
 enum Kind {
     kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kOk,
-    kCancel, kClose
+    kCancel, kClose, kNav
 };
 struct Item {
     Kind kind = kNoItem;
@@ -129,6 +136,7 @@ const Palette kLight = {Color(235, 18, 18, 22),    Color(160, 18, 18, 22),    Co
 HWND s_hwnd = nullptr;
 float s_scale = 1;
 int s_width = 0, s_height = 0;  // 窗口大小（含阴影）
+int s_page = kPageTaskbar;      // 现在显示哪一页（关了再开还停在这一页）
 POINT s_pos = {};
 RectF s_panel;  // 面板在窗口里的位置
 float s_radius = 0;
@@ -207,10 +215,13 @@ float MeasureWidth(const std::wstring& text, float sizePx) {
     return measured.Width;
 }
 
-// 一组：标题 + 卡片。rows 里每个函数往卡片里加一行，返回这一行的高度
-float AddGroup(float x, float y, const wchar_t* title, const std::vector<float (*)(float, float, float)>& rows) {
-    s_texts.push_back({title, RectF(x + Px(4), y, Px(kColW) - Px(8), Px(kGroupTitleH)), 0});
-    y += Px(kGroupTitleH);
+// 一组：标题 + 卡片（一页只有一组时不要标题）。rows 里每个函数往卡片里加一行，返回这一行的高度
+using RowFn = float (*)(float, float, float);
+float AddGroup(float x, float y, const wchar_t* title, const std::vector<RowFn>& rows) {
+    if (title) {
+        s_texts.push_back({title, RectF(x + Px(4), y, Px(kColW) - Px(8), Px(kGroupTitleH)), 0});
+        y += Px(kGroupTitleH);
+    }
     float top = y;
     for (size_t i = 0; i < rows.size(); ++i) {
         if (i > 0) s_rowLines.insert(s_rowLines.end(), {x + Px(kRowPad), x + Px(kColW) - Px(kRowPad), y});
@@ -303,6 +314,48 @@ float ChipsRow(float x, float y, float w) {
     return bottom + Px(36) - y;
 }
 
+// 一页的内容，从 (x, y) 往下排，返回最后一组下面的位置
+float BuildPage(int page, float x, float y) {
+    switch (page) {
+        case kPageTaskbar: {
+            y = AddGroup(x, y, L"最大化", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); }});
+            // “小窗口留在上面”关着时收起“在所有窗口上面”
+            std::vector<RowFn> floats = {[](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
+            if (s_v.on[kKeepFloats]) floats.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
+            y = AddGroup(x, y, L"小窗口", floats);
+            return AddGroup(x, y, L"最大化时不隐藏任务栏的程序", {ChipsRow});
+        }
+        case kPageMini: {
+            // 长按 Win 关着时收起长按时长
+            std::vector<RowFn> popup = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
+            if (s_v.on[kLongPress]) popup.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
+            y = AddGroup(x, y, L"弹出", popup);
+            std::vector<RowFn> show = {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
+                                       [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
+                                       [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); }};
+            if (s_v.on[kTray]) show.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });  // 托盘图标关着时收起样式
+            return AddGroup(x, y, L"显示", show);
+        }
+        case kPageLook: {
+            y = AddGroup(x, y, L"材质和颜色",
+                         {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
+                          [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
+            std::vector<RowFn> place = {[](float x, float y, float w) { return SliderRow(kScale, x, y, w); },
+                                        [](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); }};
+            if (s_v.seg[kSegEdge] == kEdgeBottom) place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });  // 竖排时收起对齐
+            return AddGroup(x, y, L"迷你任务栏", place);
+        }
+        case kPageHotkeys:
+            return AddGroup(x, y, nullptr,
+                            {[](float x, float y, float w) { return HotkeyRow(kHotkeyPopup, x, y, w); },
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); }});
+        default:
+            return AddGroup(x, y, nullptr,
+                            {[](float x, float y, float w) { return ToggleRow(kAutoStart, x, y, w); },
+                             [](float x, float y, float w) { return ToggleRow(kUpdates, x, y, w); }});
+    }
+}
+
 void BuildLayout() {
     s_items.clear();
     s_cards.clear();
@@ -310,40 +363,32 @@ void BuildLayout() {
     s_rowLines.clear();
 
     float margin = Px(kShadow);
-    float panelW = Px(kPad) * 3 + Px(kColW) * 2;
+    float panelW = Px(kPad) * 2 + Px(kNavW) + Px(kNavGap) + Px(kColW);
     s_radius = Px(22);
-    float px0 = margin + Px(kPad), px1 = px0 + Px(kColW) + Px(kPad);
+    float navX = margin + Px(kPad), contentX = navX + Px(kNavW) + Px(kNavGap);
     float top = margin + Px(kHeaderH);
 
     s_texts.push_back({L"TaskbarPopup 设置", RectF(margin + Px(kPad), margin + Px(12), Px(260), Px(28)), 2});
     s_items.push_back({kClose, 0, RectF(margin + panelW - Px(12) - Px(32), margin + Px(10), Px(32), Px(32))});
 
-    // “小窗口留在上面”关着时收起“在所有窗口上面”
-    std::vector<float (*)(float, float, float)> taskbar = {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
-                                                           [](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
-    if (s_v.on[kKeepFloats]) taskbar.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
-    float left = AddGroup(px0, top, L"任务栏", taskbar);
-    // 长按 Win 关着时收起长按时长
-    std::vector<float (*)(float, float, float)> mini = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
-    if (s_v.on[kLongPress]) mini.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
-    mini.push_back([](float x, float y, float w) { return SliderRow(kScale, x, y, w); });
-    mini.push_back([](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); });
-    if (s_v.seg[kSegEdge] == kEdgeBottom) mini.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });  // 竖排时收起对齐
-    mini.push_back([](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); });
-    mini.push_back([](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); });
-    mini.push_back([](float x, float y, float w) { return ToggleRow(kTray, x, y, w); });
-    if (s_v.on[kTray]) mini.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });  // 托盘图标关着时收起样式
-    left = AddGroup(px0, left, L"迷你任务栏", mini);
-    left = AddGroup(px0, left, L"外观",
-                    {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
-                     [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); }});
-    float right = AddGroup(px1, top, L"启动和更新",
-                           {[](float x, float y, float w) { return ToggleRow(kAutoStart, x, y, w); },
-                            [](float x, float y, float w) { return ToggleRow(kUpdates, x, y, w); }});
-    right = AddGroup(px1, right, L"快捷键",
-                     {[](float x, float y, float w) { return HotkeyRow(kHotkeyPopup, x, y, w); },
-                      [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); }});
-    right = AddGroup(px1, right, L"最大化时不隐藏任务栏的程序", {ChipsRow});
+    // 左边的导航
+    float navStep = Px(kNavItemH) + Px(4);
+    for (int i = 0; i < kPageCount; ++i)
+        s_items.push_back({kNav, i, RectF(navX, top + i * navStep, Px(kNavW), Px(kNavItemH))});
+    float navBottom = top + kPageCount * navStep - Px(4);
+
+    // 右边是选中的那一页。窗口高度按最高的一页算，换页时大小不变：别的页先排一遍量出高度再扔掉
+    float pageBottom = top;
+    for (int p = 0; p < kPageCount; ++p) {
+        if (p == s_page) continue;
+        size_t items = s_items.size(), cards = s_cards.size(), texts = s_texts.size(), lines = s_rowLines.size();
+        pageBottom = std::max(pageBottom, BuildPage(p, contentX, top));
+        s_items.erase(s_items.begin() + items, s_items.end());
+        s_cards.erase(s_cards.begin() + cards, s_cards.end());
+        s_texts.erase(s_texts.begin() + texts, s_texts.end());
+        s_rowLines.erase(s_rowLines.begin() + lines, s_rowLines.end());
+    }
+    pageBottom = std::max(pageBottom, BuildPage(s_page, contentX, top));
 
     // “立即检查”放在“自动检查更新”那一行的开关左边
     for (const Item& it : s_items)
@@ -355,7 +400,7 @@ void BuildLayout() {
             break;
         }
 
-    float contentBottom = std::max(left, right) - Px(kGroupGap);
+    float contentBottom = std::max(navBottom, pageBottom - Px(kGroupGap));
     float buttonsY = contentBottom + Px(16);
     float bw = Px(92), bh = Px(34);
     float panelRight = margin + panelW - Px(kPad);
@@ -644,6 +689,21 @@ void DrawChip(Graphics& g, const Item& it) {
     g.DrawLine(&pen, cx - a, cy + a, cx + a, cy - a);
 }
 
+// 左边导航的一项：选中的是一片浅色胶囊，左边一条强调色的短竖线（和 Win11 的设置一样）
+void DrawNav(Graphics& g, const Item& it) {
+    const Palette& pal = Colors();
+    const RectF& r = it.rect;
+    bool selected = it.index == s_page;
+    if (selected) {
+        DrawCard(g, r, Px(8), pal.buttonHot, pal.cardRim);
+        FillRound(g, RectF(r.X + Px(5), r.Y + (r.Height - Px(16)) / 2, Px(3), Px(16)), Px(1.5f), pal.accent);
+    } else if (s_hover == it || s_press == it) {
+        FillRound(g, r, Px(8), pal.hover);
+    }
+    DrawText(g, kPageNames[it.index], Px(13.5f), FontStyleRegular, RectF(r.X + Px(16), r.Y, r.Width - Px(20), r.Height),
+             selected ? pal.text : pal.subtle);
+}
+
 void DrawButton(Graphics& g, const Item& it) {
     const Palette& pal = Colors();
     const RectF& r = it.rect;
@@ -705,6 +765,7 @@ void DrawContent(Graphics& g) {
             case kHotkeyMode: DrawHotkeyMode(g, it); break;
             case kChip:
             case kAddChip: DrawChip(g, it); break;
+            case kNav: DrawNav(g, it); break;
             default: DrawButton(g, it); break;
         }
     }
@@ -712,7 +773,9 @@ void DrawContent(Graphics& g) {
         if (const Item* f = FindItem(s_focus)) {
             RectF r = f->rect;
             r.Inflate(Px(2), Px(2));
-            float radius = f->kind == kToggleRow || f->kind == kSliderRow || f->kind == kHotkeyRow ? Px(10) : r.Height / 2;
+            float radius = f->kind == kToggleRow || f->kind == kSliderRow || f->kind == kHotkeyRow ? Px(10)
+                           : f->kind == kNav                                                   ? Px(9)
+                                                                                               : r.Height / 2;
             StrokeRound(g, r, radius, pal.accent, Px(2));
         }
 }
@@ -1074,6 +1137,20 @@ void SetToggle(int which, bool on) {
     if (which == kKeepFloats || which == kLongPress || which == kTray) Relayout(true);  // 跟着收起 / 放出来的行
 }
 
+void EndCapture();
+
+// 换一页（窗口大小不变）。焦点跟到导航上新的这一项，确定、取消上的不动
+void SetPage(int page) {
+    page = (page % kPageCount + kPageCount) % kPageCount;
+    if (page == s_page) return;
+    EndCapture();
+    s_page = page;
+    s_hover = s_press = {};
+    s_drag = -1;
+    if (s_focus.kind != kOk && s_focus.kind != kCancel) s_focus = {kNav, page, {}};
+    Relayout(true);
+}
+
 void SetSlider(int which, int value) {
     const SliderSpec& spec = kSliderSpec[which];
     value = spec.minValue + (value - spec.minValue + spec.step / 2) / spec.step * spec.step;
@@ -1371,6 +1448,7 @@ void Activate(const Item& it) {
         case kHotkeyClear: SetHotkey(it.index, 0); break;
         case kHotkeyMode: SetHotkeyMode(it.index / kSegStride, it.index % kSegStride == 1); break;
         case kCheckNow: Update_CheckNow(true); break;
+        case kNav: SetPage(it.index); return;
         case kChip: RemoveExclude(it.index); return;
         case kAddChip: ShowAddMenu(it.rect); return;
         case kOk:
@@ -1420,7 +1498,10 @@ void OnKey(WPARAM vk) {
     const Item* f = FindItem(s_focus);
     switch (vk) {
         case VK_ESCAPE: DestroyWindow(s_hwnd); return;
-        case VK_TAB: MoveFocus(shift ? -1 : 1); return;
+        case VK_TAB:
+            if (GetKeyState(VK_CONTROL) < 0) SetPage(s_page + (shift ? -1 : 1));  // Ctrl+Tab 换页
+            else MoveFocus(shift ? -1 : 1);
+            return;
         case VK_UP: MoveFocus(-1); return;
         case VK_DOWN: MoveFocus(1); return;
         case VK_LEFT:

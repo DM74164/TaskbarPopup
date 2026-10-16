@@ -77,7 +77,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 
 ## Settings
 
-Right-click the tray icon → Settings (设置...). Every option is on one panel, and Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+Right-click the tray icon → Settings (设置...). Options are grouped into Taskbar, Mini taskbar, Appearance, Hotkeys, and Startup & updates (任务栏, 迷你任务栏, 外观, 快捷键, 启动和更新); switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
 Check for updates (自动检查更新) is off by default. When on, it checks GitHub Releases once a day and only notifies you; it never downloads or installs anything by itself.
 
