@@ -426,15 +426,12 @@ bool OverTray(int x, int y) {
 
 // 鼠标所指的托盘格子的标题；堆叠又不止一页时带上第几页
 std::wstring TrayTitle(int i) {
-    wchar_t text[96];
-    if (i == s_trayShown && TrayCells() > s_trayShown) {
-        swprintf(text, 96, L"显示隐藏的图标（还有 %d 个）", static_cast<int>(s_tray.size()) - s_trayShown);
-        return text;
-    }
+    if (i == s_trayShown && TrayCells() > s_trayShown)
+        return TrF(L"显示隐藏的图标（还有 %d 个）", static_cast<int>(s_tray.size()) - s_trayShown);
     std::wstring name = i >= 0 && i < s_trayShown ? s_tray[i].name : L"";
     if (TrayPages() <= 1) return name;
-    swprintf(text, 96, L"第 %d/%d 页", s_trayPage + 1, TrayPages());
-    return name.empty() ? text : name + L"（" + text + L"）";
+    if (name.empty()) return TrF(L"第 %d/%d 页", s_trayPage + 1, TrayPages());
+    return TrF(L"%ls（第 %d/%d 页）", name.c_str(), s_trayPage + 1, TrayPages());
 }
 
 double TrayFlipT() { return s_flipFrom < 0 ? 1.0 : std::min(1.0, (NowMs() - s_flipStart) / kFlipMs); }
@@ -553,17 +550,14 @@ float SliderValue(int which) {
 }
 
 std::wstring SliderText(int which) {
-    wchar_t buf[64];
     if (which == 0) {
-        if (!s_hasVolume) return L"没有可用的播放设备";
-        if (s_muted) return L"已静音（点喇叭取消）";
-        swprintf(buf, 64, L"音量 %d%%", static_cast<int>(std::lround(s_volume * 100)));
-    } else {
-        if (s_brightness == -2) return L"正在读取亮度…";
-        if (s_brightness < 0) return L"这块屏幕不支持调节亮度";
-        swprintf(buf, 64, L"亮度 %d%%", s_brightness);
+        if (!s_hasVolume) return Tr(L"没有可用的播放设备");
+        if (s_muted) return Tr(L"已静音（点喇叭取消）");
+        return TrF(L"音量 %d%%", static_cast<int>(std::lround(s_volume * 100)));
     }
-    return buf;
+    if (s_brightness == -2) return Tr(L"正在读取亮度…");
+    if (s_brightness < 0) return Tr(L"这块屏幕不支持调节亮度");
+    return TrF(L"亮度 %d%%", s_brightness);
 }
 
 void RefreshVolume() { s_hasVolume = Volume_Get(s_volume, s_muted); }
@@ -850,7 +844,7 @@ void DrawContent(Graphics& g) {
     if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
     else if (s_hoverTray >= 0 || s_overTray) title = TrayTitle(s_hoverTray);
-    else if (shown == 0) title = L"开始";
+    else if (shown == 0) title = Tr(L"开始");
     else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
     StringFormat oneLine(StringFormatFlagsNoWrap);
     oneLine.SetAlignment(StringAlignmentCenter);
@@ -925,7 +919,7 @@ void DrawContent(Graphics& g) {
     DrawTray(g);
 
     if (s_items.empty()) {
-        const wchar_t* empty = s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用";
+        const wchar_t* empty = Tr(s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用");
         if (vertical) DrawLabel(g, empty, smallFont, RectF(L.panelX + Px(4), L.itemsY, L.panelW - Px(8), L.itemsW), center, pal.subtle);
         else DrawLabel(g, empty, titleFont, RectF(L.itemsX, L.tileY, L.itemsW, L.tile), center, pal.subtle);
     }
@@ -1459,29 +1453,27 @@ void ShowItemMenu(int idx, POINT at) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     };
     if (!recent.empty()) {
-        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"最近");
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, Tr(L"最近"));
         for (size_t i = 0; i < recent.size(); ++i)
             AppendMenuW(menu, MF_STRING, kCmdRecent + i, MenuText(recent[i].name).c_str());
     }
     separate();
-    if (!app.launch.empty()) AppendMenuW(menu, MF_STRING, kCmdLaunch, hwnd ? MenuText(app.name).c_str() : L"打开");
-    if (!app.runAs.empty()) AppendMenuW(menu, MF_STRING, kCmdRunAs, L"以管理员身份运行");
-    if (!app.location.empty()) AppendMenuW(menu, MF_STRING, kCmdLocation, L"打开文件所在的位置");
+    if (!app.launch.empty()) AppendMenuW(menu, MF_STRING, kCmdLaunch, hwnd ? MenuText(app.name).c_str() : Tr(L"打开"));
+    if (!app.runAs.empty()) AppendMenuW(menu, MF_STRING, kCmdRunAs, Tr(L"以管理员身份运行"));
+    if (!app.location.empty()) AppendMenuW(menu, MF_STRING, kCmdLocation, Tr(L"打开文件所在的位置"));
     if (hwnd) {
         separate();
         bool iconic = IsIconic(hwnd), zoomed = IsZoomed(hwnd);
         bool canMaximize = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_MAXIMIZEBOX) != 0;
-        AppendMenuW(menu, MF_STRING | (iconic || zoomed ? 0 : MF_GRAYED), kCmdRestore, L"还原");
-        AppendMenuW(menu, MF_STRING | (iconic ? MF_GRAYED : 0), kCmdMinimize, L"最小化");
-        AppendMenuW(menu, MF_STRING | (!zoomed && canMaximize ? 0 : MF_GRAYED), kCmdMaximize, L"最大化");
+        AppendMenuW(menu, MF_STRING | (iconic || zoomed ? 0 : MF_GRAYED), kCmdRestore, Tr(L"还原"));
+        AppendMenuW(menu, MF_STRING | (iconic ? MF_GRAYED : 0), kCmdMinimize, Tr(L"最小化"));
+        AppendMenuW(menu, MF_STRING | (!zoomed && canMaximize ? 0 : MF_GRAYED), kCmdMaximize, Tr(L"最大化"));
         if (!exeName.empty())
-            AppendMenuW(menu, MF_STRING | (IsExcludedExe(exeName) ? MF_CHECKED : 0), kCmdExclude, L"最大化时不隐藏任务栏");
+            AppendMenuW(menu, MF_STRING | (IsExcludedExe(exeName) ? MF_CHECKED : 0), kCmdExclude, Tr(L"最大化时不隐藏任务栏"));
         separate();
-        AppendMenuW(menu, MF_STRING, kCmdClose, L"关闭窗口");
+        AppendMenuW(menu, MF_STRING, kCmdClose, Tr(L"关闭窗口"));
         if (same.size() > 1) {
-            wchar_t text[64];
-            swprintf(text, 64, L"关闭全部 %d 个窗口", static_cast<int>(same.size()));
-            AppendMenuW(menu, MF_STRING, kCmdCloseAll, text);
+            AppendMenuW(menu, MF_STRING, kCmdCloseAll, TrF(L"关闭全部 %d 个窗口", static_cast<int>(same.size())).c_str());
         }
         SetMenuDefaultItem(menu, kCmdClose, FALSE);
     } else {

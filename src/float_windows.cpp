@@ -431,7 +431,7 @@ void TogglePin(HWND hwnd) {
         Forget(hwnd);
         Log(L"小窗口留在上面：按快捷键取消固定 %ls（还有 %d 个）", GetClassNameStr(hwnd).c_str(),
             static_cast<int>(s_floats.size()));
-        ShowToast(hwnd, L"已取消固定");
+        ShowToast(hwnd, Tr(L"已取消固定"));
         return;
     }
     const wchar_t* refuse = nullptr;
@@ -441,11 +441,11 @@ void TogglePin(HWND hwnd) {
     if (refuse) {
         Log(L"小窗口留在上面：按了快捷键，前台 %ls 不能固定（%ls）", hwnd ? GetClassNameStr(hwnd).c_str() : L"（没有）",
             refuse);
-        ShowToast(hwnd, refuse);
+        ShowToast(hwnd, Tr(refuse));
         return;
     }
     Pin(hwnd, L"按快捷键固定");
-    ShowToast(hwnd, s_topmost ? L"已固定，留在所有窗口上面" : L"已固定，点全屏窗口时它留在上面");
+    ShowToast(hwnd, Tr(s_topmost ? L"已固定，留在所有窗口上面" : L"已固定，点全屏窗口时它留在上面"));
 }
 
 // 设置里开关了“固定的小窗口在所有窗口上面”：已经固定的小窗口跟着置顶 / 取消置顶

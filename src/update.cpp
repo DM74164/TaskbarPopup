@@ -220,15 +220,13 @@ std::wstring NetError(const wchar_t* step) {
     DWORD err = GetLastError();
     Log(L"检查更新：%ls 失败（%lu）", step, err);
     switch (err) {
-        case ERROR_WINHTTP_TIMEOUT: return L"连接超时";
-        case ERROR_WINHTTP_NAME_NOT_RESOLVED: return L"找不到服务器，可能没有联网";
+        case ERROR_WINHTTP_TIMEOUT: return Tr(L"连接超时");
+        case ERROR_WINHTTP_NAME_NOT_RESOLVED: return Tr(L"找不到服务器，可能没有联网");
         case ERROR_WINHTTP_CANNOT_CONNECT:
-        case ERROR_WINHTTP_CONNECTION_ERROR: return L"连不上 GitHub";
-        case ERROR_WINHTTP_SECURE_FAILURE: return L"安全连接失败";
+        case ERROR_WINHTTP_CONNECTION_ERROR: return Tr(L"连不上 GitHub");
+        case ERROR_WINHTTP_SECURE_FAILURE: return Tr(L"安全连接失败");
     }
-    wchar_t buf[64];
-    swprintf(buf, ARRAYSIZE(buf), L"网络错误 %lu", err);
-    return buf;
+    return TrF(L"网络错误 %lu", err);
 }
 
 // 在后台线程上运行
@@ -265,13 +263,11 @@ Result Fetch() {
     if (status != 200) {
         Log(L"检查更新：服务器返回 %lu", status);
         if (status == 404) {
-            r.error = L"还没有发布过正式版本";
+            r.error = Tr(L"还没有发布过正式版本");
         } else if (status == 403 || status == 429) {
-            r.error = L"GitHub 暂时限制了请求次数，稍后再试";
+            r.error = Tr(L"GitHub 暂时限制了请求次数，稍后再试");
         } else {
-            wchar_t buf[64];
-            swprintf(buf, ARRAYSIZE(buf), L"服务器返回 %lu", status);
-            r.error = buf;
+            r.error = TrF(L"服务器返回 %lu", status);
         }
         return r;
     }
@@ -285,7 +281,7 @@ Result Fetch() {
         if (avail == 0) break;
         if (body.size() + avail > kMaxResponse) {
             Log(L"检查更新：回应超过 %u 字节", static_cast<unsigned>(kMaxResponse));
-            r.error = L"服务器的回应不对";
+            r.error = Tr(L"服务器的回应不对");
             return r;
         }
         size_t old = body.size();
@@ -302,7 +298,7 @@ Result Fetch() {
     std::string tag, url;
     if (!ParseRelease(body, tag, url, r.hasZip) || !ParseVersion(tag, r.latest)) {
         Log(L"检查更新：读不懂回应（%u 字节）", static_cast<unsigned>(body.size()));
-        r.error = L"服务器的回应不对";
+        r.error = Tr(L"服务器的回应不对");
         return r;
     }
     r.url = IsSafeReleaseUrl(url) ? std::wstring(url.begin(), url.end()) : kReleasesUrl;
@@ -337,19 +333,19 @@ void SetNotifiedVersion(const Version& v) {
 
 // 只在手动检查时用：资源管理器没在运行、气泡出不来的话改用对话框
 void Tell(const std::wstring& text, bool failed) {
-    if (ShowTrayBalloon(L"检查更新", text.c_str())) return;
+    if (ShowTrayBalloon(Tr(L"检查更新"), text.c_str())) return;
     MessageBoxW(nullptr, text.c_str(), L"TaskbarPopup",
                 (failed ? MB_ICONWARNING : MB_ICONINFORMATION) | MB_TOPMOST | MB_SETFOREGROUND);
 }
 
 void AnnounceNewer(const Result& r, bool manual) {
-    std::wstring title = L"发现新版本 " + VersionText(r.latest);
-    if (ShowTrayBalloon(title.c_str(), L"点这里打开下载页面", r.url.c_str())) {
+    std::wstring title = TrF(L"发现新版本 %ls", VersionText(r.latest).c_str());
+    if (ShowTrayBalloon(title.c_str(), Tr(L"点这里打开下载页面"), r.url.c_str())) {
         SetNotifiedVersion(r.latest);
         return;
     }
     if (!manual) return;  // 下次自动检查再说
-    std::wstring text = title + L"，现在打开下载页面吗？";
+    std::wstring text = TrF(L"发现新版本 %ls，现在打开下载页面吗？", VersionText(r.latest).c_str());
     SetNotifiedVersion(r.latest);
     if (MessageBoxW(nullptr, text.c_str(), L"TaskbarPopup", MB_ICONINFORMATION | MB_YESNO | MB_TOPMOST | MB_SETFOREGROUND) ==
         IDYES)
@@ -385,7 +381,7 @@ void Update_CheckNow(bool manual) {
     s_thread = CreateThread(nullptr, 0, CheckThread, nullptr, 0, nullptr);
     if (!s_thread) {
         s_busy = false;
-        if (s_manual) Tell(L"检查更新失败：无法启动后台线程", true);
+        if (s_manual) Tell(Tr(L"检查更新失败：无法启动后台线程"), true);
         s_manual = false;
     }
 }
@@ -404,7 +400,7 @@ void Update_OnResult() {
     s_busy = false;
     if (!r.ok) {
         Log(L"检查更新失败：%ls", r.error.c_str());
-        if (manual) Tell(L"检查更新失败：" + r.error, true);
+        if (manual) Tell(TrF(L"检查更新失败：%ls", r.error.c_str()), true);
         return;
     }
     Log(L"检查更新：最新版本 %ls%ls，下载页面 %ls", VersionText(r.latest).c_str(), r.hasZip ? L"" : L"（下载文件还没传上去）",
@@ -412,12 +408,12 @@ void Update_OnResult() {
     if (Compare(r.latest, CurrentVersion()) > 0) {
         // 刚发布、下载文件还在编译签名：先不提醒（也不记成提醒过），下次检查再说
         if (!r.hasZip) {
-            if (manual) Tell(L"发现新版本 " + VersionText(r.latest) + L"，下载文件还没准备好，过一会儿再检查", false);
+            if (manual) Tell(TrF(L"发现新版本 %ls，下载文件还没准备好，过一会儿再检查", VersionText(r.latest).c_str()), false);
         } else if (manual || Compare(r.latest, NotifiedVersion()) > 0) {
             AnnounceNewer(r, manual);  // 自动检查不为同一个版本反复提醒
         }
     } else if (manual) {
-        Tell(L"已经是最新版本（v" TP_VERSION_STR L"）", false);
+        Tell(TrF(L"已经是最新版本（%ls）", VersionText(CurrentVersion()).c_str()), false);
     }
 }
 
