@@ -6,7 +6,7 @@
 // 下面一行是音量和亮度调节条：拖动或在上面滚滚轮调节，点喇叭静音（可以在设置里关掉）。
 // 这一行最右边是 Wi-Fi 和蓝牙开关：点一下开关，右键打开系统设置里对应的页面（也可以在设置里关掉）。
 // 时钟左边是系统托盘“隐藏的图标”里的程序（可以在设置里关掉、选两行小图标还是一行大图标），左键右键和在托盘里点一样，
-// 右键时迷你任务栏留着。两行小图标是 2×2 一页，鼠标停在上面按左右方向键或者滚滚轮翻页。
+// 右键时迷你任务栏留着。两行小图标是 2×2 一页，鼠标停在上面按左右方向键或者滚滚轮翻页；一行大图标放不下时同样滚着看。
 // 任务栏藏着时短按 Win：迷你任务栏只留一行格子贴着屏幕底边弹上来，弹完再打开开始菜单，开始菜单关了一起收起。
 #include "common.h"
 
@@ -41,7 +41,7 @@ constexpr UINT kTrayRefreshMs = 15000;
 constexpr UINT_PTR kTimerStart = 7;    // 开始菜单开着时：看它关了没有
 constexpr UINT kStartWatchMs = 100;
 constexpr DWORD kStartWaitMs = 2000;   // 补发 Win 以后等开始菜单出来的时间
-constexpr int kMaxTrayRow = 8;         // 横排时托盘图标最多放几格，再多最后一格换成“显示隐藏的图标”
+constexpr int kMaxTrayRow = 8;         // 一行大图标时托盘图标最多同时显示几个，再多用滚轮或左右方向键滚着看
 constexpr double kFlipMs = 180.0 * TP_ANIM_SCALE;  // 托盘图标翻页
 constexpr UINT_PTR kTimerTrayMenu = 8;  // 右键了托盘图标：看系统托盘弹出的菜单关了没有
 constexpr UINT kTrayWatchMs = 100;
@@ -157,7 +157,7 @@ int s_wheelRest = 0;  // 触控板、高精度滚轮一次只给零点几格，�
 
 // 托盘里隐藏的图标（弹出时按设置定下来）
 std::vector<TrayApp> s_tray;
-int s_trayShown = 0;           // 放了几个图标；横排时比 s_tray 少的话后面还有一格“显示隐藏的图标”
+int s_trayFirst = 0;           // 一行大图标放不下时：第一个显示的是第几个
 int s_trayStyle = kTrayStacked;
 int s_hoverTray = -1;          // 鼠标下的托盘格子
 bool s_overTray = false;       // 鼠标在托盘图标那块上（堆叠时没放图标的空格也算）
@@ -241,22 +241,18 @@ void ComputeLayout() {
     L.bottomGap = s_compact ? Px(4) : L.margin;
     L.bubbleW = vertical ? Px(280) : 0;
 
-    // 托盘图标：横排时放不下的收进最后一格“显示隐藏的图标”；堆叠时 2×2 一页，和窗口格子一样大，多的翻页看。
-    // 竖排时“横排”样式的格子竖着一个个往下排
+    // 托盘图标：一行大图标时最多同时显示 kMaxTrayRow 个，多的滚着看；堆叠时 2×2 一页，和窗口格子一样大，多的翻页看。
+    // 竖排时“一行大图标”样式的格子竖着一个个往下排
     int trayCount = static_cast<int>(s_tray.size());
-    int cells;
     if (s_trayStyle == kTrayRow) {
-        s_trayShown = trayCount > kMaxTrayRow ? kMaxTrayRow - 1 : trayCount;
-        cells = s_trayShown + (trayCount > s_trayShown ? 1 : 0);
         L.cellW = vertical ? L.tile : Px(40);
         L.cellH = vertical ? Px(40) : L.tile;
-        L.trayW = cells * (vertical ? L.cellH : L.cellW);
+        L.trayW = std::min(trayCount, kMaxTrayRow) * (vertical ? L.cellH : L.cellW);
     } else {
-        s_trayShown = cells = trayCount;
         L.cellW = L.cellH = L.tile / 2;
-        L.trayW = cells > 0 ? L.tile : 0;
+        L.trayW = trayCount > 0 ? L.tile : 0;
     }
-    float traySep = cells > 0 ? L.sep : 0;
+    float traySep = trayCount > 0 ? L.sep : 0;
     int n = static_cast<int>(s_items.size());
 
     if (vertical) {
@@ -421,9 +417,15 @@ int RadioAt(int x, int y) {
 
 // ---- 托盘图标 ----
 
-int TrayCells() { return s_trayShown + (static_cast<int>(s_tray.size()) > s_trayShown ? 1 : 0); }
+int TrayCells() { return static_cast<int>(s_tray.size()); }
+
+// 一行大图标时同时显示几个
+int TrayRowVisible() { return std::min(TrayCells(), kMaxTrayRow); }
 
 int TrayPages() { return s_trayStyle == kTrayRow ? 1 : (static_cast<int>(s_tray.size()) + 3) / 4; }
+
+// 托盘图标多到要翻页（堆叠）或者滚动（一行大图标）
+bool TrayScrolls() { return s_trayStyle == kTrayRow ? TrayCells() > kMaxTrayRow : TrayPages() > 1; }
 
 // 托盘图标那一段的左上角
 PointF TrayOrigin() { return Vertical() ? PointF(s_L.colX, s_L.trayY) : PointF(s_L.trayX, s_L.tileY); }
@@ -431,17 +433,22 @@ PointF TrayOrigin() { return Vertical() ? PointF(s_L.colX, s_L.trayY) : PointF(s
 // 堆叠时的那一页（2×2，和窗口格子一样大）
 RectF TrayGroupRect() { return RectF(TrayOrigin(), SizeF(s_L.tile, s_L.tile)); }
 
-// 第 i 格。堆叠时第 i / 4 页，每页先上后下、从左往右；横排样式在竖排时一格格往下排
+// 第 i 格。堆叠时第 i / 4 页，每页先上后下、从左往右；一行大图标时从 s_trayFirst 个开始排，竖排时一格格往下排
 RectF TrayCellRect(int i) {
     const Layout& L = s_L;
     PointF o = TrayOrigin();
-    if (s_trayStyle == kTrayRow)
-        return Vertical() ? RectF(o.X, o.Y + i * L.cellH, L.cellW, L.cellH) : RectF(o.X + i * L.cellW, o.Y, L.cellW, L.cellH);
+    if (s_trayStyle == kTrayRow) {
+        int k = i - s_trayFirst;
+        return Vertical() ? RectF(o.X, o.Y + k * L.cellH, L.cellW, L.cellH) : RectF(o.X + k * L.cellW, o.Y, L.cellW, L.cellH);
+    }
     int k = i % 4;
     return RectF(o.X + (k % 2) * L.cellW, o.Y + (k / 2) * L.cellH, L.cellW, L.cellH);
 }
 
-bool TrayOnPage(int i) { return s_trayStyle == kTrayRow || i / 4 == s_trayPage; }
+bool TrayOnPage(int i) {
+    if (s_trayStyle == kTrayRow) return i >= s_trayFirst && i < s_trayFirst + TrayRowVisible();
+    return i / 4 == s_trayPage;
+}
 
 int TrayAt(int x, int y) {
     REAL fx = static_cast<REAL>(x), fy = static_cast<REAL>(y);
@@ -459,9 +466,7 @@ bool OverTray(int x, int y) {
 
 // 鼠标所指的托盘格子的标题；堆叠又不止一页时带上第几页
 std::wstring TrayTitle(int i) {
-    if (i == s_trayShown && TrayCells() > s_trayShown)
-        return TrF(L"显示隐藏的图标（还有 %d 个）", static_cast<int>(s_tray.size()) - s_trayShown);
-    std::wstring name = i >= 0 && i < s_trayShown ? s_tray[i].name : L"";
+    std::wstring name = i >= 0 && i < TrayCells() ? s_tray[i].name : L"";
     if (TrayPages() <= 1) return name;
     if (name.empty()) return TrF(L"第 %d/%d 页", s_trayPage + 1, TrayPages());
     return TrF(L"%ls（第 %d/%d 页）", name.c_str(), s_trayPage + 1, TrayPages());
@@ -798,7 +803,7 @@ void DrawRadios(Graphics& g) {
     }
 }
 
-// 托盘图标。横排放不下时最后一格画个向上的尖角（展开系统的“隐藏的图标”）；
+// 托盘图标。一行大图标放不下时两头画个小三角，表示那边还有（滚轮滚着看）；
 // 堆叠时只画当前这一页，垫一块淡淡的底，不止一页时底边画几个小点表示第几页，翻页时新一页从旁边滑进来
 void DrawTray(Graphics& g) {
     int cells = TrayCells();
@@ -824,14 +829,24 @@ void DrawTray(Graphics& g) {
         else FillRound(g, iconRect, Px(3), pal.separator);
     };
     if (row) {
-        for (int i = 0; i < s_trayShown; ++i) drawIcon(i, 0);
-        if (cells > s_trayShown) {
-            RectF c = TrayCellRect(s_trayShown);
-            float cx = c.X + c.Width / 2, cy = c.Y + c.Height / 2, w = Px(5);
-            Pen pen(pal.text, Px(1.5f));
-            RoundCaps(pen);
-            PointF chevron[3] = {PointF(cx - w, cy + w / 2), PointF(cx, cy - w / 2), PointF(cx + w, cy + w / 2)};
-            g.DrawLines(&pen, chevron, 3);
+        int shown = TrayRowVisible();
+        for (int i = s_trayFirst; i < s_trayFirst + shown; ++i) drawIcon(i, 0);
+        // 小三角画在两头那一格图标外面的空白里
+        SolidBrush hint(pal.subtle);
+        float tri = Px(3.5f);
+        PointF o = TrayOrigin();
+        if (Vertical()) {
+            float cx = o.X + s_L.cellW / 2, y0 = o.Y + Px(3), y1 = o.Y + s_L.trayW - Px(3);
+            PointF up[3] = {PointF(cx, y0), PointF(cx - tri, y0 + tri), PointF(cx + tri, y0 + tri)};
+            PointF down[3] = {PointF(cx, y1), PointF(cx - tri, y1 - tri), PointF(cx + tri, y1 - tri)};
+            if (s_trayFirst > 0) g.FillPolygon(&hint, up, 3);
+            if (s_trayFirst + shown < cells) g.FillPolygon(&hint, down, 3);
+        } else {
+            float cy = o.Y + s_L.cellH / 2, x0 = o.X + Px(3), x1 = o.X + s_L.trayW - Px(3);
+            PointF left[3] = {PointF(x0, cy), PointF(x0 + tri, cy - tri), PointF(x0 + tri, cy + tri)};
+            PointF right[3] = {PointF(x1, cy), PointF(x1 - tri, cy - tri), PointF(x1 - tri, cy + tri)};
+            if (s_trayFirst > 0) g.FillPolygon(&hint, left, 3);
+            if (s_trayFirst + shown < cells) g.FillPolygon(&hint, right, 3);
         }
         return;
     }
@@ -1277,8 +1292,19 @@ void Redraw() {
     else Render(0, 255);
 }
 
-// 托盘图标翻页（堆叠、不止一页时），转一圈回到头
+// 托盘图标翻页（堆叠、不止一页时），转一圈回到头；一行大图标放不下时滚动 delta 个，到头就停
 void FlipTray(int delta) {
+    if (s_trayStyle == kTrayRow) {
+        int first = std::clamp(s_trayFirst + delta, 0, TrayCells() - TrayRowVisible());
+        if (first == s_trayFirst) return;
+        s_trayFirst = first;
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(s_hwnd, &pt);
+        s_hoverTray = TrayAt(pt.x, pt.y);
+        Redraw();
+        return;
+    }
     int pages = TrayPages();
     if (pages <= 1 || delta == 0) return;
     s_flipFrom = s_trayPage;
@@ -1292,9 +1318,9 @@ void FlipTray(int delta) {
     Redraw();
 }
 
-// 鼠标停在堆叠的托盘图标上时，左右方向键翻页
+// 鼠标停在托盘图标上时，左右方向键翻页（一行大图标时滚动）
 bool FlipTrayUnderMouse(int delta) {
-    if (TrayPages() <= 1) return false;
+    if (!TrayScrolls()) return false;
     POINT pt;
     GetCursorPos(&pt);
     if (WindowFromPoint(pt) != s_hwnd) return false;
@@ -1672,12 +1698,6 @@ void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu);
 // 右键在那一格上方弹迷你任务栏自己的菜单，不碰系统托盘；选“程序菜单”才去系统托盘里右键它（TrayAppMenu）
 void ActivateTray(int i, bool right) {
     if (i < 0 || i >= TrayCells() || !TrayOnPage(i)) return;
-    if (i >= s_trayShown) {  // “显示隐藏的图标”
-        if (right) return;
-        HideNow();
-        Tray_ShowHidden();
-        return;
-    }
     TrayApp app = s_tray[i];
     if (!right) {
         HideNow();
@@ -1770,9 +1790,9 @@ void WatchTrayMenu() {
 // offerAppMenu = 加一项“程序菜单”（系统托盘里刚弹不出来时就不加了）
 void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu) {
     EndTrayMode();
-    if (cell < 0 || cell >= s_trayShown || s_tray[cell].exe != app.exe) {
+    if (cell < 0 || cell >= TrayCells() || s_tray[cell].exe != app.exe) {
         cell = -1;
-        for (int i = 0; i < s_trayShown; ++i)
+        for (int i = 0; i < TrayCells(); ++i)
             if (s_tray[i].exe == app.exe) cell = i;
     }
     POINT at;
@@ -2089,8 +2109,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (up == 0) return 0;
             if (control != kNone) {
                 NudgeSlider(SliderOf(control), up);
-            } else if (OverTray(pt.x, pt.y) && TrayPages() > 1) {
-                FlipTray(-up);  // 往下滚是下一页
+            } else if (OverTray(pt.x, pt.y) && TrayScrolls()) {
+                FlipTray(-up);  // 往下滚是下一页（往后滚）
             } else if (ItemCount() > s_visible) {
                 s_first = std::max(0, std::min(s_first - up, ItemCount() - s_visible));
                 // 格子在鼠标下面挪了：重新看鼠标下是哪个，缩略图也按新位置摆
@@ -2309,6 +2329,7 @@ void Open(bool preview, bool startMenu = false) {
     s_hoverTray = -1;
     s_overTray = false;
     s_trayPage = 0;
+    s_trayFirst = 0;
     s_flipFrom = -1;
     EndTrayMode();
     if (g_settings.trayIcons && !preview) Tray_Refresh();

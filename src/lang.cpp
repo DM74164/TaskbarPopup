@@ -121,7 +121,6 @@ const wchar_t* const kEnglish[][2] = {
     {L"无法安装键盘钩子，长按 Win 功能不可用。", L"Couldn't install the keyboard hook. Holding Win won't work."},
 
     // 迷你任务栏
-    {L"显示隐藏的图标（还有 %d 个）", L"Show hidden icons (%d more)"},
     {L"第 %d/%d 页", L"Page %d/%d"},
     {L"%ls（第 %d/%d 页）", L"%ls (page %d/%d)"},
     {L"没有可用的播放设备", L"No playback device"},
