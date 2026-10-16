@@ -367,6 +367,7 @@ void LoadSettings() {
     g_settings.runAsAdmin = GetPrivateProfileIntW(L"General", L"RunAsAdmin", 0, f.c_str()) != 0;
     g_settings.checkUpdates = GetPrivateProfileIntW(L"General", L"CheckUpdates", 0, f.c_str()) != 0;
     g_settings.keepFloatsOnTop = GetPrivateProfileIntW(L"General", L"KeepFloatsOnTop", 1, f.c_str()) != 0;
+    g_settings.pinTopmost = GetPrivateProfileIntW(L"General", L"PinTopmost", 0, f.c_str()) != 0;
     int style = static_cast<int>(GetPrivateProfileIntW(L"General", L"GlassStyle", kGlassLiquid, f.c_str()));
     g_settings.glassStyle = style == kGlassFrosted ? kGlassFrosted : kGlassLiquid;
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
@@ -410,6 +411,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"CheckUpdates", g_settings.checkUpdates ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"KeepFloatsOnTop", g_settings.keepFloatsOnTop ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"PinTopmost", g_settings.pinTopmost ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
     for (int id = 0; id < kHotkeyCount; ++id) {
@@ -469,7 +471,7 @@ void ApplySettings() {
     Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen);
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
     Update_Configure();
-    FloatWindows_Configure(g_settings.keepFloatsOnTop);
+    FloatWindows_Configure(g_settings.keepFloatsOnTop, g_settings.pinTopmost);
     Hotkeys_Apply();
 }
 
