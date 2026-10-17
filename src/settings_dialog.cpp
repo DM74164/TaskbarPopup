@@ -44,7 +44,8 @@ enum Page { kPageTaskbar, kPageMini, kPageLook, kPageHotkeys, kPageStartup, kPag
 const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"外观", L"快捷键", L"启动和更新"};
 
 // 开关
-enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kToggleCount };
+enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
+             kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -60,6 +61,7 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"显示托盘里隐藏的图标", L"左键、右键和在系统托盘里点一样"},
     {L"开机自动启动", nullptr},
     {L"自动检查更新", L"每天看一次 GitHub 上有没有新版本"},
+    {L"每块屏幕分别设置位置和对齐", L"改的是设置窗口所在的那块屏幕"},
 };
 
 // 滑块
@@ -78,7 +80,7 @@ const SliderSpec kSliderSpec[kSliderCount] = {
 };
 
 // 几选一（分段按钮）
-enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegCount };
+enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegMonitor, kSegCount };
 struct SegSpec {
     const wchar_t* label;
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
@@ -90,6 +92,7 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"对齐", {L"跟随系统", L"居中", L"靠左", L"靠右"}},  // 下标是 PopupAlign
     {L"位置", {L"底部", L"左侧", L"右侧"}},  // 下标是 PopupEdge
     {L"语言", {L"跟随系统", L"中文", L"English"}},  // 下标是 Language；“中文”“English”不翻译
+    {L"弹在", {L"鼠标所在屏幕", L"前台窗口所在屏幕"}},  // 下标是 PopupMonitor
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -116,7 +119,9 @@ struct Item {
 struct Values {
     bool on[kToggleCount] = {};
     int slider[kSliderCount] = {};
-    int seg[kSegCount] = {};
+    int seg[kSegCount] = {};  // 位置、对齐两项是窗口里显示的（分屏设置时是设置窗口所在屏幕的），存的是下面三项
+    int edge = kEdgeBottom, align = kAlignSystem;  // 所有屏幕共用的位置和对齐
+    std::vector<ScreenPlace> screens;              // 每块屏幕自己的
     UINT hotkey[kHotkeyCount] = {};
     bool hold[kHotkeyCount] = {};
     std::vector<std::wstring> exclude;  // 最大化时不隐藏任务栏的程序
@@ -127,6 +132,39 @@ Values s_v, s_initial;
 // 窗口里现在显示的名单：跟着“最大化或全屏时隐藏任务栏”那个开关换
 std::vector<std::wstring>& ShownApps() { return s_v.on[kAutoHide] ? s_v.exclude : s_v.include; }
 const wchar_t* AppsTitle() { return s_v.on[kAutoHide] ? L"最大化时不隐藏任务栏的程序" : L"最大化时隐藏任务栏的程序"; }
+
+// 设置窗口所在的屏幕：“每块屏幕分别设置”开着时位置和对齐改的是它的
+HMONITOR s_screen = nullptr;
+std::wstring s_screenKey;
+
+bool MultiScreen() { return GetSystemMetrics(SM_CMONITORS) > 1; }
+
+// 分段按钮显示现在要改的位置和对齐
+void ShowPlace() {
+    s_v.seg[kSegEdge] = s_v.edge;
+    s_v.seg[kSegAlign] = s_v.align;
+    if (!s_v.on[kPerScreen]) return;
+    if (const ScreenPlace* p = FindScreenPlace(s_v.screens, s_screenKey)) {
+        s_v.seg[kSegEdge] = p->edge;
+        s_v.seg[kSegAlign] = p->align;
+    }
+}
+
+// 点了位置或对齐：记到所有屏幕共用的，或者设置窗口所在屏幕自己的那一份上
+void StorePlace() {
+    if (!s_v.on[kPerScreen]) {
+        s_v.edge = s_v.seg[kSegEdge];
+        s_v.align = s_v.seg[kSegAlign];
+        return;
+    }
+    ScreenPlace* p = FindScreenPlace(s_v.screens, s_screenKey);
+    if (!p) {
+        s_v.screens.push_back({s_screenKey, kEdgeBottom, kAlignSystem});
+        p = &s_v.screens.back();
+    }
+    p->edge = s_v.seg[kSegEdge];
+    p->align = s_v.seg[kSegAlign];
+}
 
 struct Palette {
     Color text, subtle, card, cardRim, separator, accent, onAccent, trackOff, knob, button, buttonHot, textShadow, hover,
@@ -326,6 +364,13 @@ float ChipsRow(float x, float y, float w) {
     return bottom + Px(36) - y;
 }
 
+// 每块屏幕分别设置时：说明现在改的是哪块屏幕
+float ScreenRow(float x, float y, float w) {
+    std::wstring text = TrF(L"现在改的是%ls，把设置窗口拖到别的屏幕上就改那块", MonitorLabel(s_screen).c_str());
+    s_texts.push_back({text, RectF(x + Px(kRowPad), y + Px(9), w - 2 * Px(kRowPad), Px(32)), 1});
+    return Px(44);
+}
+
 // 一页的内容，从 (x, y) 往下排，返回最后一组下面的位置
 float BuildPage(int page, float x, float y) {
     switch (page) {
@@ -341,6 +386,9 @@ float BuildPage(int page, float x, float y) {
             // 长按 Win 关着时收起长按时长
             std::vector<RowFn> popup = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
             if (s_v.on[kLongPress]) popup.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
+            // 只有一块屏幕时不用选弹在哪块
+            if (MultiScreen() || s_v.seg[kSegMonitor] != kPopupAtCursor)
+                popup.push_back([](float x, float y, float w) { return SegRow(kSegMonitor, x, y, w); });
             y = AddGroup(x, y, L"弹出", popup);
             std::vector<RowFn> show = {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
                                        [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
@@ -357,8 +405,11 @@ float BuildPage(int page, float x, float y) {
             std::vector<RowFn> place = {[](float x, float y, float w) { return SliderRow(kScale, x, y, w); }};
             if (s_v.seg[kSegStyle] == kGlassLiquid)  // 毛玻璃时收起透明度
                 place.push_back([](float x, float y, float w) { return SliderRow(kGlassAlpha, x, y, w); });
+            if (MultiScreen() || s_v.on[kPerScreen])
+                place.push_back([](float x, float y, float w) { return ToggleRow(kPerScreen, x, y, w); });
             place.push_back([](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); });
             if (s_v.seg[kSegEdge] == kEdgeBottom) place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });  // 竖排时收起对齐
+            if (s_v.on[kPerScreen]) place.push_back(ScreenRow);
             return AddGroup(x, y, L"迷你任务栏", place);
         }
         case kPageHotkeys:
@@ -1080,10 +1131,13 @@ void FollowMove() {
 }
 
 // 拖完了：接着按平常的节奏刷新
+void FollowScreen();
+
 void EndMove() {
     s_moving = false;
     s_still = 0;
     if (s_excludeWorks >= 0) LiveTick();
+    FollowScreen();
 }
 
 // 材质、颜色选项变了（或者系统换了深浅色）：换玻璃，毛玻璃模糊得更厉害，要重新截
@@ -1117,6 +1171,17 @@ void Relayout(bool keepTop) {
     Render();
 }
 
+// 设置窗口挪到了另一块屏幕上：每块屏幕分别设置时，位置和对齐换成那块屏幕的
+void FollowScreen() {
+    HMONITOR monitor = MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTONEAREST);
+    if (monitor == s_screen) return;
+    s_screen = monitor;
+    s_screenKey = MonitorKey(monitor);
+    if (!s_v.on[kPerScreen]) return;
+    ShowPlace();
+    Relayout(true);
+}
+
 // ---- 动画 ----
 
 bool Animating(double now) {
@@ -1146,6 +1211,8 @@ void StartAnimation() { SetTimer(s_hwnd, kTimerAnim, 15, nullptr); }
 
 // ---- 操作 ----
 
+void PreviewPopup(bool hold);
+
 void SetToggle(int which, bool on) {
     if (s_v.on[which] == on) return;
     s_v.on[which] = on;
@@ -1154,6 +1221,11 @@ void SetToggle(int which, bool on) {
     StartAnimation();
     // 跟着收起 / 放出来的行；“最大化或全屏时隐藏任务栏”换的是下面那个名单
     if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kTray) Relayout(true);
+    if (which == kPerScreen) {  // 位置和对齐换成这块屏幕自己的（或者共用的）
+        ShowPlace();
+        Relayout(true);
+        PreviewPopup(false);
+    }
 }
 
 void EndCapture();
@@ -1440,8 +1512,16 @@ void Apply() {
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
     if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) g_settings.trayStyle = s_v.seg[kSegTray];
-    if (s_v.seg[kSegAlign] != s_initial.seg[kSegAlign]) g_settings.popupAlign = s_v.seg[kSegAlign];
-    if (s_v.seg[kSegEdge] != s_initial.seg[kSegEdge]) g_settings.popupEdge = s_v.seg[kSegEdge];
+    if (s_v.align != s_initial.align) g_settings.popupAlign = s_v.align;
+    if (s_v.edge != s_initial.edge) g_settings.popupEdge = s_v.edge;
+    if (s_v.seg[kSegMonitor] != s_initial.seg[kSegMonitor]) g_settings.popupMonitor = s_v.seg[kSegMonitor];
+    if (changed(kPerScreen)) g_settings.popupPerScreen = s_v.on[kPerScreen];
+    for (const ScreenPlace& p : s_v.screens) {  // 只改动过的屏幕
+        ScreenPlace* before = FindScreenPlace(s_initial.screens, p.key);
+        if (before && before->edge == p.edge && before->align == p.align) continue;
+        if (ScreenPlace* now = FindScreenPlace(g_settings.screens, p.key)) *now = p;
+        else g_settings.screens.push_back(p);
+    }
     if (s_v.seg[kSegLang] != s_initial.seg[kSegLang]) g_settings.language = s_v.seg[kSegLang];
     for (int i = 0; i < kHotkeyCount; ++i) {
         if (s_v.hotkey[i] != s_initial.hotkey[i]) g_settings.hotkey[i] = s_v.hotkey[i];
@@ -1478,6 +1558,7 @@ void Activate(const Item& it) {
         case kToggleRow: SetToggle(it.index, !s_v.on[it.index]); break;
         case kSegment:
             s_v.seg[it.index / kSegStride] = it.index % kSegStride;
+            if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) StorePlace();
             ApplyLook();  // 马上换上看看效果，取消时不保存
             if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言看看，取消时换回去
                 SetUiEnglish(LanguageIsEnglish(s_v.seg[kSegLang]));
@@ -1896,8 +1977,11 @@ void SettingsDialog_Show() {
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;
     s_initial.seg[kSegTray] = g_settings.trayStyle;
-    s_initial.seg[kSegAlign] = g_settings.popupAlign;
-    s_initial.seg[kSegEdge] = g_settings.popupEdge;
+    s_initial.edge = g_settings.popupEdge;
+    s_initial.align = g_settings.popupAlign;
+    s_initial.screens = g_settings.screens;
+    s_initial.on[kPerScreen] = g_settings.popupPerScreen;
+    s_initial.seg[kSegMonitor] = g_settings.popupMonitor;
     s_initial.seg[kSegLang] = g_settings.language;
     for (int i = 0; i < kHotkeyCount; ++i) {
         s_initial.hotkey[i] = g_settings.hotkey[i];
@@ -1920,6 +2004,9 @@ void SettingsDialog_Show() {
     POINT pt;
     GetCursorPos(&pt);
     HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    s_screen = mon;
+    s_screenKey = MonitorKey(mon);
+    ShowPlace();
     LayoutFor(mon);
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(mon, &mi);

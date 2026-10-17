@@ -134,6 +134,7 @@ bool s_previewFrosted = false;      // 预览用的玻璃，见 Popup_PreviewGla
 bool s_previewLight = false;
 int s_previewTransparency = kDefaultGlassTransparency;
 int s_edge = kEdgeBottom;           // 这次弹在哪条边（弹出时按设置定下来）
+int s_align = kAlignSystem;         // 这次在底边时怎么对齐（弹出时按设置定下来）
 double s_shownAt = 0;      // 这次弹出的时间
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
@@ -376,7 +377,7 @@ void UpdatePlacement() {
         s_baseValid = false;
         return;
     }
-    int align = s_preview ? s_previewAlign : g_settings.popupAlign;
+    int align = s_align;
     if (align == kAlignSystem) align = SystemTaskbarCentered() ? kAlignCenter : kAlignLeft;
     int x = s_bounds.left + (s_bounds.right - s_bounds.left - s_width) / 2;
     if (align == kAlignLeft) x = s_bounds.left;
@@ -2331,25 +2332,45 @@ void Popup_Destroy() {
 
 namespace {
 
+// 弹在哪块屏幕上。预览弹在设置窗口所在的屏幕上（每块屏幕分别设置时改的就是它）；
+// 设成跟着前台窗口时，前台是桌面、任务栏、本程序这类没有“所在屏幕”的窗口的话还是跟着鼠标。
+// startMenu：短按 Win 要接着打开开始菜单，照旧跟着鼠标
+HMONITOR MonitorForPopup(HWND fg, bool preview, bool startMenu = false) {
+    if (preview)
+        if (HWND dialog = SettingsDialog_Hwnd()) return MonitorFromWindow(dialog, MONITOR_DEFAULTTONEAREST);
+    if (g_settings.popupMonitor == kPopupAtActive && !startMenu && fg && IsWindowVisible(fg) && !IsIconic(fg) &&
+        !IsOwnProcess(fg)) {
+        std::wstring cls = GetClassNameStr(fg);
+        if (cls != L"Progman" && cls != L"WorkerW" && cls != L"Shell_TrayWnd" && cls != L"Shell_SecondaryTrayWnd")
+            return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    }
+    POINT pt;
+    GetCursorPos(&pt);
+    return MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+}
+
 // 弹出。preview：设置窗口里调大小时的预览，不抢前台。
 // startMenu：任务栏藏着时短按了 Win，只留一行格子（竖排时一列）贴着屏幕边弹出来，弹完打开开始菜单
 void Open(bool preview, bool startMenu = false) {
     if (!s_hwnd) return;
     s_preview = preview;
-    s_edge = preview ? s_previewEdge : g_settings.popupEdge;
+    HWND fg = GetForegroundWindow();
+    HMONITOR mon = MonitorForPopup(fg, preview, startMenu);
+    if (preview) {
+        s_edge = s_previewEdge;
+        s_align = s_previewAlign;
+    } else {
+        PopupPlaceFor(mon, s_edge, s_align);
+    }
     // 开始菜单靠左时会盖住贴在左边的那一列：这时从底边弹
     if (startMenu && s_edge == kEdgeLeft && !SystemTaskbarCentered()) s_edge = kEdgeBottom;
     KillTimer(s_hwnd, kTimerPreview);
     EndStartMode();
     s_compact = startMenu;
     s_startPending = startMenu;
-    HWND fg = GetForegroundWindow();
     if (fg != s_hwnd) s_prevForeground = fg;
 
-    // 弹在鼠标所在的显示器上；任务栏露着时弹在它上面，藏起来时贴着屏幕底边
-    POINT pt;
-    GetCursorPos(&pt);
-    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    // 任务栏露着时弹在它上面，藏起来时贴着屏幕底边
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(mon, &mi);
     s_bounds = Taskbar_IsShownOn(mon) ? mi.rcWork : mi.rcMonitor;
@@ -2394,7 +2415,7 @@ void Open(bool preview, bool startMenu = false) {
     EndTrayMode();
     if (g_settings.trayIcons && !preview) Tray_Refresh();
 
-    s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, static_cast<int>(std::lround(Px(32)))));
+    s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, static_cast<int>(std::lround(Px(32))), s_monitor));
     s_items = s_allItems;
     s_filter.clear();
     s_lockedItemsW = 0;
@@ -2474,7 +2495,8 @@ void Popup_PreviewGlass(bool frosted, bool light, int transparency) {
 void Popup_Preview(int percent, int edge, int align, bool hold) {
     if (!s_hwnd || (s_open && !s_preview)) return;  // 真的弹出着就不打扰
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
-    if (s_open && edge != s_previewEdge) {  // 换了边：重新截背景，从新的那条边弹出来
+    // 换了边，或者设置窗口挪到了别的屏幕上：重新截背景，从新的那条边、新的屏幕弹出来
+    if (s_open && (edge != s_previewEdge || MonitorForPopup(nullptr, true) != s_monitor)) {
         HideNow();
         WaitForVBlank();
     }
@@ -2486,6 +2508,7 @@ void Popup_Preview(int percent, int edge, int align, bool hold) {
     } else if (percent != s_previewPercent || align != s_previewAlign) {
         s_previewPercent = percent;
         s_previewAlign = align;
+        s_align = align;
         s_scale = PopupScale(s_monitor);
         ComputeLayout();
         UpdatePlacement();
@@ -2520,9 +2543,7 @@ void Popup_Toggle() {
 }
 
 void Popup_StartMenu(DWORD vk) {
-    POINT pt;
-    GetCursorPos(&pt);
-    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    HMONITOR mon = MonitorForPopup(GetForegroundWindow(), false, true);
     // 任务栏已经放出来了、这块屏的任务栏露着，或者开始菜单已经开着（这一下是关掉它）：照常交给系统
     if (!s_hwnd || !Fullscreen_TaskbarHidden() || Taskbar_IsShownOn(mon) || IsStartUi(GetForegroundWindow()) ||
         s_startMode) {
