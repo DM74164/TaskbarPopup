@@ -14,6 +14,8 @@ Demo video: [YouTube](https://youtu.be/nTGIbGz5Qlw)
 
 Maximize a window and the taskbar slides away while the window fills the screen. Restore, minimize or close it and the taskbar slides back, with your desktop icons right where they were.
 
+You can also turn on "Always hide taskbar" in Settings (off by default): the taskbar stays hidden even with no maximized window, and touching the screen edge won't bring it up. Hold Win when you need it.
+
 ![The taskbar slides away and the maximized window fills the screen](docs/demo/en/fullscreen.webp)
 
 ### Hold Win for the mini taskbar

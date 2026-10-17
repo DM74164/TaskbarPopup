@@ -59,6 +59,8 @@ const wchar_t* const kEnglish[][2] = {
     {L"横向完整展示", L"In a row"},
     {L"对齐", L"Alignment"},
     {L"每块屏幕分别设置位置和对齐", L"Set position for each display"},
+    {L"一直隐藏任务栏", L"Always hide taskbar"},
+    {L"没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出", L"Even with no maximized window; touching the screen edge won't bring it up"},
     {L"改的是设置窗口所在的那块屏幕", L"Changes apply to the display this window is on"},
     {L"现在改的是%ls，把设置窗口拖到别的屏幕上就改那块", L"Editing %ls. Drag this window to another display to edit that one"},
     {L"弹在", L"Show on"},
