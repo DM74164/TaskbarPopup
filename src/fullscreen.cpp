@@ -720,8 +720,63 @@ bool RemoveHidden(HWND taskbar) {
     return true;
 }
 
-// 藏起 monitor 上的任务栏、打开自动隐藏、拉伸 window；别的屏幕上被本程序藏起来的任务栏放回来。
-// window 刚被判定不肯铺满时什么都不做，返回 false
+HMONITOR GetTargetMonitor(HWND hwnd);
+
+// 别的屏幕上最大化或全屏着的窗口：前台那块屏藏着任务栏时，这些屏上的任务栏也一起藏着，
+// 在两块屏上的最大化窗口之间切换时任务栏就不会跟着来回伸缩
+struct OtherTarget {
+    HMONITOR monitor;
+    HWND window;
+};
+std::vector<OtherTarget> s_others;
+
+bool IsOtherTarget(HWND hwnd) {
+    for (const OtherTarget& o : s_others)
+        if (o.window == hwnd) return true;
+    return false;
+}
+
+// 每块屏（except 以外）找一个最大化或铺满整块屏的应用窗口
+std::vector<OtherTarget> FindOtherTargets(HMONITOR except) {
+    struct Ctx {
+        HMONITOR except;
+        std::vector<OtherTarget> found;
+    } ctx = {except, {}};
+    EnumWindows(
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            auto& c = *reinterpret_cast<Ctx*>(param);
+            if (!IsTaskbarWindow(hwnd) || IsIconic(hwnd)) return TRUE;
+            HMONITOR m = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+            if (!m || m == c.except) return TRUE;
+            for (const OtherTarget& o : c.found)
+                if (o.monitor == m) return TRUE;
+            // 先用便宜的办法筛掉普通窗口，GetTargetMonitor 要查程序名
+            if (!IsZoomed(hwnd)) {
+                RECT r;
+                MONITORINFO mi = {sizeof(mi)};
+                if (!GetWindowRect(hwnd, &r) || !GetMonitorInfoW(m, &mi)) return TRUE;
+                const RECT& s = mi.rcMonitor;
+                if (r.left > s.left || r.top > s.top || r.right < s.right || r.bottom < s.bottom) return TRUE;
+            }
+            if (GetTargetMonitor(hwnd) == m) c.found.push_back({m, hwnd});
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+    return ctx.found;
+}
+
+void SetOtherTargets(const std::vector<OtherTarget>& others) {
+    bool same = others.size() == s_others.size();
+    for (size_t i = 0; same && i < others.size(); ++i)
+        same = others[i].monitor == s_others[i].monitor && others[i].window == s_others[i].window;
+    if (same) return;
+    s_others = others;
+    for (const OtherTarget& o : others)
+        Log(L"屏幕 %p 上也有最大化的窗口 %ls，任务栏一起藏着", static_cast<void*>(o.monitor), Describe(o.window).c_str());
+}
+
+// 藏起 monitor 上的任务栏、打开自动隐藏、拉伸 window；别的屏幕上也有最大化窗口的任务栏一起藏，
+// 其余被本程序藏起来的任务栏放回来。window 刚被判定不肯铺满时什么都不做，返回 false
 bool EnterHiddenMode(HMONITOR monitor, HWND window) {
     // 资源管理器没在运行（崩溃、重启中）或者卡住了：什么都不动，开着的自动隐藏接着算本程序的，等它回来。
     // 刚重新启动时副屏的任务栏要过一会儿才出来，这时也别当成“这块屏没有任务栏”去关自动隐藏
@@ -749,15 +804,31 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
     UINT seq = autoHide ? s_autoHideSeq : 0;
     TaskbarAnim_WantAutoHide(seq);
 
+    // 别的屏幕上也最大化着的窗口。自动隐藏开着（本程序要开的，或者用户自己开着的）工作区才是整块屏，
+    // 不然藏了任务栏它也铺不满，不管
+    std::vector<OtherTarget> others;
+    if (autoHide || (!s_ownAutoHide && HasTaskbar(monitor) && Taskbar_AutoHideOn())) others = FindOtherTargets(monitor);
+    SetOtherTargets(others);
+    auto targeted = [&](HMONITOR m) {
+        if (m == monitor) return true;
+        for (const OtherTarget& o : others)
+            if (o.monitor == m) return true;
+        return false;
+    };
+
     // 资源管理器重启后旧句柄失效
     s_hidden.erase(std::remove_if(s_hidden.begin(), s_hidden.end(), [](const Hidden& h) { return !IsWindow(h.taskbar); }),
                    s_hidden.end());
     SyncHiddenFlag();
     s_homes.erase(std::remove_if(s_homes.begin(), s_homes.end(), [](const TaskbarHome& h) { return !IsWindow(h.taskbar); }),
                   s_homes.end());
+    // 前台那块屏的任务栏排在前面：拉伸窗口的请求跟着它，自动隐藏也由它去开
+    std::vector<std::pair<HWND, HMONITOR>> bars;
+    for (HWND tb : FindTaskbars()) bars.push_back({tb, TaskbarMonitor(tb)});
+    std::stable_partition(bars.begin(), bars.end(), [&](const std::pair<HWND, HMONITOR>& b) { return b.second == monitor; });
     HWND first = nullptr;  // 这块屏上的任务栏
-    for (HWND tb : FindTaskbars()) {
-        if (TaskbarMonitor(tb) != monitor) {
+    for (const auto& [tb, tbMonitor] : bars) {
+        if (!targeted(tbMonitor)) {
             // 别的屏幕上藏着的放回来。用不着自动隐藏了的话，等它的截图滑回原位再关
             if (RemoveHidden(tb)) {
                 if (autoHide) TaskbarAnim_Show(tb);
@@ -765,14 +836,15 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
             }
             continue;
         }
-        if (!first) first = tb;
+        bool own = tbMonitor == monitor;
+        if (own && !first) first = tb;
         Hidden* h = FindHidden(tb);
         DWORD now = GetTickCount();
         // 资源管理器有时会自己把任务栏重新显示出来，所以每次都检查
         if (h && !IsWindowVisible(tb)) {
             // 已经藏好了。要重新打开自动隐藏，或者自动隐藏被别人关掉了（比如在设置里，窗口会缩回去）：让动画线程去开。
-            // 刚让它去开的不算（它可能正在开），过一会儿再查
-            if (autoHide && (reissue || (now - s_autoHideAskedAt > 1500 && !Taskbar_AutoHideOn()))) {
+            // 刚让它去开的不算（它可能正在开），过一会儿再查。由前台那块屏的任务栏去开
+            if (own && autoHide && (reissue || (now - s_autoHideAskedAt > 1500 && !Taskbar_AutoHideOn()))) {
                 if (!reissue) Log(L"自动隐藏任务栏被关掉了，重新打开");
                 s_autoHideConfirmed = false;
                 s_autoHideAskedAt = now;
@@ -794,18 +866,27 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
         } else {
             s_hidden.push_back({tb, now});
             SyncHiddenFlag();
-            Log(L"隐藏任务栏 %p", static_cast<void*>(tb));
+            Log(L"隐藏任务栏 %p%ls", static_cast<void*>(tb), own ? L"" : L"（这块屏上也有最大化的窗口）");
         }
         if (std::find(s_everHidden.begin(), s_everHidden.end(), tb) == s_everHidden.end()) s_everHidden.push_back(tb);
         if (autoHide) s_autoHideAskedAt = now;
-        TaskbarAnim_Hide(tb, stretch, want, animate, seq);  // 截图盖住任务栏以后再开自动隐藏、拉伸窗口
-        stretch = nullptr;
+        // 截图盖住任务栏以后再开自动隐藏、拉伸窗口
+        TaskbarAnim_Hide(tb, own ? stretch : nullptr, want, animate, seq);
+        if (own) stretch = nullptr;
     }
     if (stretch) {
         // 任务栏早就藏好了（比如在两个最大化窗口之间切换）。自动隐藏还没确认打开的话，
         // 排在动画线程后面，等它打开了再拉伸，不然 Edge 这类程序会改回去
         if (autoHide && !s_autoHideConfirmed && first) TaskbarAnim_Hide(first, stretch, want, false, seq);
         else SetWindowRectAsync(stretch, want);
+    }
+    // 别的屏幕上的最大化窗口：工作区变大以后有的程序不会自己跟着变大，请它铺满。
+    // 自动隐藏还没确认打开时先不请（Edge 这类会改回去），定时器过一会儿再来
+    if (!autoHide || s_autoHideConfirmed) {
+        for (const OtherTarget& o : others) {
+            RECT r;
+            if (PlanStretch(o.window, o.monitor, r)) SetWindowRectAsync(o.window, r);
+        }
     }
     if (!autoHide) RequestAutoHideOff(nullptr);  // 换到了没有任务栏的屏幕、或者全屏窗口上：用不着了
     return true;
@@ -824,6 +905,7 @@ void LeaveHiddenMode() {
     }
     s_hidden.clear();
     SyncHiddenFlag();
+    s_others.clear();
     RequestAutoHideOff(nullptr);  // 已经要求过的不会重复
 }
 
@@ -1003,6 +1085,16 @@ void EvaluateNow(bool enforce) {
         target = s_targetMonitor;
         window = s_targetWindow;
     }
+    // 前台的窗口还原了，别的屏幕上还有一起藏着任务栏的最大化窗口：改按它来，那块屏的任务栏接着藏着，
+    // 不跟着一起放出来。前台是最大化时不隐藏任务栏的程序时除外（理由同上）
+    if (!target && !excludedOnTop) {
+        for (const OtherTarget& o : s_others) {
+            if (o.window == fg || !IsWindow(o.window) || GetTargetMonitor(o.window) != o.monitor) continue;
+            target = o.monitor;
+            window = o.window;
+            break;
+        }
+    }
     bool changed = target != s_targetMonitor || window != s_targetWindow;
     if (!enforce && !changed) return;
     if (changed) {
@@ -1040,10 +1132,11 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, L
             break;
         case EVENT_SYSTEM_MINIMIZESTART:
             // 窗口开始缩下去时任务栏就开始往上滑，两段动画同时进行
-            if (hwnd && hwnd == s_targetWindow) {
+            // 别的屏幕上一起藏着任务栏的窗口也一样，它不是目标，要强制重新判断
+            if (hwnd && (hwnd == s_targetWindow || IsOtherTarget(hwnd))) {
                 s_minimizing = hwnd;
                 s_minimizingTick = GetTickCount();
-                Evaluate(false);
+                Evaluate(hwnd != s_targetWindow);
             }
             break;
         case EVENT_OBJECT_LOCATIONCHANGE:

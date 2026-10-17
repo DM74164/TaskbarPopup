@@ -77,6 +77,8 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 
 Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Appearance, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
+**Multiple monitors**: the mini taskbar opens on the display with the mouse by default; on the Mini taskbar page you can make it open on the active window's display instead. If Windows is set to show taskbar apps only on the taskbar where the window is open, it lists only the windows on that display. Turn on "Set position for each display" on the Appearance page, and position and alignment apply to whichever display the Settings window is on. While the active window is maximized, other displays that also have a maximized window keep their taskbars hidden too, so switching between them no longer slides the taskbars back and forth.
+
 "Auto-check for updates" is off by default. When on, it checks GitHub Releases once a day and only notifies you; it never downloads or installs anything by itself.
 
 **Having a problem?** In the tray menu, turn on "Record diagnostic log", reproduce the problem, then click "Open diagnostic log folder" and send the `debug.log`.
@@ -85,7 +87,7 @@ Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini t
 
 - **Holding Win does nothing in admin programs and games**: Windows doesn't pass their key presses to a normal-privilege program. Tick "Run as administrator" in the tray menu. With start-at-login on as well, there's no UAC prompt at startup.
 - **Edge / Chrome may show a thin line (about 2 px) at the bottom**: the browser leaves it for the auto-hidden taskbar and it can't be changed from outside.
-- **Multiple monitors**: system auto-hide applies to every monitor, so while a window is maximized the taskbars on other monitors auto-hide too.
+- **Multiple monitors**: system auto-hide applies to every monitor, so while a window is maximized, the taskbars on monitors without a maximized window auto-hide too.
 - **Notifications may not show while maximized**: go to Settings → System → Notifications → Turn on do not disturb automatically, and turn off "When using an app in full-screen mode".
 - **Some windows won't stretch**: the taskbar stays visible while that window is in front.
 - **Taskbar settings locked** (for example by group policy on a work PC): the taskbar stays visible.

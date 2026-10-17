@@ -363,6 +363,10 @@ void LoadSettings() {
     g_settings.popupEdge = edge == kEdgeLeft || edge == kEdgeRight ? edge : kEdgeBottom;
     int align = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupAlign", kAlignSystem, f.c_str()));
     g_settings.popupAlign = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
+    g_settings.popupMonitor =
+        GetPrivateProfileIntW(L"General", L"PopupMonitor", kPopupAtCursor, f.c_str()) == kPopupAtActive ? kPopupAtActive
+                                                                                                       : kPopupAtCursor;
+    g_settings.popupPerScreen = GetPrivateProfileIntW(L"General", L"PopupPerScreen", 0, f.c_str()) != 0;
     // 没设过语言：新装的跟随系统；以前用过的（设置文件里已经有东西，哪怕只有程序自己记的状态）保持原来的中文界面。
     // 马上记下来，不然新装的用过一次、设置文件里有了东西，下次启动就被当成以前用过的
     int language = static_cast<int>(GetPrivateProfileIntW(L"General", L"Language", -1, f.c_str()));
@@ -410,6 +414,25 @@ void LoadSettings() {
     };
     loadList(L"ExcludeApps", g_settings.excludeApps);
     loadList(L"IncludeApps", g_settings.includeApps);
+    // 每块屏幕的位置和对齐：屏幕|边|对齐，用 ; 隔开
+    GetPrivateProfileStringW(L"General", L"ScreenPlaces", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+    g_settings.screens.clear();
+    std::wstring places = buf.data();
+    for (size_t start = 0; start < places.size();) {
+        size_t end = places.find(L';', start);
+        if (end == std::wstring::npos) end = places.size();
+        std::wstring item = places.substr(start, end - start);
+        size_t a = item.find(L'|'), b = a == std::wstring::npos ? a : item.find(L'|', a + 1);
+        if (b != std::wstring::npos && a > 0) {
+            ScreenPlace p;
+            p.key = ToLower(item.substr(0, a));
+            int edge = _wtoi(item.substr(a + 1, b - a - 1).c_str()), align = _wtoi(item.substr(b + 1).c_str());
+            p.edge = edge == kEdgeLeft || edge == kEdgeRight ? edge : kEdgeBottom;
+            p.align = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
+            if (!FindScreenPlace(g_settings.screens, p.key)) g_settings.screens.push_back(p);
+        }
+        start = end + 1;
+    }
 }
 
 void SaveSettings() {
@@ -426,6 +449,8 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupEdge", std::to_wstring(g_settings.popupEdge).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupAlign", std::to_wstring(g_settings.popupAlign).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupMonitor", std::to_wstring(g_settings.popupMonitor).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupPerScreen", g_settings.popupPerScreen ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"Language", std::to_wstring(g_settings.language).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
@@ -449,6 +474,10 @@ void SaveSettings() {
     };
     saveList(L"ExcludeApps", g_settings.excludeApps);
     saveList(L"IncludeApps", g_settings.includeApps);
+    std::wstring places;
+    for (const ScreenPlace& p : g_settings.screens)
+        places += (places.empty() ? L"" : L";") + p.key + L"|" + std::to_wstring(p.edge) + L"|" + std::to_wstring(p.align);
+    WritePrivateProfileStringW(L"General", L"ScreenPlaces", places.c_str(), f.c_str());
 }
 
 bool GetRestoreAutoHideFlag() {
