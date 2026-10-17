@@ -43,6 +43,13 @@ enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：�
 enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight };  // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右
 enum Language { kLangSystem, kLangChinese, kLangEnglish };  // 界面语言
 enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排
+enum PopupMonitor { kPopupAtCursor, kPopupAtActive };  // 迷你任务栏弹在哪块屏幕上：鼠标所在的 / 前台窗口所在的
+// 某块屏幕自己的迷你任务栏位置和对齐（“每块屏幕分别设置”开着时用）
+struct ScreenPlace {
+    std::wstring key;  // MonitorKey
+    int edge = kEdgeBottom;
+    int align = kAlignSystem;
+};
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
@@ -59,6 +66,9 @@ struct Settings {
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
+    int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
+    bool popupPerScreen = false;        // 每块屏幕分别设置位置和对齐（screens），没设过的屏幕用上面两项
+    std::vector<ScreenPlace> screens;
     int language = kLangSystem;     // 界面语言，见 Language
     bool debugLog = false;       // 诊断日志
     bool runAsAdmin = false;     // 以管理员身份运行（管理员权限的程序、游戏里也能长按 Win）
@@ -82,6 +92,9 @@ bool InAppList(const std::vector<std::wstring>& list, const std::wstring& exeNam
 std::vector<std::wstring>& ExceptionApps();
 bool IsExceptionExe(const std::wstring& exeName);              // 在现在用的名单里
 void SetException(const std::wstring& exeName, bool listed);  // 改现在用的名单、保存并重新判断要不要藏任务栏
+
+ScreenPlace* FindScreenPlace(std::vector<ScreenPlace>& list, const std::wstring& key);
+void PopupPlaceFor(HMONITOR monitor, int& edge, int& align);  // 迷你任务栏在这块屏幕上弹在哪条边、怎么对齐
 
 constexpr int kMinPopupScale = 50;
 constexpr int kMaxPopupScale = 200;
@@ -198,7 +211,9 @@ struct WindowEntry {
     std::wstring aumid;    // AppUserModelID，小写，可能为空
     bool active = false;
 };
-std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx);
+// monitor：迷你任务栏弹在哪块屏幕上。系统设置成多块屏幕上的任务栏只显示自己屏幕上的窗口时，照样只列这块屏上的
+std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx, HMONITOR monitor);
+bool IsTaskbarWindow(HWND h);  // 按任务栏 / Alt+Tab 的规则算是应用窗口
 void Windows_ClearCache();
 
 // ---------------- 固定在任务栏的应用 ----------------
@@ -474,6 +489,8 @@ bool IsCloaked(HWND hwnd);
 bool IsOwnProcess(HWND hwnd);
 void ForceForeground(HWND hwnd);
 float MonitorScale(HMONITOR monitor);
+std::wstring MonitorKey(HMONITOR monitor);    // 认出同一块屏幕用的：接口名（换了排列、重新接上都不变），取不到时用设备名
+std::wstring MonitorLabel(HMONITOR monitor);  // 给人看的名字：屏幕 2（主屏幕）
 void AddRoundRect(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& r, float radius);
 std::shared_ptr<Gdiplus::Bitmap> BitmapFromIcon(HICON hIcon);
 double NowMs();        // 高精度时钟，毫秒

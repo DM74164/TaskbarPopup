@@ -2,6 +2,7 @@
 
 #include <cstdarg>
 #include <cwchar>
+#include <cwctype>
 #include <mutex>
 
 namespace app {
@@ -68,6 +69,22 @@ std::wstring NormalizeExeName(const std::wstring& text) {
 
 bool InAppList(const std::vector<std::wstring>& list, const std::wstring& exeName) {
     return !exeName.empty() && std::find(list.begin(), list.end(), exeName) != list.end();
+}
+
+ScreenPlace* FindScreenPlace(std::vector<ScreenPlace>& list, const std::wstring& key) {
+    for (ScreenPlace& p : list)
+        if (p.key == key) return &p;
+    return nullptr;
+}
+
+void PopupPlaceFor(HMONITOR monitor, int& edge, int& align) {
+    edge = g_settings.popupEdge;
+    align = g_settings.popupAlign;
+    if (!g_settings.popupPerScreen) return;
+    if (const ScreenPlace* p = FindScreenPlace(g_settings.screens, MonitorKey(monitor))) {
+        edge = p->edge;
+        align = p->align;
+    }
 }
 
 std::vector<std::wstring>& ExceptionApps() {
@@ -146,6 +163,28 @@ float MonitorScale(HMONITOR monitor) {
     if (SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) && dpiX > 0)
         return dpiX / 96.0f;
     return 1.0f;
+}
+
+std::wstring MonitorKey(HMONITOR monitor) {
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(monitor, &mi)) return L"";
+    DISPLAY_DEVICEW dd = {sizeof(dd)};
+    if (EnumDisplayDevicesW(mi.szDevice, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME) && dd.DeviceID[0]) return ToLower(dd.DeviceID);
+    return ToLower(mi.szDevice);
+}
+
+std::wstring MonitorLabel(HMONITOR monitor) {
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(monitor, &mi)) return Tr(L"屏幕");
+    // 设备名形如 \\.\DISPLAY2，取最后的编号
+    const wchar_t* digits = mi.szDevice + wcslen(mi.szDevice);
+    while (digits > mi.szDevice && iswdigit(digits[-1])) --digits;
+    int number = *digits ? _wtoi(digits) : 0;
+    bool primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    if (number <= 0) return primary ? Tr(L"主屏幕") : Tr(L"屏幕");
+    return primary ? TrF(L"屏幕 %d（主屏幕）", number) : TrF(L"屏幕 %d", number);
 }
 
 // HICON → 带 alpha 通道的 GDI+ 位图（Bitmap::FromHICON 会丢掉透明度）

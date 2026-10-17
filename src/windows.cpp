@@ -13,26 +13,6 @@ std::unordered_map<HWND, long long> s_order;
 long long s_seq = 0;
 std::map<std::wstring, std::shared_ptr<Gdiplus::Bitmap>> s_exeIconCache;
 
-bool IsTaskbarWindow(HWND h) {
-    if (!IsWindowVisible(h)) return false;
-    if (GetWindowTextLengthW(h) == 0) return false;
-    if (IsOwnProcess(h)) return false;
-
-    LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-    bool appWindow = (ex & WS_EX_APPWINDOW) != 0;
-    if (!appWindow) {
-        if (ex & WS_EX_TOOLWINDOW) return false;
-        if (ex & WS_EX_NOACTIVATE) return false;
-        if (GetWindow(h, GW_OWNER)) return false;
-    }
-
-    // 其它虚拟桌面上的窗口、后台挂起的 UWP 窗口都是 cloaked 状态
-    if (IsCloaked(h)) return false;
-
-    std::wstring cls = GetClassNameStr(h);
-    return cls != L"Progman" && cls != L"WorkerW" && cls != L"Shell_TrayWnd" && cls != L"Shell_SecondaryTrayWnd";
-}
-
 HICON QueryIcon(HWND h, WPARAM type) {
     DWORD_PTR result = 0;
     SendMessageTimeoutW(h, WM_GETICON, type, 0, SMTO_ABORTIFHUNG, 50, &result);
@@ -64,9 +44,47 @@ std::shared_ptr<Gdiplus::Bitmap> GetIcon(HWND h, const std::wstring& exePath) {
     return bmp;
 }
 
+// 系统设置里“在所有显示器上显示任务栏”开着、“任务栏应用显示在”不是“所有任务栏”时，
+// 这块屏幕上的任务栏只显示自己屏幕上的窗口（选的是“主任务栏和窗口所在的任务栏”时主屏照样显示全部）
+bool OnlyOwnScreen(HMONITOR monitor) {
+    if (!monitor || GetSystemMetrics(SM_CMONITORS) < 2) return false;
+    const wchar_t* key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+    DWORD enabled = 0, mode = 0, size = sizeof(DWORD);
+    if (RegGetValueW(HKEY_CURRENT_USER, key, L"MMTaskbarEnabled", RRF_RT_REG_DWORD, nullptr, &enabled, &size) != ERROR_SUCCESS ||
+        !enabled)
+        return false;
+    size = sizeof(DWORD);
+    if (RegGetValueW(HKEY_CURRENT_USER, key, L"MMTaskbarMode", RRF_RT_REG_DWORD, nullptr, &mode, &size) != ERROR_SUCCESS)
+        return false;
+    if (mode == 0) return false;
+    MONITORINFO mi = {sizeof(mi)};
+    bool primary = GetMonitorInfoW(monitor, &mi) && (mi.dwFlags & MONITORINFOF_PRIMARY);
+    return !(mode == 1 && primary);
+}
+
 }  // namespace
 
-std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx) {
+bool IsTaskbarWindow(HWND h) {
+    if (!IsWindowVisible(h)) return false;
+    if (GetWindowTextLengthW(h) == 0) return false;
+    if (IsOwnProcess(h)) return false;
+
+    LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    bool appWindow = (ex & WS_EX_APPWINDOW) != 0;
+    if (!appWindow) {
+        if (ex & WS_EX_TOOLWINDOW) return false;
+        if (ex & WS_EX_NOACTIVATE) return false;
+        if (GetWindow(h, GW_OWNER)) return false;
+    }
+
+    // 其它虚拟桌面上的窗口、后台挂起的 UWP 窗口都是 cloaked 状态
+    if (IsCloaked(h)) return false;
+
+    std::wstring cls = GetClassNameStr(h);
+    return cls != L"Progman" && cls != L"WorkerW" && cls != L"Shell_TrayWnd" && cls != L"Shell_SecondaryTrayWnd";
+}
+
+std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx, HMONITOR monitor) {
     std::vector<HWND> handles;
     EnumWindows(
         [](HWND h, LPARAM lp) -> BOOL {
@@ -75,12 +93,19 @@ std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx) {
         },
         reinterpret_cast<LPARAM>(&handles));
 
-    // EnumWindows 按 Z 序从上到下，新出现的窗口倒序编号，让较早的窗口靠左
+    // EnumWindows 按 Z 序从上到下，新出现的窗口倒序编号，让较早的窗口靠左。
+    // 别的屏幕上的窗口也编号，弹在不同的屏幕上时顺序不跳
     for (auto it = handles.rbegin(); it != handles.rend(); ++it)
         if (!s_order.count(*it)) s_order[*it] = s_seq++;
     std::unordered_set<HWND> alive(handles.begin(), handles.end());
     for (auto it = s_order.begin(); it != s_order.end();)
         it = alive.count(it->first) ? std::next(it) : s_order.erase(it);
+
+    // 最小化的窗口按它还原后的位置算
+    if (OnlyOwnScreen(monitor))
+        handles.erase(std::remove_if(handles.begin(), handles.end(),
+                                     [&](HWND h) { return MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) != monitor; }),
+                      handles.end());
 
     std::sort(handles.begin(), handles.end(), [](HWND a, HWND b) { return s_order[a] < s_order[b]; });
 
