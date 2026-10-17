@@ -1,8 +1,5 @@
 [简体中文](README.md) | English
 
-A note from the author: the gap a maximized window leaves above the taskbar looks awful, Windows' own taskbar auto-hide is terrible, and other projects didn't quite do what I wanted, so I had AI build one. It was written entirely by Opus 5.5. I enjoy using it, so I put it up here.
-It should also work on Windows 10, since every system function it uses exists there, but I haven't tried.
-
 # TaskbarPopup
 
 A Windows 11 taskbar enhancement: when a window is maximized, the taskbar hides and the window fills the whole screen. Hold the Win key and a liquid-glass mini taskbar pops up from the bottom of the screen. Single exe, no runtime to install.
