@@ -2,7 +2,7 @@
 
 # TaskbarPopup
 
-A Windows 11 taskbar enhancement: when a window is maximized, the taskbar hides and the window fills the whole screen. Hold the Win key and a liquid-glass mini taskbar pops up from the bottom of the screen. Single exe, no runtime to install.
+A Windows 10/11 taskbar enhancement: when a window is maximized, the taskbar hides and the window fills the whole screen. Hold the Win key and a liquid-glass mini taskbar pops up from the bottom of the screen. Single exe, no runtime to install.
 
 > The interface comes in English and Chinese. It follows your Windows display language; change it under Settings → Appearance → Language.
 
