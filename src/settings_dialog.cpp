@@ -964,7 +964,14 @@ bool SetExclude(bool on) {
         return true;
     }
     if (s_excludeWorks < 0) return false;
-    if (!SetWindowDisplayAffinity(s_hwnd, WDA_EXCLUDEFROMCAPTURE)) {  // Win10 2004 以前没有这个功能
+    // Win10 2004（19041）以前没有这个功能：调用照样成功，却当成 WDA_MONITOR，截到的本窗口是一块黑的，
+    // 后面的核对也看不出来，玻璃背景就成了黑的
+    if (DWORD build = WindowsBuild(); build && build < 19041) {
+        s_excludeWorks = -1;
+        Log(L"设置窗口：系统版本 %lu 不支持截图时排除本窗口，玻璃背景不再实时刷新", build);
+        return false;
+    }
+    if (!SetWindowDisplayAffinity(s_hwnd, WDA_EXCLUDEFROMCAPTURE)) {
         s_excludeWorks = -1;
         Log(L"设置窗口：系统不支持截图时排除本窗口（错误 %lu），玻璃背景不再实时刷新", GetLastError());
         return false;

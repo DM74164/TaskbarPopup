@@ -350,11 +350,8 @@ void ComputeLayout() {
 }
 
 bool IsWindows11() {
-    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
-    auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
-        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
-    OSVERSIONINFOW ver = {sizeof(ver)};
-    return !(rtlGetVersion && rtlGetVersion(&ver) == 0 && ver.dwBuildNumber < 22000);
+    DWORD build = WindowsBuild();
+    return !build || build >= 22000;  // 取不到版本时按 Win11 算
 }
 
 // 系统任务栏的图标是不是居中：Win11 看设置里的“任务栏对齐方式”（没改过是居中），Win10 一直靠左
@@ -1777,8 +1774,11 @@ bool MenuLike(HWND h) {
 bool AnyMenuShowing() {
     for (HWND h = FindWindowExW(nullptr, nullptr, L"#32768", nullptr); h; h = FindWindowExW(nullptr, h, L"#32768", nullptr))
         if (IsWindowVisible(h)) return true;
-    HWND overflow = FindWindowW(L"TopLevelWindowForOverflowXamlIsland", nullptr);
-    return overflow && IsWindowVisible(overflow);
+    for (const wchar_t* cls : {L"TopLevelWindowForOverflowXamlIsland", L"NotifyIconOverflowWindow"}) {  // Win11 / Win10
+        HWND overflow = FindWindowW(cls, nullptr);
+        if (overflow && IsWindowVisible(overflow)) return true;
+    }
+    return false;
 }
 
 // 右键托盘图标以后每隔一会儿看一眼：还在系统托盘里点、程序的菜单或者展开的隐藏图标还开着就接着等。

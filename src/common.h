@@ -494,6 +494,7 @@ std::wstring MonitorLabel(HMONITOR monitor);  // 给人看的名字：屏幕 2�
 void AddRoundRect(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& r, float radius);
 std::shared_ptr<Gdiplus::Bitmap> BitmapFromIcon(HICON hIcon);
 double NowMs();        // 高精度时钟，毫秒
+DWORD WindowsBuild();  // 系统的内部版本号（Win10 2004 是 19041，Win11 从 22000 起），取不到时为 0
 // 诊断日志：g_settings.debugLog 打开时追加一行到 SettingsDir() 下的 debug.log，可以在任何线程上调用
 void Log(const wchar_t* format, ...);
 

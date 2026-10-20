@@ -386,7 +386,16 @@ void ClickAt(const RECT& rect, bool right) {
     SetCursorPos(saved.x, saved.y);
 }
 
-HWND OverflowWindow() { return FindWindowW(L"TopLevelWindowForOverflowXamlIsland", nullptr); }
+// 展开的“隐藏的图标”：Win11 是 XAML 的窗口，Win10 是老的 NotifyIconOverflowWindow。两种都有时用显示着的那个
+HWND OverflowWindow() {
+    HWND found = nullptr;
+    for (const wchar_t* cls : {L"TopLevelWindowForOverflowXamlIsland", L"NotifyIconOverflowWindow"}) {
+        HWND h = FindWindowW(cls, nullptr);
+        if (h && IsWindowVisible(h)) return h;
+        if (!found) found = h;
+    }
+    return found;
+}
 
 bool OverflowShowing() {
     HWND overflow = OverflowWindow();

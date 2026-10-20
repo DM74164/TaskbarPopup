@@ -247,6 +247,18 @@ double NowMs() {
     return now.QuadPart * 1000.0 / freq;
 }
 
+DWORD WindowsBuild() {
+    // GetVersionEx 会按清单里声明支持的系统谎报版本，RtlGetVersion 不会
+    static const DWORD build = [] {
+        using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+        auto rtlGetVersion = reinterpret_cast<RtlGetVersionFn>(
+            reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
+        OSVERSIONINFOW ver = {sizeof(ver)};
+        return rtlGetVersion && rtlGetVersion(&ver) == 0 ? ver.dwBuildNumber : 0;
+    }();
+    return build;
+}
+
 std::wstring LogFile() { return SettingsDir() + L"\\debug.log"; }
 
 void Log(const wchar_t* format, ...) {

@@ -558,7 +558,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         Sleep(100);
     }
 
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);  // 清单里也声明了，这里兜底
+    // 清单里也声明了，这里兜底。Win10 1703 以前没有这个函数，直接调用的话 exe 在那些系统上根本启动不了
+    using SetDpiContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    if (auto setDpiContext = reinterpret_cast<SetDpiContextFn>(reinterpret_cast<void*>(
+            GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))))
+        setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_instance = instance;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
