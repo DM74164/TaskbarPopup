@@ -1,11 +1,12 @@
 // 迷你任务栏里的托盘图标：系统托盘“显示隐藏的图标”里收着的那些（可以在设置里关掉）。
 //
-// Win11 的托盘区是资源管理器自己画的，没有公开接口能拿到别的程序的托盘图标。这里：
-//   - 图标和名字：系统给每个托盘图标记在 HKCU\Control Panel\NotifyIconSettings 里（程序路径、最初的提示文字、
-//     是否在任务栏上一直显示、图标快照 PNG），只列出程序正在运行、没设成一直显示的。在后台线程上读，
-//     迷你任务栏弹出时直接用读好的（每 15 秒、每次收起后重新读一遍）
+// 托盘区是资源管理器自己的，没有公开接口能拿到别的程序的托盘图标。这里：
+//   - 图标和名字（在后台线程上读，迷你任务栏弹出时直接用读好的，每 15 秒、每次收起后重新读一遍）：
+//     Win11：系统给每个托盘图标记在 HKCU\Control Panel\NotifyIconSettings 里（程序路径、最初的提示文字、
+//     是否在任务栏上一直显示、图标快照 PNG），只列出程序正在运行、没设成一直显示的。
+//     Win10 没有这些记录：“隐藏的图标”是资源管理器里的一个工具栏，直接读它的按钮（图标、提示文字、属于哪个窗口）
 //   - 点击：在后台线程上用 UI 自动化在系统托盘里找到对应的按钮。左键先直接“调用”它（和在托盘里按回车一样，
-//     不用把系统任务栏、隐藏的图标弹出来）；不行或者是右键，就展开“隐藏的图标”，在它上面模拟一次真的鼠标单击，
+//     不用把系统任务栏、隐藏的图标弹出来，Win10 不试这一步）；不行或者是右键，就展开“隐藏的图标”，在它上面模拟一次真的鼠标单击，
 //     这样程序自己的窗口和右键菜单照常弹出来（右键先试像按菜单键那样让它弹菜单，鼠标不挪过去，
 //     按鼠标位置弹菜单的程序菜单就出在迷你任务栏的图标上方；没弹出来再真点）。任务栏被本程序藏着时 UI 自动化看不到里面的按钮：先从它的子窗口找，
 //     还找不到就临时把它显示出来（自动隐藏开着，只在屏幕底边露一条线），点完、菜单关了再藏回去。
@@ -131,7 +132,26 @@ std::shared_ptr<Gdiplus::Bitmap> ExeIcon(const std::wstring& exe) {
     return bmp;
 }
 
-std::vector<TrayApp> Load() {
+// Win10 及以前的托盘：老式工具栏，不是 Win11 的 XAML
+bool LegacyTray() {
+    DWORD build = WindowsBuild();
+    return build && build < 22000;
+}
+
+// 提示文字可能有好几行（比如“OneDrive\n已是最新”），名字只要第一行
+std::wstring FirstLine(const std::wstring& text) {
+    std::wstring line = text.substr(0, text.find_first_of(L"\r\n"));
+    while (!line.empty() && std::iswspace(line.back())) line.pop_back();
+    return line;
+}
+
+std::wstring FileName(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+// Win11：系统给每个托盘图标记下的设置
+std::vector<TrayApp> LoadFromSettings() {
     std::vector<TrayApp> apps;
     HKEY root;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &root) != ERROR_SUCCESS)
@@ -149,10 +169,7 @@ std::vector<TrayApp> Load() {
         std::wstring lower = Lower(app.exe);
         if (!app.exe.empty() && running.count(lower) && !seen.count(lower)) {
             seen.insert(lower);
-            // 提示文字可能有好几行（比如“OneDrive\n已是最新”），名字只要第一行
-            app.name = RegString(key, L"InitialTooltip");
-            app.name = app.name.substr(0, app.name.find_first_of(L"\r\n"));
-            while (!app.name.empty() && std::iswspace(app.name.back())) app.name.pop_back();
+            app.name = FirstLine(RegString(key, L"InitialTooltip"));
             DWORD promoted = 0, size = sizeof(promoted);
             RegGetValueW(key, nullptr, L"IsPromoted", RRF_RT_REG_DWORD, nullptr, &promoted, &size);
             app.promoted = promoted != 0;
@@ -170,16 +187,95 @@ std::vector<TrayApp> Load() {
                 cached = {std::move(png), icon};
             }
             app.icon = cached.second;
-            if (app.name.empty()) {
-                size_t slash = app.exe.find_last_of(L"\\/");
-                app.name = slash == std::wstring::npos ? app.exe : app.exe.substr(slash + 1);
-            }
+            if (app.name.empty()) app.name = FileName(app.exe);
             apps.push_back(std::move(app));
         }
         RegCloseKey(key);
     }
     RegCloseKey(root);
     return apps;
+}
+
+// 资源管理器给托盘工具栏每个按钮带的数据（没有公开，Win7 到 Win10 一直是这样）。
+// 按本机指针大小排，只在本程序和资源管理器位数相同时能用
+struct TrayButtonData {
+    HWND hwnd;  // 托盘图标属于的窗口
+    UINT id;
+    UINT callbackMessage;
+    DWORD reserved[2];
+    HICON icon;
+};
+
+// Win10：“隐藏的图标”是 NotifyIconOverflowWindow 里的工具栏（没展开时也在），按钮信息在资源管理器的内存里。
+// 在资源管理器那边借一小块内存，让工具栏把按钮、提示文字写进去，再读回来（只读，不往它那边写东西）。
+// 图标句柄各个进程通用，直接拿来画。找不到工具栏、读不了返回 false
+bool LoadFromToolbar(std::vector<TrayApp>& apps) {
+#ifndef _WIN64
+    BOOL wow64 = FALSE;
+    if (IsWow64Process(GetCurrentProcess(), &wow64) && wow64) return false;  // 32 位的本程序读不了 64 位资源管理器的内存
+#endif
+    HWND overflow = FindWindowW(L"NotifyIconOverflowWindow", nullptr);
+    HWND toolbar = overflow ? FindWindowExW(overflow, nullptr, L"ToolbarWindow32", nullptr) : nullptr;
+    DWORD pid = 0;
+    if (!toolbar || !GetWindowThreadProcessId(toolbar, &pid) || !pid) return false;
+    HANDLE explorer = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ, FALSE, pid);
+    if (!explorer) {
+        Log(L"托盘：打不开资源管理器进程（错误 %lu），读不到隐藏的图标", GetLastError());
+        return false;
+    }
+    // 资源管理器卡住时别一直等
+    auto ask = [&](UINT msg, WPARAM wParam, LPARAM lParam, DWORD_PTR& result) {
+        return SendMessageTimeoutW(toolbar, msg, wParam, lParam, SMTO_ABORTIFHUNG, 500, &result) != 0;
+    };
+    constexpr size_t kTextAt = 64;      // 借来的内存：前面放按钮，后面放提示文字
+    constexpr size_t kTextChars = 512;  // 提示文字最多 128 个字，足够了
+    BYTE* remote = static_cast<BYTE*>(VirtualAllocEx(explorer, nullptr, kTextAt + kTextChars * sizeof(wchar_t),
+                                                     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    DWORD_PTR count = 0;
+    bool ok = remote && ask(TB_BUTTONCOUNT, 0, 0, count);
+    std::set<std::wstring> seen;  // 同一个图标只列一次
+    for (DWORD_PTR i = 0; ok && i < count; ++i) {
+        TBBUTTON button = {};
+        TrayButtonData data = {};
+        DWORD_PTR got = 0;
+        if (!ask(TB_GETBUTTON, i, reinterpret_cast<LPARAM>(remote), got) || !got ||
+            !ReadProcessMemory(explorer, remote, &button, sizeof(button), nullptr))
+            continue;
+        // 藏起来的按钮是程序设成不显示的图标；程序退出了没来得及删的图标，窗口已经没了
+        if ((button.fsState & TBSTATE_HIDDEN) || !button.dwData ||
+            !ReadProcessMemory(explorer, reinterpret_cast<const void*>(button.dwData), &data, sizeof(data), nullptr) ||
+            !IsWindow(data.hwnd))
+            continue;
+        TrayApp app;
+        app.exe = GetProcessPath(data.hwnd);
+        if (app.exe.empty()) continue;  // 受保护的进程（杀毒软件之类）拿不到程序路径，菜单、找不到时再启动都用不了
+        // 先问长度，放得下才让它写（它不管缓冲区多大）
+        DWORD_PTR length = 0;
+        std::wstring tip;
+        if (ask(TB_GETBUTTONTEXTW, static_cast<WPARAM>(button.idCommand), 0, length) && length > 0 &&
+            length < kTextChars &&
+            ask(TB_GETBUTTONTEXTW, static_cast<WPARAM>(button.idCommand), reinterpret_cast<LPARAM>(remote + kTextAt),
+                length)) {
+            tip.resize(length);
+            if (!ReadProcessMemory(explorer, remote + kTextAt, tip.data(), length * sizeof(wchar_t), nullptr)) tip.clear();
+        }
+        app.name = FirstLine(tip);
+        if (app.name.empty()) app.name = FileName(app.exe);
+        if (!seen.insert(Lower(app.exe) + L"|" + app.name).second) continue;
+        if (data.icon) app.icon = BitmapFromIcon(data.icon);  // 句柄归资源管理器，不能 DestroyIcon
+        if (!app.icon) app.icon = ExeIcon(app.exe);
+        apps.push_back(std::move(app));  // 都在隐藏的图标里，promoted 是 false
+    }
+    if (!ok) Log(L"托盘：读不了隐藏的图标的工具栏（错误 %lu）", GetLastError());
+    if (remote) VirtualFreeEx(explorer, remote, 0, MEM_RELEASE);
+    CloseHandle(explorer);
+    return ok;
+}
+
+std::vector<TrayApp> Load() {
+    std::vector<TrayApp> apps;
+    if (LegacyTray() && LoadFromToolbar(apps)) return apps;
+    return LoadFromSettings();
 }
 
 DWORD WINAPI LoadThread(LPVOID) {
@@ -307,6 +403,20 @@ const Button* FindChevron(const std::vector<Button>& buttons) {
     for (const Button& b : buttons)
         if (IsChevron(b)) chevron = &b;
     return chevron;
+}
+
+// Win10 的“显示隐藏的图标”是托盘区里一个普通的按钮窗口，名字各种语言不一样：按名字认不出来时按窗口找，放进 legacy。
+// 任务栏藏着时它也看不见，算找不到（接着临时显示任务栏再找）
+const Button* FindChevron(IUIAutomation* uia, HWND tray, const std::vector<Button>& buttons, Button& legacy) {
+    if (const Button* b = FindChevron(buttons)) return b;
+    if (!LegacyTray() || !tray) return nullptr;
+    HWND notify = FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr);
+    HWND button = notify ? FindWindowExW(notify, nullptr, L"Button", nullptr) : nullptr;
+    IUIAutomationElement* e = nullptr;
+    if (!button || !IsWindowVisible(button) || FAILED(uia->ElementFromHandle(button, &e)) || !e) return nullptr;
+    legacy = Button{};
+    legacy.element = Hold(e);
+    return &legacy;
 }
 
 // 任务栏上程序窗口的按钮（名字是“程序名 - 1 个正在运行的窗口”，也会对上程序名），不是托盘图标
@@ -474,7 +584,9 @@ bool RunJob(const Job& job) {
     Names(L"任务栏", onTaskbar);
     Names(L"隐藏的图标", inOverflow);
 
-    if (!job.overflowOnly) {
+    // Win10 的托盘是老式工具栏：“调用”它不一定会把点击转给程序，任务栏上同名的程序按钮也分不出来。
+    // 列出来的本来就都在隐藏的图标里，直接展开它真点
+    if (!job.overflowOnly && !LegacyTray()) {
         // 左键：直接“调用”按钮，什么都不用弹出来
         if (!job.right) {
             const Button* b = BestMatch(inOverflow, job.app, false);
@@ -496,7 +608,8 @@ bool RunJob(const Job& job) {
     // 展开“隐藏的图标”，在里面点
     HWND overflow = OverflowWindow();
     if (!overflow || !IsWindowVisible(overflow)) {
-        const Button* chevron = FindChevron(onTaskbar);
+        Button legacyChevron;
+        const Button* chevron = FindChevron(uia.p, tray, onTaskbar, legacyChevron);
         DWORD_PTR ours = 0;
         if (!chevron && tray && !IsWindowVisible(tray) &&
             SendMessageTimeoutW(g_mainWnd, WM_APP_TRAY_PEEK, 1, reinterpret_cast<LPARAM>(tray), SMTO_ABORTIFHUNG, 1000,
@@ -507,7 +620,7 @@ bool RunJob(const Job& job) {
             for (int i = 0; i < 5 && !chevron; ++i) {  // 显示出来以后 XAML 可能还要一会儿才把按钮报出来
                 Sleep(100);
                 onTaskbar = TaskbarButtons(uia.p, tray);
-                chevron = FindChevron(onTaskbar);
+                chevron = FindChevron(uia.p, tray, onTaskbar, legacyChevron);
             }
             Log(L"托盘：临时显示任务栏以后%ls“显示隐藏的图标”按钮", chevron ? L"找到了" : L"还是找不到");
             Names(L"临时显示的任务栏", onTaskbar);
