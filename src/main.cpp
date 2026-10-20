@@ -21,7 +21,7 @@ constexpr wchar_t kRunValue[] = L"TaskbarPopup";
 constexpr DWORD kExitDeadlineMs = 15000;  // 退出最多花这么久，超过就直接结束进程（正常收尾各步都有自己的超时，加起来也到不了）
 
 enum MenuId {
-    ID_SHOW = 100, ID_SETTINGS, ID_CHECKUPDATE, ID_AUTOHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG,
+    ID_SHOW = 100, ID_SETTINGS, ID_CHECKUPDATE, ID_AUTOHIDE, ID_ALWAYSHIDE, ID_LONGPRESS, ID_AUTOSTART, ID_DEBUGLOG, ID_OPENLOG,
     ID_RUNASADMIN, ID_EXIT
 };
 
@@ -106,6 +106,11 @@ void HandleCommand(UINT id) {
             SaveSettings();
             ApplySettings();
             break;
+        case ID_ALWAYSHIDE:
+            g_settings.alwaysHideTaskbar = !g_settings.alwaysHideTaskbar;
+            SaveSettings();
+            ApplySettings();
+            break;
         case ID_LONGPRESS:
             g_settings.longPressPopup = !g_settings.longPressPopup;
             SaveSettings();
@@ -147,6 +152,7 @@ void ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, ID_CHECKUPDATE, Tr(L"检查更新"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | check(g_settings.autoHideOnFullscreen), ID_AUTOHIDE, Tr(L"窗口最大化或全屏时隐藏任务栏"));
+    AppendMenuW(menu, MF_STRING | check(g_settings.alwaysHideTaskbar), ID_ALWAYSHIDE, Tr(L"一直隐藏任务栏"));
     AppendMenuW(menu, MF_STRING | check(g_settings.longPressPopup), ID_LONGPRESS, longPressText.c_str());
     AppendMenuW(menu, MF_STRING | check(IsAutoStartEnabled()), ID_AUTOSTART, Tr(L"开机自动启动"));
     AppendMenuW(menu, MF_STRING | check(g_settings.runAsAdmin), ID_RUNASADMIN, Tr(L"以管理员身份运行（游戏里也能长按 Win）"));
@@ -350,6 +356,7 @@ void LoadSettings() {
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
     g_settings.autoHideOnFullscreen = GetPrivateProfileIntW(L"General", L"AutoHideOnFullscreen", 1, f.c_str()) != 0;
+    g_settings.alwaysHideTaskbar = GetPrivateProfileIntW(L"General", L"AlwaysHideTaskbar", 0, f.c_str()) != 0;
     g_settings.longPressPopup = GetPrivateProfileIntW(L"General", L"LongPressPopup", 1, f.c_str()) != 0;
     int ms = static_cast<int>(GetPrivateProfileIntW(L"General", L"LongPressMs", kDefaultLongPressMs, f.c_str()));
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
@@ -439,6 +446,7 @@ void SaveSettings() {
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
     WritePrivateProfileStringW(L"General", L"AutoHideOnFullscreen", g_settings.autoHideOnFullscreen ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"AlwaysHideTaskbar", g_settings.alwaysHideTaskbar ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressPopup", g_settings.longPressPopup ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressMs", std::to_wstring(g_settings.longPressMs).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
@@ -531,8 +539,8 @@ void ApplySettings() {
         Shell_NotifyIconW(NIM_MODIFY, &s_nid);
         s_nid.uFlags = flags;
     }
-    // 关着“最大化或全屏时隐藏任务栏”时，名单里有程序也要看着前台（只给名单里的程序藏任务栏）
-    Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen || !g_settings.includeApps.empty());
+    // 关着“最大化或全屏时隐藏任务栏”时，名单里有程序也要看着前台（只给名单里的程序藏任务栏）；一直隐藏任务栏时总要开着
+    Fullscreen_SetEnabled(g_settings.autoHideOnFullscreen || !g_settings.includeApps.empty() || g_settings.alwaysHideTaskbar);
     Hook_Configure(g_settings.longPressPopup, g_settings.longPressMs);
     Update_Configure();
     FloatWindows_Configure(g_settings.keepFloatsOnTop, g_settings.pinTopmost);

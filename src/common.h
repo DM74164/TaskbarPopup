@@ -56,6 +56,7 @@ constexpr int kDefaultLongPressMs = 1000;
 constexpr int kDefaultGlassTransparency = 60;  // 液态玻璃的透明度（0 – 100%），60 是原来的样子
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
+    bool alwaysHideTaskbar = false;    // 一直隐藏任务栏：没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出
     bool longPressPopup = true;
     int longPressMs = 1000;
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
@@ -188,6 +189,8 @@ void DesktopIcons_Cover();             // 主线程，要回到桌面了（要�
 void DesktopIcons_RevealLater();       // 主线程，自动隐藏刚关掉：图标排回原位就显示出来（打开前藏起来了的话）
 void DesktopIcons_Recover();           // 上次藏起的桌面图标没显示回来（被强行结束）：现在显示
 void DesktopIcons_DisplayChanged();    // 主线程，显示器变了（WM_DISPLAYCHANGE）：接上了第二块屏的话藏着的图标马上显示
+// 一直隐藏任务栏时自动隐藏一直开着、桌面一直要用，不藏图标（位置照样记、照样摆回去）；藏着的马上显示
+void DesktopIcons_KeepShown(bool keep);
 void DesktopIcons_EmergencyShow();     // 崩溃时：藏着的桌面图标直接显示（不摆位置）
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
 

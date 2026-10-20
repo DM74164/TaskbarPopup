@@ -45,7 +45,7 @@ const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏",
 
 // 开关
 enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
-             kToggleCount };
+             kAlwaysHide, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -62,6 +62,7 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"开机自动启动", nullptr},
     {L"自动检查更新", L"每天看一次 GitHub 上有没有新版本"},
     {L"每块屏幕分别设置位置和对齐", L"改的是设置窗口所在的那块屏幕"},
+    {L"一直隐藏任务栏", L"没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出"},
 };
 
 // 滑块
@@ -375,7 +376,9 @@ float ScreenRow(float x, float y, float w) {
 float BuildPage(int page, float x, float y) {
     switch (page) {
         case kPageTaskbar: {
-            y = AddGroup(x, y, L"全屏", {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); }});
+            y = AddGroup(x, y, L"全屏",
+                         {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
+                          [](float x, float y, float w) { return ToggleRow(kAlwaysHide, x, y, w); }});
             // “小窗口留在上面”关着时收起“在所有窗口上面”
             std::vector<RowFn> floats = {[](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
             if (s_v.on[kKeepFloats]) floats.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
@@ -1502,6 +1505,7 @@ void Apply() {
     // 只改窗口里动过的项，其余的保持现在的值（窗口开着的时候可能在别处改过）
     auto changed = [](int t) { return s_v.on[t] != s_initial.on[t]; };
     if (changed(kAutoHide)) g_settings.autoHideOnFullscreen = s_v.on[kAutoHide];
+    if (changed(kAlwaysHide)) g_settings.alwaysHideTaskbar = s_v.on[kAlwaysHide];
     if (changed(kKeepFloats)) g_settings.keepFloatsOnTop = s_v.on[kKeepFloats];
     if (changed(kPinTopmost)) g_settings.pinTopmost = s_v.on[kPinTopmost];
     if (changed(kLongPress)) g_settings.longPressPopup = s_v.on[kLongPress];
@@ -1969,6 +1973,7 @@ void SettingsDialog_Show() {
     if (!s_fontFamily) s_fontFamily.reset(FontFamily::GenericSansSerif()->Clone());
 
     s_initial.on[kAutoHide] = g_settings.autoHideOnFullscreen;
+    s_initial.on[kAlwaysHide] = g_settings.alwaysHideTaskbar;
     s_initial.on[kKeepFloats] = g_settings.keepFloatsOnTop;
     s_initial.on[kPinTopmost] = g_settings.pinTopmost;
     s_initial.on[kLongPress] = g_settings.longPressPopup;

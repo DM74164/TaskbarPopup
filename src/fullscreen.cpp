@@ -787,8 +787,11 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
     if (IsRefused(window)) return false;
 
     // 这块屏上有任务栏、自动隐藏又不是用户自己开着的：要打开自动隐藏，工作区才会占满整块屏。
-    // 无边框全屏的窗口（游戏、全屏视频）本来就盖住了任务栏，不为它去开；已经开着的接着用
-    bool autoHide = HasTaskbar(monitor) && (s_ownAutoHide || (IsZoomed(window) && !Taskbar_AutoHideOn()));
+    // 无边框全屏的窗口（游戏、全屏视频）本来就盖住了任务栏，不为它去开；已经开着的接着用。
+    // 一直隐藏任务栏时所有屏上的任务栏都藏，有任务栏就开
+    bool always = g_settings.alwaysHideTaskbar;
+    bool hasTaskbar = always ? !FindTaskbars().empty() : HasTaskbar(monitor);
+    bool autoHide = hasTaskbar && (s_ownAutoHide || ((always || IsZoomed(window)) && !Taskbar_AutoHideOn()));
     // 要（重新）让动画线程打开自动隐藏：刚开始用，或者刚让它去关又反悔了（它可能已经关了）
     bool reissue = false;
     if (autoHide && !s_ownAutoHide) {
@@ -807,10 +810,12 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
     // 别的屏幕上也最大化着的窗口。自动隐藏开着（本程序要开的，或者用户自己开着的）工作区才是整块屏，
     // 不然藏了任务栏它也铺不满，不管
     std::vector<OtherTarget> others;
-    if (autoHide || (!s_ownAutoHide && HasTaskbar(monitor) && Taskbar_AutoHideOn())) others = FindOtherTargets(monitor);
+    // 没有目标窗口（一直隐藏任务栏）时这块屏上的也要找，好请它铺满
+    if (autoHide || (!s_ownAutoHide && hasTaskbar && Taskbar_AutoHideOn()))
+        others = FindOtherTargets(window ? monitor : nullptr);
     SetOtherTargets(others);
     auto targeted = [&](HMONITOR m) {
-        if (m == monitor) return true;
+        if (m == monitor || always) return true;
         for (const OtherTarget& o : others)
             if (o.monitor == m) return true;
         return false;
@@ -1048,7 +1053,7 @@ void EvaluateNow(bool enforce) {
         // 开始菜单、迷你任务栏这类临时界面在前台时不藏任务栏，也不关自动隐藏，
         // 除非让任务栏隐藏的那个窗口已经最小化、关掉或还原了：
         // 最小化最后一个窗口后，前台常常落到正隐藏着的任务栏上，不处理的话任务栏就一直出不来
-        if (!s_targetMonitor || GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
+        if (!s_targetMonitor || g_settings.alwaysHideTaskbar || GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
             if (s_targetMonitor && fg && !quiet && InList(GetClassNameStr(fg), kShellUiClasses)) ShowForShellUi();
             return;
         }
@@ -1094,6 +1099,12 @@ void EvaluateNow(bool enforce) {
             window = o.window;
             break;
         }
+    }
+    // 一直隐藏任务栏：没有要铺满的窗口也照样藏着，按主屏来（它一定有任务栏）
+    if (!target && g_settings.alwaysHideTaskbar) {
+        const POINT origin = {0, 0};
+        target = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+        window = nullptr;
     }
     bool changed = target != s_targetMonitor || window != s_targetWindow;
     if (!enforce && !changed) return;
@@ -1225,6 +1236,7 @@ void Fullscreen_OnTaskbarCreated() {
 
 void Fullscreen_SetEnabled(bool enabled) {
     s_enabled = enabled;
+    DesktopIcons_KeepShown(enabled && g_settings.alwaysHideTaskbar);
     if (enabled) {
         if (!s_foregroundHook)
             s_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnWinEvent, 0, 0,

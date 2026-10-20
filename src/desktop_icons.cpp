@@ -434,8 +434,12 @@ void FadeOutCover() {
     HideCover();
 }
 
-// 要藏这个图标窗口：只有一块屏幕，用户也没关“显示桌面图标”
-bool WillHide(HWND list) { return list && GetSystemMetrics(SM_CMONITORS) == 1 && IsWindowVisible(list); }
+std::atomic<bool> s_keepShown{false};  // 一直隐藏任务栏：不藏图标（DesktopIcons_KeepShown）
+
+// 要藏这个图标窗口：只有一块屏幕，用户也没关“显示桌面图标”，也不是一直隐藏任务栏
+bool WillHide(HWND list) {
+    return list && !s_keepShown && GetSystemMetrics(SM_CMONITORS) == 1 && IsWindowVisible(list);
+}
 
 // 藏起记位置时找到的桌面图标窗口。照片在记位置时已经拍好了
 void HideIcons() {
@@ -965,8 +969,8 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 MaskCover();
                 break;
             case kCmdDisplay:
-                if (s_hiddenList && GetSystemMetrics(SM_CMONITORS) > 1) {
-                    Log(L"接上了另一块屏幕，藏着的桌面图标现在显示");
+                if (s_hiddenList && (GetSystemMetrics(SM_CMONITORS) > 1 || s_keepShown)) {
+                    Log(s_keepShown ? L"一直隐藏任务栏，藏着的桌面图标现在显示" : L"接上了另一块屏幕，藏着的桌面图标现在显示");
                     ShowIcons();  // 位置照常等关掉自动隐藏以后摆
                 }
                 break;
@@ -1127,6 +1131,11 @@ void DesktopIcons_Recover() {
 void DesktopIcons_DisplayChanged() {
     std::lock_guard<std::mutex> guard(s_lock);
     if (s_thread) PostThreadMessageW(s_threadId, kCmdDisplay, 0, 0);
+}
+
+void DesktopIcons_KeepShown(bool keep) {
+    if (s_keepShown.exchange(keep) == keep || !keep) return;
+    DesktopIcons_DisplayChanged();
 }
 
 void DesktopIcons_EmergencyShow() {
