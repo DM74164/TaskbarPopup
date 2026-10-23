@@ -379,6 +379,7 @@ struct MediaInfo {
     bool playing = false;
     bool canPrevious = false, canNext = false, canPlayPause = false;
     std::wstring title, artist;
+    std::shared_ptr<Gdiplus::Bitmap> cover;  // 封面（裁成正方形、缩小过），没有为空
 };
 void Media_Configure(bool enabled, HWND notify);  // 开着时后台每隔几秒读一遍，弹出时就知道有没有在放
 void Media_Query();                // 马上读一遍

@@ -1,6 +1,7 @@
 // 正在播放的媒体：走 WinRT 的 Windows.Media.Control（系统音量弹窗里的媒体控制用的就是它，Win10 1809 起才有）。
 // MinGW 没有这个 WinRT 头文件，下面按 ABI 自己声明用到的几个接口；combase 里的函数动态加载。
-// 读和发命令都放在后台线程上做，打开着这个功能时每隔几秒读一遍，弹出迷你任务栏时就知道有没有在放
+// 读和发命令都放在后台线程上做，打开着这个功能时每隔几秒读一遍，弹出迷你任务栏时就知道有没有在放。
+// 封面换歌时才读一次，在后台解码、裁成正方形缩小好
 #include <inspectable.h>
 
 #include "common.h"
@@ -29,11 +30,22 @@ struct IAsyncOperationAbi : IInspectable {
 
 using BoolOperation = IAsyncOperationAbi<unsigned char>;  // WinRT 的 Boolean 是一个字节
 
+// Windows.Storage.Streams.IRandomAccessStreamReference：打开得到 IRandomAccessStreamWithContentType
+struct IStreamReferenceAbi : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE OpenReadAsync(IAsyncOperationAbi<IInspectable*>** op) = 0;
+};
+
 struct IMediaPropertiesAbi : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE get_Title(HSTRING* value) = 0;
     virtual HRESULT STDMETHODCALLTYPE get_Subtitle(HSTRING* value) = 0;
     virtual HRESULT STDMETHODCALLTYPE get_AlbumArtist(HSTRING* value) = 0;
     virtual HRESULT STDMETHODCALLTYPE get_Artist(HSTRING* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_AlbumTitle(HSTRING* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_TrackNumber(INT32* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Genres(void** value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_AlbumTrackCount(INT32* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_PlaybackType(void** value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Thumbnail(IStreamReferenceAbi** value) = 0;
 };
 
 struct IPlaybackControlsAbi : IInspectable {
@@ -94,6 +106,8 @@ constexpr DWORD kPollMs = 4000;      // 打开着这个功能时多久读一遍
 constexpr DWORD kWaitMs = 3000;      // 等一个异步操作最多等这么久
 constexpr DWORD kSettleMs = 250;     // 发完命令等播放器改好状态再读
 constexpr DWORD kStopWaitMs = 2000;
+constexpr int kCoverPx = 128;        // 封面缩成这么大（迷你任务栏上再按缩放缩小）
+constexpr int kCoverTries = 3;       // 有的播放器换歌以后过一会儿才给封面：没读到的再读几遍
 
 #ifndef TP_FAKE_MEDIA
 // PlaybackStatus
@@ -120,7 +134,25 @@ HANDLE s_thread = nullptr;
 
 bool SameInfo(const MediaInfo& a, const MediaInfo& b) {
     return a.present == b.present && a.playing == b.playing && a.canPrevious == b.canPrevious && a.canNext == b.canNext &&
-           a.canPlayPause == b.canPlayPause && a.title == b.title && a.artist == b.artist;
+           a.canPlayPause == b.canPlayPause && a.title == b.title && a.artist == b.artist && a.cover == b.cover;
+}
+
+// 封面裁成正方形（宽屏的视频截图取中间）、缩成 kCoverPx 见方，自己持有像素（从流解出来的位图要一直拿着流）
+std::shared_ptr<Gdiplus::Bitmap> CoverFrom(Gdiplus::Bitmap& decoded) {
+    UINT w = decoded.GetWidth(), h = decoded.GetHeight();
+    if (decoded.GetLastStatus() != Gdiplus::Ok || !w || !h) return nullptr;
+    UINT side = std::min(w, h);
+    auto cover = std::make_shared<Gdiplus::Bitmap>(kCoverPx, kCoverPx, PixelFormat32bppPARGB);
+    if (cover->GetLastStatus() != Gdiplus::Ok) return nullptr;
+    Gdiplus::Graphics g(cover.get());
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::ImageAttributes edges;
+    edges.SetWrapMode(Gdiplus::WrapModeTileFlipXY);  // 缩小时边上不混进透明
+    g.DrawImage(&decoded, Gdiplus::Rect(0, 0, kCoverPx, kCoverPx), static_cast<INT>((w - side) / 2),
+                static_cast<INT>((h - side) / 2), static_cast<INT>(side), static_cast<INT>(side), Gdiplus::UnitPixel,
+                &edges);
+    return cover;
 }
 
 #ifndef TP_FAKE_MEDIA
@@ -167,6 +199,13 @@ public:
         info.canNext = info.canPlayPause = true;
         info.title = L"测试歌曲 " + std::to_wstring(m_song);
         info.artist = L"测试歌手";
+        // 封面是 C:\coverN.png（没有就没有封面）
+        if (m_coverSong != m_song) {
+            m_coverSong = m_song;
+            Gdiplus::Bitmap file((L"C:\\cover" + std::to_wstring(m_song) + L".png").c_str());
+            m_cover = CoverFrom(file);
+        }
+        info.cover = m_cover;
         return info;
     }
     bool Command(int command, bool playing) {
@@ -179,6 +218,8 @@ public:
 private:
     int m_song = 1;
     bool m_playing = true;
+    int m_coverSong = 0;
+    std::shared_ptr<Gdiplus::Bitmap> m_cover;
 };
 #else
 class Backend {
@@ -198,6 +239,10 @@ public:
         m_rawBuffer = reinterpret_cast<RawBufferFn>(
             reinterpret_cast<void*>(GetProcAddress(combase, "WindowsGetStringRawBuffer")));
         if (!getFactory || !createString || !m_deleteString || !m_rawBuffer) return;
+        // WinRT 的流转成 IStream 给 GDI+ 解封面（Win8 起才有）
+        if (HMODULE shcore = LoadLibraryExW(L"shcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            m_streamOver = reinterpret_cast<StreamOverFn>(
+                reinterpret_cast<void*>(GetProcAddress(shcore, "CreateStreamOverRandomAccessStream")));
         const wchar_t kClass[] = L"Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager";
         HSTRING name = nullptr;
         if (FAILED(createString(kClass, static_cast<UINT32>(wcslen(kClass)), &name))) return;
@@ -251,8 +296,23 @@ public:
         if (SUCCEEDED(session->TryGetMediaPropertiesAsync(&op)) && op && Await(op, kWaitMs) &&
             SUCCEEDED(op->GetResults(&props)) && props) {
             HSTRING text = nullptr;
+            std::wstring album, app;
             if (SUCCEEDED(props->get_Title(&text))) info.title = Take(text);
             if (SUCCEEDED(props->get_Artist(&text))) info.artist = Take(text);
+            if (SUCCEEDED(props->get_AlbumTitle(&text))) album = Take(text);
+            if (SUCCEEDED(session->get_SourceAppUserModelId(&text))) app = Take(text);
+            // 换了歌才重新读封面；没读到的再试几遍
+            std::wstring key = app + L"\n" + info.title + L"\n" + info.artist + L"\n" + album;
+            if (key != m_coverKey) {
+                m_coverKey = key;
+                m_cover.reset();
+                m_coverTries = 0;
+            }
+            if (!m_cover && m_coverTries < kCoverTries) {
+                ++m_coverTries;
+                m_cover = ReadCover(props);
+            }
+            info.cover = m_cover;
         }
         SafeRelease(props);
         SafeRelease(op);
@@ -295,6 +355,27 @@ public:
 private:
     using DeleteStringFn = HRESULT(WINAPI*)(HSTRING);
     using RawBufferFn = PCWSTR(WINAPI*)(HSTRING, UINT32*);
+    using StreamOverFn = HRESULT(WINAPI*)(IUnknown*, REFIID, void**);
+
+    std::shared_ptr<Gdiplus::Bitmap> ReadCover(IMediaPropertiesAbi* props) {
+        IStreamReferenceAbi* ref = nullptr;
+        if (!m_streamOver || FAILED(props->get_Thumbnail(&ref)) || !ref) return nullptr;
+        IAsyncOperationAbi<IInspectable*>* op = nullptr;
+        IInspectable* random = nullptr;
+        IStream* stream = nullptr;
+        std::shared_ptr<Gdiplus::Bitmap> cover;
+        if (SUCCEEDED(ref->OpenReadAsync(&op)) && op && Await(op, kWaitMs) && SUCCEEDED(op->GetResults(&random)) &&
+            random && SUCCEEDED(m_streamOver(random, IID_IStream, reinterpret_cast<void**>(&stream))) && stream) {
+            Gdiplus::Bitmap decoded(stream);
+            cover = CoverFrom(decoded);
+        }
+        if (!cover) Log(L"媒体：有封面但读不出来");
+        SafeRelease(stream);
+        SafeRelease(random);
+        SafeRelease(op);
+        ref->Release();
+        return cover;
+    }
 
     ISessionAbi* Current() {
         ISessionAbi* session = nullptr;
@@ -314,6 +395,10 @@ private:
     ISessionManagerAbi* m_manager = nullptr;
     DeleteStringFn m_deleteString = nullptr;
     RawBufferFn m_rawBuffer = nullptr;
+    StreamOverFn m_streamOver = nullptr;
+    std::wstring m_coverKey;  // 封面是哪首歌的
+    std::shared_ptr<Gdiplus::Bitmap> m_cover;
+    int m_coverTries = 0;
 };
 #endif
 

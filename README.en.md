@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find what's playing, with pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings.
+Next to the clock you'll find what's playing with its cover art, plus pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings.
 
 ### New message alerts
 

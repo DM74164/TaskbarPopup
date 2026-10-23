@@ -8,7 +8,7 @@
 // 时钟左边是系统托盘“隐藏的图标”里的程序（可以在设置里关掉、选两行小图标还是一行大图标），左键右键和在托盘里点一样，
 // 右键时迷你任务栏留着。两行小图标是 2×2 一页，鼠标停在上面按左右方向键或者滚滚轮翻页；一行大图标放不下时同样滚着看。
 // 任务栏藏着时短按 Win：迷你任务栏只留一行格子贴着屏幕底边弹上来，弹完再打开开始菜单，开始菜单关了一起收起。
-// 时钟前面还有正在播放的媒体（上一首、播放 / 暂停、下一首）、输入法的中英文（点一下切换）和电量，都可以在设置里关掉。
+// 时钟前面还有正在播放的媒体（封面、上一首、播放 / 暂停、下一首）、输入法的中英文（点一下切换）和电量，都可以在设置里关掉。
 // 设置里打开“鼠标停在屏幕边上时弹出”时，任务栏藏着、鼠标在迷你任务栏那条边上停一下就弹出（不抢前台），
 // 没点过它、鼠标走开就收起。
 #include "common.h"
@@ -98,7 +98,7 @@ struct Layout {
     // 竖排（弹在屏幕左右两边）时：一列格子的左边、各段的顶边。这时 itemsW、trayW 是竖着的长度，
     // 窗口在面板里侧多留 bubbleW 宽，放显示标题的小牌子
     float colX, startY, itemsY, tilesY, trayY, clockY, clockH, bubbleW;
-    // 时钟前面的几样：媒体按钮（三个一组）、输入法、电量，这次没有的长度为 0。横排时 X 是左边、W 是宽，竖排时 Y 是顶边、H 是高
+    // 时钟前面的几样：媒体（封面和三个按钮）、输入法、电量，这次没有的长度为 0。横排时 X 是左边、W 是宽，竖排时 Y 是顶边、H 是高
     float mediaX, mediaW, imeX, imeW, battX, battW;
     float mediaY, mediaH, imeY, imeH, battY, battH;
 };
@@ -198,13 +198,17 @@ int s_radioFailed = 0;             // 切换失败的开关（1 << RadioId）：
 int s_radioPolls = 0;              // 弹出以后为了等 Wi-Fi 连上网络又读了几遍
 
 // 媒体按钮、输入法、电量。媒体按钮的编号就是 MediaCommand
-enum Extra { kExtraNone = -1, kExtraIme = 3, kExtraBattery };
+enum Extra { kExtraNone = -1, kExtraIme = 3, kExtraBattery, kExtraCover };
+constexpr float kCoverSize = 36;  // 封面边长，后面空 kCoverGap 再是三个按钮
+constexpr float kCoverGap = 6;
 bool s_showMedia = false;  // 这次弹出有没有这几样（弹出时定下来）
 bool s_showIme = false;
 bool s_showBattery = false;
 MediaInfo s_media;
 ImeInfo s_ime;
 BatteryInfo s_battery;
+std::shared_ptr<Bitmap> s_coverFrom;  // 缩好的封面是从哪张来的
+std::unique_ptr<Bitmap> s_coverScaled;  // 按这次的缩放缩好的封面，画的时候不用再缩
 HWND s_imeTarget = nullptr;   // 显示的是哪个窗口的输入法（弹出前的前台窗口）
 int s_hoverExtra = kExtraNone;
 
@@ -291,9 +295,9 @@ void ComputeLayout() {
     }
     float traySep = trayCount > 0 ? L.sep : 0;
     int n = static_cast<int>(s_items.size());
-    // 媒体按钮单独一段（前后有分隔线），输入法、电量和时钟挨着
-    L.mediaW = s_showMedia ? 3 * Px(30) : 0;
-    L.mediaH = s_showMedia ? 3 * Px(28) : 0;
+    // 媒体（封面和按钮）单独一段（前后有分隔线），输入法、电量和时钟挨着
+    L.mediaW = s_showMedia ? Px(kCoverSize + kCoverGap) + 3 * Px(30) : 0;
+    L.mediaH = s_showMedia ? Px(kCoverSize + kCoverGap) + 3 * Px(28) : 0;
     L.imeW = s_showIme ? Px(30) : 0;
     L.imeH = s_showIme ? Px(30) : 0;
     L.battW = s_showBattery ? Px(42) : 0;
@@ -481,15 +485,24 @@ int RadioAt(int x, int y) {
 
 // ---- 媒体按钮、输入法、电量 ----
 
+// 封面：媒体按钮前面（竖排时上面）一块圆角方块
+RectF CoverRect() {
+    const Layout& L = s_L;
+    float side = Px(kCoverSize);
+    if (Vertical()) return RectF(L.colX + (L.tile - side) / 2, L.mediaY, side, side);
+    return RectF(L.mediaX, L.tileY + (L.tile - side) / 2, side, side);
+}
+
 // 媒体按钮：kMediaPrevious 上一首、kMediaPlayPause 播放 / 暂停、kMediaNext 下一首。竖排时上下排
 RectF MediaRect(int k) {
     const Layout& L = s_L;
+    float skip = Px(kCoverSize + kCoverGap);
     if (Vertical()) {
-        float h = L.mediaH / 3, w = Px(36);
-        return RectF(L.colX + (L.tile - w) / 2, L.mediaY + k * h, w, h);
+        float h = Px(28), w = Px(36);
+        return RectF(L.colX + (L.tile - w) / 2, L.mediaY + skip + k * h, w, h);
     }
-    float w = L.mediaW / 3, h = Px(34);
-    return RectF(L.mediaX + k * w, L.tileY + (L.tile - h) / 2, w, h);
+    float w = Px(30), h = Px(34);
+    return RectF(L.mediaX + skip + k * w, L.tileY + (L.tile - h) / 2, w, h);
 }
 
 RectF ExtraRect(int extra) {
@@ -498,19 +511,20 @@ RectF ExtraRect(int extra) {
     if (extra == kExtraIme) return v ? RectF(L.panelX, L.imeY, L.panelW, L.imeH) : RectF(L.imeX, L.tileY, L.imeW, L.tile);
     if (extra == kExtraBattery)
         return v ? RectF(L.panelX, L.battY, L.panelW, L.battH) : RectF(L.battX, L.tileY, L.battW, L.tile);
+    if (extra == kExtraCover) return CoverRect();
     return MediaRect(extra);
 }
 
 bool ExtraShown(int extra) {
     if (extra == kExtraIme) return s_showIme;
     if (extra == kExtraBattery) return s_showBattery;
-    return s_showMedia && extra >= kMediaPrevious && extra <= kMediaNext;
+    return s_showMedia && ((extra >= kMediaPrevious && extra <= kMediaNext) || extra == kExtraCover);
 }
 
 // 鼠标下的媒体按钮、输入法或电量，没有为 kExtraNone
 int ExtraAt(int x, int y) {
-    for (int e : {static_cast<int>(kMediaPrevious), static_cast<int>(kMediaPlayPause), static_cast<int>(kMediaNext),
-                  static_cast<int>(kExtraIme), static_cast<int>(kExtraBattery)})
+    for (int e : {static_cast<int>(kExtraCover), static_cast<int>(kMediaPrevious), static_cast<int>(kMediaPlayPause),
+                  static_cast<int>(kMediaNext), static_cast<int>(kExtraIme), static_cast<int>(kExtraBattery)})
         if (ExtraShown(e) && ExtraRect(e).Contains(static_cast<REAL>(x), static_cast<REAL>(y))) return e;
     return kExtraNone;
 }
@@ -967,9 +981,46 @@ void DrawMediaGlyph(Graphics& g, int k, const RectF& box, const Color& c) {
     FillRound(g, RectF(d > 0 ? cx + 3.5f * u : cx - 5.5f * u, cy - 5 * u, 2 * u, 10 * u), u, c);
 }
 
+// 封面：圆角方块，播放器没给封面时画个音符
+void DrawCover(Graphics& g) {
+    const Palette& pal = Colors();
+    RectF r = CoverRect();
+    GraphicsPath path;
+    AddRoundRect(path, r, Px(7));
+    int side = static_cast<int>(std::lround(r.Width));
+    if (s_media.cover && (s_media.cover != s_coverFrom || !s_coverScaled ||
+                          static_cast<int>(s_coverScaled->GetWidth()) != side)) {
+        s_coverFrom = s_media.cover;
+        s_coverScaled = std::make_unique<Bitmap>(side, side, PixelFormat32bppPARGB);
+        Graphics sg(s_coverScaled.get());
+        sg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        sg.SetPixelOffsetMode(PixelOffsetModeHalf);
+        ImageAttributes edges;
+        edges.SetWrapMode(WrapModeTileFlipXY);
+        sg.DrawImage(s_coverFrom.get(), Rect(0, 0, side, side), 0, 0, s_coverFrom->GetWidth(), s_coverFrom->GetHeight(),
+                     UnitPixel, &edges);
+    }
+    if (s_media.cover && s_coverScaled) {
+        TextureBrush brush(s_coverScaled.get(), WrapModeClamp);
+        brush.TranslateTransform(r.X, r.Y);
+        g.FillPath(&brush, &path);
+        return;
+    }
+    SolidBrush back(pal.pillBottom), ink(pal.subtle);
+    g.FillPath(&back, &path);
+    // 音符：圆头、竖杆、小旗
+    float u = r.Width / kCoverSize, cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+    g.FillEllipse(&ink, cx - 6.5f * u, cy + 1.5f * u, 8 * u, 6.5f * u);
+    g.FillRectangle(&ink, cx, cy - 9 * u, 1.6f * u, 14 * u);
+    PointF flag[4] = {PointF(cx + 1.6f * u, cy - 9 * u), PointF(cx + 7 * u, cy - 5.5f * u), PointF(cx + 7 * u, cy - 3 * u),
+                      PointF(cx + 1.6f * u, cy - 6 * u)};
+    g.FillPolygon(&ink, flag, 4);
+}
+
 // 没有在放的东西、播放器不支持的按钮画暗的，点了没反应
 void DrawMedia(Graphics& g) {
     if (!s_showMedia) return;
+    DrawCover(g);
     const Palette& pal = Colors();
     for (int k = kMediaPrevious; k <= kMediaNext; ++k) {
         RectF box = MediaRect(k);
@@ -2590,6 +2641,9 @@ void Popup_Init() {
 
 void Popup_Destroy() {
     Thumb_Destroy();
+    s_media = MediaInfo();  // 封面是 GDI+ 位图，要在 GDI+ 关掉之前放掉
+    s_coverFrom.reset();
+    s_coverScaled.reset();
     s_items.clear();
     s_allItems.clear();
     s_tray.clear();
