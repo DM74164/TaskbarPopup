@@ -18,11 +18,35 @@ You can also turn on "Always hide taskbar" in Settings (off by default): the tas
 
 ![The taskbar slides away and the maximized window fills the screen](docs/demo/en/fullscreen.webp)
 
+### Per-app rule
+
+Right-click an app in the mini taskbar and tick "Don't hide taskbar when maximized": the taskbar stays when that app is maximized. If you turn off "Hide taskbar when maximized or fullscreen" in Settings, the item becomes "Hide taskbar when maximized" and only the ticked apps hide the taskbar.
+
+![A ticked app keeps the taskbar when maximized](docs/demo/en/apps.webp)
+
 ### Hold Win for the mini taskbar
 
-Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom (or stands vertically on the left or right screen edge): pinned apps, open windows, hidden tray icons, the clock, volume and brightness sliders, plus Wi-Fi and Bluetooth toggles. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
+Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom: pinned apps, open windows, hidden tray icons, the clock, volume and brightness sliders, plus Wi-Fi and Bluetooth toggles. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
 
 ![Hold Win and the mini taskbar rises from the bottom](docs/demo/en/popup.webp)
+
+### Tap Win while the taskbar is hidden
+
+When the taskbar is hidden, a short press of Win first raises a one-row mini taskbar, then opens the Start menu as usual. Both go away when Start closes.
+
+![Tap Win while the taskbar is hidden: the mini taskbar and Start open together](docs/demo/en/start.webp)
+
+### Tray icons
+
+The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu.
+
+![Hidden tray icons: scroll to flip pages, right-click for the app's menu](docs/demo/en/tray.webp)
+
+### Volume, brightness, Wi-Fi and Bluetooth
+
+Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list.
+
+![Drag to set the volume, click to turn Wi-Fi off and on, right-click for the network list](docs/demo/en/quick.webp)
 
 ### Type to filter
 
@@ -32,9 +56,9 @@ Start typing once it's open to filter windows and pinned apps. Programs from the
 
 ### Right-click menu
 
-Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Tick "Don't hide taskbar when maximized" to exclude an app; if you turn off "Hide taskbar when maximized or fullscreen" in Settings, the item becomes "Hide taskbar when maximized" and only the ticked apps hide the taskbar. Middle-click an icon to close the window.
+Works like the system taskbar: recent files, open another window, run as administrator, open file location, close windows. Middle-click an icon to close the window; right-click the Windows icon on the left for the Win+X menu.
 
-![Right-click menu with recent files, run as admin, open file location and close all](docs/demo/en/menu.webp)
+![Right-click menu with recent files, run as admin and close all; middle-click to close; the Win+X menu](docs/demo/en/menu.webp)
 
 ### Keep small windows on top
 
@@ -50,9 +74,15 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass or frosted glass, a system, light or dark theme, and English or Chinese. The mini taskbar's size (50 – 200%), liquid glass transparency, position (bottom, left, right) and alignment at the bottom (system, center, left, right) preview live as you change them.
+Choose liquid glass or frosted glass and a system, light or dark theme. The mini taskbar's size (50 – 200%) and liquid glass transparency preview live as you change them.
 
-![Liquid or frosted glass, light or dark, and size all preview live](docs/demo/en/appearance.webp)
+![Liquid or frosted glass, light or dark, transparency and size all preview live](docs/demo/en/appearance.webp)
+
+### Position and alignment
+
+Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge. At the bottom it can follow the system, or be centered, left or right aligned.
+
+![The mini taskbar at the bottom, on the left or on the right](docs/demo/en/side.webp)
 
 ## Download
 
@@ -78,6 +108,8 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 ## Settings
 
 Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Appearance, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+
+![Settings grouped by page, with the language switching instantly](docs/demo/en/settings.webp)
 
 **Multiple monitors**: the mini taskbar opens on the display with the mouse by default; on the Mini taskbar page you can make it open on the active window's display instead. If Windows is set to show taskbar apps only on the taskbar where the window is open, it lists only the windows on that display. Turn on "Set position for each display" on the Appearance page, and position and alignment apply to whichever display the Settings window is on. While the active window is maximized, other displays that also have a maximized window keep their taskbars hidden too, so switching between them no longer slides the taskbars back and forth.
 
