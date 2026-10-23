@@ -8,6 +8,9 @@
 // 时钟左边是系统托盘“隐藏的图标”里的程序（可以在设置里关掉、选两行小图标还是一行大图标），左键右键和在托盘里点一样，
 // 右键时迷你任务栏留着。两行小图标是 2×2 一页，鼠标停在上面按左右方向键或者滚滚轮翻页；一行大图标放不下时同样滚着看。
 // 任务栏藏着时短按 Win：迷你任务栏只留一行格子贴着屏幕底边弹上来，弹完再打开开始菜单，开始菜单关了一起收起。
+// 时钟前面还有正在播放的媒体（上一首、播放 / 暂停、下一首）、输入法的中英文（点一下切换）和电量，都可以在设置里关掉。
+// 设置里打开“鼠标停在屏幕边上时弹出”时，任务栏藏着、鼠标在迷你任务栏那条边上停一下就弹出（不抢前台），
+// 没点过它、鼠标走开就收起。
 #include "common.h"
 
 #include <climits>
@@ -47,6 +50,12 @@ constexpr UINT_PTR kTimerTrayMenu = 8;  // 右键了托盘图标：看系统托�
 constexpr UINT kTrayWatchMs = 100;
 constexpr DWORD kTrayIdleMs = 400;      // 点完以后等程序的菜单出来的时间
 constexpr DWORD kTrayBusyMaxMs = 5000;  // 在系统托盘里找、点最多等这么久
+constexpr UINT_PTR kTimerEdge = 9;      // 鼠标停在屏幕边上弹出：看鼠标在不在边上
+constexpr UINT kEdgeWatchMs = 80;
+constexpr DWORD kEdgeDwellMs = 350;     // 在边上停这么久才弹
+constexpr UINT_PTR kTimerHoverLeave = 10;  // 鼠标停在边上弹出的：看鼠标走开了没有
+constexpr UINT kHoverWatchMs = 100;
+constexpr DWORD kHoverLeaveMs = 600;    // 走开这么久就收起
 
 enum class Anim { None, Showing, Hiding };
 
@@ -89,6 +98,9 @@ struct Layout {
     // 竖排（弹在屏幕左右两边）时：一列格子的左边、各段的顶边。这时 itemsW、trayW 是竖着的长度，
     // 窗口在面板里侧多留 bubbleW 宽，放显示标题的小牌子
     float colX, startY, itemsY, tilesY, trayY, clockY, clockH, bubbleW;
+    // 时钟前面的几样：媒体按钮（三个一组）、输入法、电量，这次没有的长度为 0。横排时 X 是左边、W 是宽，竖排时 Y 是顶边、H 是高
+    float mediaX, mediaW, imeX, imeW, battX, battW;
+    float mediaY, mediaH, imeY, imeH, battY, battH;
 };
 
 // 调节条：0 是音量，1 是亮度
@@ -185,6 +197,23 @@ int s_hoverRadio = -1;             // 鼠标下的按钮（第几个）
 int s_radioFailed = 0;             // 切换失败的开关（1 << RadioId）：鼠标离开那个按钮之前标题一直说失败了
 int s_radioPolls = 0;              // 弹出以后为了等 Wi-Fi 连上网络又读了几遍
 
+// 媒体按钮、输入法、电量。媒体按钮的编号就是 MediaCommand
+enum Extra { kExtraNone = -1, kExtraIme = 3, kExtraBattery };
+bool s_showMedia = false;  // 这次弹出有没有这几样（弹出时定下来）
+bool s_showIme = false;
+bool s_showBattery = false;
+MediaInfo s_media;
+ImeInfo s_ime;
+BatteryInfo s_battery;
+HWND s_imeTarget = nullptr;   // 显示的是哪个窗口的输入法（弹出前的前台窗口）
+int s_hoverExtra = kExtraNone;
+
+// 鼠标停在屏幕边上弹出
+DWORD s_edgeSince = 0;     // 鼠标从什么时候起停在边上，0 = 不在
+bool s_edgeArmed = true;   // 弹过一次以后要先离开那条边才会再弹
+bool s_hoverOpen = false;  // 这次是鼠标停在边上弹出来的、还没点过：不抢前台，鼠标走开就收起
+DWORD s_hoverAwayAt = 0;   // 鼠标走开的时间，0 = 还在上面
+
 // 任务栏藏着时短按 Win：迷你任务栏弹完再打开开始菜单，开始菜单开着时它一直在
 bool s_compact = false;       // 这次弹出只有一行格子、贴着屏幕底边，给开始菜单让地方
 bool s_startPending = false;  // 弹出动画放完就打开开始菜单
@@ -262,20 +291,30 @@ void ComputeLayout() {
     }
     float traySep = trayCount > 0 ? L.sep : 0;
     int n = static_cast<int>(s_items.size());
+    // 媒体按钮单独一段（前后有分隔线），输入法、电量和时钟挨着
+    L.mediaW = s_showMedia ? 3 * Px(30) : 0;
+    L.mediaH = s_showMedia ? 3 * Px(28) : 0;
+    L.imeW = s_showIme ? Px(30) : 0;
+    L.imeH = s_showIme ? Px(30) : 0;
+    L.battW = s_showBattery ? Px(42) : 0;
+    L.battH = s_showBattery ? Px(36) : 0;
+    float mediaSep = s_showMedia ? L.sep : 0;
 
     if (vertical) {
-        // 从上到下：开始按钮、格子、托盘图标、时钟、两根竖的调节条、Wi-Fi 和蓝牙按钮
+        // 从上到下：开始按钮、格子、托盘图标、媒体按钮、输入法、电量、时钟、两根竖的调节条、Wi-Fi 和蓝牙按钮
         float radiosH = s_radioCount > 0 ? Px(8) + s_radioCount * L.radioH + (s_radioCount - 1) * L.radioGap : 0;
+        float extras = L.mediaH + mediaSep + L.imeH + L.battH;
         // 屏幕不够高时至少留一个窗口格子：托盘图标少显示几个（多的滚着看），还不够就把调节条变短
         float room = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - L.tile -
-                     (2 * L.pad + L.tile + 2 * L.sep + traySep + L.clockH + L.rowGap + L.sliderH + radiosH);
+                     (2 * L.pad + L.tile + 2 * L.sep + traySep + extras + L.clockH + L.rowGap + L.sliderH + radiosH);
         if (s_trayStyle == kTrayRow && trayCount > 0 && L.trayW > room) {
             s_trayRowMax = std::clamp(static_cast<int>(room / L.cellH), 1, kMaxTrayRow);
             L.trayW = std::min(trayCount, s_trayRowMax) * L.cellH;
         }
         if (s_levels && L.trayW > room) L.sliderH = std::max(Px(72), L.sliderH - (L.trayW - room));
         s_trayFirst = std::clamp(s_trayFirst, 0, std::max(0, trayCount - s_trayRowMax));
-        float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockH + L.rowGap + L.sliderH + radiosH;
+        float others =
+            2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockH + L.rowGap + L.sliderH + radiosH;
         float avail = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - others;
         s_visible = std::min(n, std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap))));
         if (s_lockedItemsW > 0)
@@ -291,7 +330,10 @@ void ComputeLayout() {
         L.itemsY = L.startY + L.tile + L.sep;
         L.tilesY = L.itemsY + (L.itemsW - tilesH) / 2;
         L.trayY = L.itemsY + L.itemsW + L.sep;
-        L.clockY = L.trayY + L.trayW + traySep;
+        L.mediaY = L.trayY + L.trayW + traySep;
+        L.imeY = L.mediaY + L.mediaH + mediaSep;
+        L.battY = L.imeY + L.imeH;
+        L.clockY = L.battY + L.battH;
         L.sliderY = L.clockY + L.clockH + L.rowGap;
         // 音量在左半边，亮度在右半边，图标在下面，往上拖变大
         float icon = Px(24), half = L.tile / 2, iconY = L.sliderY + L.sliderH - icon;
@@ -308,13 +350,14 @@ void ComputeLayout() {
         return;
     }
 
-    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockW;
+    float extras = L.mediaW + mediaSep + L.imeW + L.battW;
+    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockW;
     float avail = (s_bounds.right - s_bounds.left) * 0.85f - fixed;
     int maxFit = std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap)));
     s_visible = std::min(n, maxFit);
 
     // 格子少的时候面板按最小宽度来，格子在中间那段里居中
-    float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + L.clockW;
+    float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockW;
     if (s_lockedItemsW > 0) {
         int fit = std::max(1, static_cast<int>((s_lockedItemsW + L.gap) / (L.tile + L.gap)));
         s_visible = std::min(n, fit);
@@ -327,7 +370,10 @@ void ComputeLayout() {
     L.itemsX = L.margin + L.pad + L.tile + L.sep;
     L.tilesX = L.itemsX + (L.itemsW - tilesW) / 2;
     L.trayX = L.itemsX + L.itemsW + L.sep;
-    L.clockX = L.trayX + L.trayW + traySep;
+    L.mediaX = L.trayX + L.trayW + traySep;
+    L.imeX = L.mediaX + L.mediaW + mediaSep;
+    L.battX = L.imeX + L.imeW;
+    L.clockX = L.battX + L.battW;
     L.tileY = L.margin + L.pad + L.titleH;
     L.sliderY = L.tileY + L.tile + L.rowGap;
 
@@ -431,6 +477,71 @@ int RadioAt(int x, int y) {
     for (int k = 0; k < s_radioCount; ++k)
         if (s_radioRects[k].Contains(static_cast<REAL>(x), static_cast<REAL>(y))) return k;
     return -1;
+}
+
+// ---- 媒体按钮、输入法、电量 ----
+
+// 媒体按钮：kMediaPrevious 上一首、kMediaPlayPause 播放 / 暂停、kMediaNext 下一首。竖排时上下排
+RectF MediaRect(int k) {
+    const Layout& L = s_L;
+    if (Vertical()) {
+        float h = L.mediaH / 3, w = Px(36);
+        return RectF(L.colX + (L.tile - w) / 2, L.mediaY + k * h, w, h);
+    }
+    float w = L.mediaW / 3, h = Px(34);
+    return RectF(L.mediaX + k * w, L.tileY + (L.tile - h) / 2, w, h);
+}
+
+RectF ExtraRect(int extra) {
+    const Layout& L = s_L;
+    bool v = Vertical();
+    if (extra == kExtraIme) return v ? RectF(L.panelX, L.imeY, L.panelW, L.imeH) : RectF(L.imeX, L.tileY, L.imeW, L.tile);
+    if (extra == kExtraBattery)
+        return v ? RectF(L.panelX, L.battY, L.panelW, L.battH) : RectF(L.battX, L.tileY, L.battW, L.tile);
+    return MediaRect(extra);
+}
+
+bool ExtraShown(int extra) {
+    if (extra == kExtraIme) return s_showIme;
+    if (extra == kExtraBattery) return s_showBattery;
+    return s_showMedia && extra >= kMediaPrevious && extra <= kMediaNext;
+}
+
+// 鼠标下的媒体按钮、输入法或电量，没有为 kExtraNone
+int ExtraAt(int x, int y) {
+    for (int e : {static_cast<int>(kMediaPrevious), static_cast<int>(kMediaPlayPause), static_cast<int>(kMediaNext),
+                  static_cast<int>(kExtraIme), static_cast<int>(kExtraBattery)})
+        if (ExtraShown(e) && ExtraRect(e).Contains(static_cast<REAL>(x), static_cast<REAL>(y))) return e;
+    return kExtraNone;
+}
+
+bool MediaEnabled(int k) {
+    if (!s_media.present) return false;
+    return k == kMediaPrevious ? s_media.canPrevious : k == kMediaNext ? s_media.canNext : s_media.canPlayPause;
+}
+
+std::wstring MediaText() {
+    if (!s_media.present) return Tr(L"没有在播放的媒体");
+    std::wstring text = s_media.title;
+    if (!s_media.artist.empty()) text += (text.empty() ? L"" : L" – ") + s_media.artist;
+    if (text.empty()) return Tr(s_media.playing ? L"正在播放" : L"已暂停");
+    return s_media.playing ? text : TrF(L"已暂停：%ls", text.c_str());
+}
+
+std::wstring BatteryText() {
+    const BatteryInfo& b = s_battery;
+    if (b.percent < 0) return Tr(L"电量");
+    if (b.charging) return TrF(L"电量 %d%%，正在充电", b.percent);
+    if (b.plugged) return TrF(L"电量 %d%%，已接通电源", b.percent);
+    if (b.secondsLeft > 0)
+        return TrF(L"电量 %d%%，还能用 %d 小时 %d 分钟", b.percent, b.secondsLeft / 3600, b.secondsLeft / 60 % 60);
+    return TrF(L"电量 %d%%", b.percent);
+}
+
+std::wstring ExtraText(int extra) {
+    if (extra == kExtraIme) return s_ime.text;
+    if (extra == kExtraBattery) return BatteryText();
+    return MediaText();
 }
 
 // ---- 托盘图标 ----
@@ -565,6 +676,11 @@ void DrawPill(Graphics& g) {
     g.DrawPath(&rim, &path);
 }
 
+// 在任务栏上闪着（来了消息）的窗口用的橙色
+Color UrgentColor(BYTE alpha = 255) { return s_glass.Light() ? Color(alpha, 235, 115, 0) : Color(alpha, 255, 150, 40); }
+
+bool IsUrgentItem(int i) { return s_items[i].hwnd && Attention_IsUrgent(s_items[i].hwnd); }
+
 void DrawTile(Graphics& g, int idx) {
     const Palette& pal = Colors();
     RectF r = TileRect(idx);
@@ -582,6 +698,12 @@ void DrawTile(Graphics& g, int idx) {
     }
 
     const Tile& item = s_items[idx - 1];
+    bool urgent = IsUrgentItem(idx - 1);
+    if (urgent) {  // 和系统任务栏上闪烁的按钮一样垫一块橙色的底
+        RectF bg = r;
+        bg.Inflate(-0.5f, -0.5f);
+        FillRound(g, bg, Px(12), UrgentColor(s_glass.Light() ? 70 : 80));
+    }
     float is = Px(24);
     RectF iconRect(cx - is / 2, cy - is / 2, is, is);
     if (item.icon) g.DrawImage(item.icon.get(), iconRect);
@@ -589,10 +711,11 @@ void DrawTile(Graphics& g, int idx) {
 
     // 和 Win11 任务栏一样：当前窗口是一条长的强调色短线，其它打开的窗口是短点，没运行的固定应用没有。
     // 竖排时竖着画在靠屏幕边的那一侧
-    float len = item.active ? Px(16) : Px(6);
+    float len = item.active || urgent ? Px(16) : Px(6);
     RectF bar(cx - len / 2, r.Y + r.Height - Px(6), len, Px(3));
     if (Vertical()) bar = RectF(s_edge == kEdgeLeft ? r.X + Px(3) : r.X + r.Width - Px(6), cy - len / 2, Px(3), len);
-    if (item.active) FillRound(g, bar, Px(1.5f), pal.accent);
+    if (urgent) FillRound(g, bar, Px(1.5f), UrgentColor());
+    else if (item.active) FillRound(g, bar, Px(1.5f), pal.accent);
     else if (item.hwnd) FillRound(g, bar, Px(1.5f), pal.running);
 }
 
@@ -821,6 +944,84 @@ void DrawRadios(Graphics& g) {
     }
 }
 
+// 媒体按钮的图标：上一首、播放 / 暂停、下一首
+void DrawMediaGlyph(Graphics& g, int k, const RectF& box, const Color& c) {
+    float u = Px(1);
+    float cx = box.X + box.Width / 2, cy = box.Y + box.Height / 2;
+    SolidBrush brush(c);
+    if (k == kMediaPlayPause) {
+        if (s_media.playing) {
+            FillRound(g, RectF(cx - 5 * u, cy - 6 * u, 3.5f * u, 12 * u), 1.2f * u, c);
+            FillRound(g, RectF(cx + 1.5f * u, cy - 6 * u, 3.5f * u, 12 * u), 1.2f * u, c);
+        } else {
+            PointF tri[3] = {PointF(cx - 4 * u, cy - 6.5f * u), PointF(cx + 6 * u, cy), PointF(cx - 4 * u, cy + 6.5f * u)};
+            g.FillPolygon(&brush, tri, 3);
+        }
+        return;
+    }
+    // 三角朝着要去的方向，尖上一道竖线
+    float d = k == kMediaNext ? 1.0f : -1.0f;
+    PointF tri[3] = {PointF(cx - 3.5f * u * d, cy - 5 * u), PointF(cx + 3.5f * u * d, cy),
+                     PointF(cx - 3.5f * u * d, cy + 5 * u)};
+    g.FillPolygon(&brush, tri, 3);
+    FillRound(g, RectF(d > 0 ? cx + 3.5f * u : cx - 5.5f * u, cy - 5 * u, 2 * u, 10 * u), u, c);
+}
+
+// 没有在放的东西、播放器不支持的按钮画暗的，点了没反应
+void DrawMedia(Graphics& g) {
+    if (!s_showMedia) return;
+    const Palette& pal = Colors();
+    for (int k = kMediaPrevious; k <= kMediaNext; ++k) {
+        RectF box = MediaRect(k);
+        bool enabled = MediaEnabled(k);
+        if (k == s_hoverExtra && enabled) {
+            float d = std::min(box.Width, box.Height) - Px(2);
+            FillRound(g, RectF(box.X + (box.Width - d) / 2, box.Y + (box.Height - d) / 2, d, d), d / 2, pal.pillTop);
+        }
+        DrawMediaGlyph(g, k, box, enabled ? pal.text : pal.subtle);
+    }
+}
+
+// 输入法：中 / 英（别的语言是缩写），能切换时鼠标指着有一块淡淡的底
+void DrawIme(Graphics& g, const StringFormat& center) {
+    if (!s_showIme) return;
+    const Palette& pal = Colors();
+    RectF r = ExtraRect(kExtraIme);
+    if (s_hoverExtra == kExtraIme && s_ime.canToggle) {
+        float w = std::min(r.Width - Px(2), Px(30)), h = std::min(r.Height - Px(2), Px(30));
+        FillRound(g, RectF(r.X + (r.Width - w) / 2, r.Y + (r.Height - h) / 2, w, h), Px(8), pal.pillTop);
+    }
+    Font font(s_fontFamily.get(), s_ime.label.size() > 1 ? Px(10.5f) : Px(14), FontStyleRegular, UnitPixel);
+    DrawLabel(g, s_ime.label.c_str(), font, r, center, pal.text);
+}
+
+// 电量：电池的样子，剩多少填多少（充电、接着电源时绿色，快没电时红色），下面写百分比
+void DrawBattery(Graphics& g, const Font& font, const StringFormat& center) {
+    if (!s_showBattery) return;
+    const Palette& pal = Colors();
+    const BatteryInfo& b = s_battery;
+    bool light = s_glass.Light();
+    RectF r = ExtraRect(kExtraBattery);
+    float u = Px(1), bw = 20 * u, bh = 10 * u, textH = 14 * u;
+    float top = r.Y + (r.Height - bh - 2 * u - textH) / 2;
+    RectF body(r.X + (r.Width - bw) / 2 - u, top, bw, bh);
+    GraphicsPath path;
+    AddRoundRect(path, body, 2.5f * u);
+    Pen pen(pal.text, 1.2f * u);
+    g.DrawPath(&pen, &path);
+    FillRound(g, RectF(body.X + bw + 0.8f * u, top + bh / 2 - 2 * u, 1.8f * u, 4 * u), 0.8f * u, pal.text);
+    if (b.percent > 0) {
+        Color fill = pal.text;
+        if (b.charging || b.plugged) fill = light ? Color(255, 16, 140, 60) : Color(255, 80, 210, 110);
+        else if (b.percent <= 20) fill = light ? Color(255, 200, 40, 30) : Color(255, 240, 80, 70);
+        float inner = (bw - 4 * u) * std::min(b.percent, 100) / 100.0f;
+        FillRound(g, RectF(body.X + 2 * u, body.Y + 2 * u, std::max(inner, 1.5f * u), bh - 4 * u), 0.8f * u, fill);
+    }
+    wchar_t text[16] = L"–";
+    if (b.percent >= 0) swprintf(text, 16, L"%d%%", b.percent);
+    DrawLabel(g, text, font, RectF(r.X, top + bh + 2 * u, r.Width, textH), center, pal.text);
+}
+
 // 托盘图标。一行大图标放不下时两头画个小三角，表示那边还有（滚轮滚着看）；
 // 堆叠时只画当前这一页，垫一块淡淡的底，不止一页时底边画几个小点表示第几页，翻页时新一页从旁边滑进来
 void DrawTray(Graphics& g) {
@@ -985,6 +1186,7 @@ void DrawContent(Graphics& g) {
     if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
     else if (s_hoverRadio >= 0) title = RadioText(s_radioIds[s_hoverRadio]);
+    else if (s_hoverExtra != kExtraNone) title = ExtraText(s_hoverExtra);
     else if (s_hoverTray >= 0 || s_overTray) title = TrayTitle(s_hoverTray);
     else if (shown == 0) title = Tr(L"开始");
     else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
@@ -997,13 +1199,16 @@ void DrawContent(Graphics& g) {
         // 竖排：标题在面板旁边的小牌子上，对着它说的那一项。打字筛选时只在指着或选了一项时显示名字；
         // 开始菜单模式只在鼠标指着时显示
         bool pointing = s_hover >= 0 || s_hoverTray >= 0 || s_overTray || s_hoverControl != kNone || s_drag != kNone ||
-                        s_hoverRadio >= 0;
+                        s_hoverRadio >= 0 || s_hoverExtra != kExtraNone;
         float anchorY = L.itemsY + L.tile / 2;
         if (s_drag != kNone || s_hoverControl != kNone) {
             const Slider& sl = s_sliders[SliderOf(s_drag != kNone ? s_drag : s_hoverControl)];
             anchorY = (sl.a0 + sl.a1) / 2;
         } else if (s_hoverRadio >= 0) {
             const RectF& r = s_radioRects[s_hoverRadio];
+            anchorY = r.Y + r.Height / 2;
+        } else if (s_hoverExtra != kExtraNone) {
+            RectF r = ExtraRect(s_hoverExtra);
             anchorY = r.Y + r.Height / 2;
         } else if (s_hoverTray >= 0) {
             RectF r = TrayCellRect(s_hoverTray);
@@ -1035,22 +1240,27 @@ void DrawContent(Graphics& g) {
     for (int idx = 0; idx <= ItemCount(); ++idx)
         if (IsTileVisible(idx)) DrawTile(g, idx);
 
-    // 窗口多到放不下时，两头的小三角提示还能滚动
-    SolidBrush hint(pal.subtle);
+    // 窗口多到放不下时，两头的小三角提示还能滚动；那边有闪着要提醒的窗口时是橙色
+    SolidBrush hint(pal.subtle), urgentHint(UrgentColor());
     float tri = Px(4);
     bool before = s_first > 0, after = s_first + s_visible < ItemCount();
+    bool urgentBefore = false, urgentAfter = false;
+    for (int i = 0; i < ItemCount(); ++i) {
+        if (i >= s_first && i < s_first + s_visible) continue;
+        if (IsUrgentItem(i)) (i < s_first ? urgentBefore : urgentAfter) = true;
+    }
     if (vertical) {
         float midX = L.colX + L.tile / 2, y0 = L.itemsY - Px(2), y1 = L.itemsY + L.itemsW + Px(2);
         PointF up[3] = {PointF(midX, y0 - tri), PointF(midX - tri, y0), PointF(midX + tri, y0)};
         PointF down[3] = {PointF(midX, y1 + tri), PointF(midX - tri, y1), PointF(midX + tri, y1)};
-        if (before) g.FillPolygon(&hint, up, 3);
-        if (after) g.FillPolygon(&hint, down, 3);
+        if (before) g.FillPolygon(urgentBefore ? &urgentHint : &hint, up, 3);
+        if (after) g.FillPolygon(urgentAfter ? &urgentHint : &hint, down, 3);
     } else {
         float midY = L.tileY + L.tile / 2, x0 = L.itemsX - Px(2), x1 = L.itemsX + L.itemsW + Px(2);
         PointF left[3] = {PointF(x0 - tri, midY), PointF(x0, midY - tri), PointF(x0, midY + tri)};
         PointF right[3] = {PointF(x1 + tri, midY), PointF(x1, midY - tri), PointF(x1, midY + tri)};
-        if (before) g.FillPolygon(&hint, left, 3);
-        if (after) g.FillPolygon(&hint, right, 3);
+        if (before) g.FillPolygon(urgentBefore ? &urgentHint : &hint, left, 3);
+        if (after) g.FillPolygon(urgentAfter ? &urgentHint : &hint, right, 3);
     }
 
     // 分隔线：横排是竖线，竖排是横线
@@ -1061,7 +1271,8 @@ void DrawContent(Graphics& g) {
     };
     separator(vertical ? L.itemsY : L.itemsX);
     if (L.trayW > 0) separator(vertical ? L.trayY : L.trayX);
-    separator(vertical ? L.clockY : L.clockX);
+    if (s_showMedia) separator(vertical ? L.mediaY : L.mediaX);
+    separator(vertical ? L.imeY : L.imeX);  // 输入法、电量和时钟挨着
     DrawTray(g);
 
     if (s_items.empty()) {
@@ -1078,6 +1289,9 @@ void DrawContent(Graphics& g) {
     else swprintf(clock, 64, L"%02d:%02d\n%d/%d/%d", st.wHour, st.wMinute, st.wYear, st.wMonth, st.wDay);
     RectF clockRect = vertical ? RectF(L.panelX, L.clockY, L.panelW, L.clockH) : RectF(L.clockX, L.tileY, L.clockW, L.tile);
     DrawLabel(g, clock, smallFont, clockRect, center, pal.text);
+    DrawMedia(g);
+    DrawIme(g, center);
+    DrawBattery(g, smallFont, center);
 
     if (s_levels) {
         DrawSlider(g, 0);
@@ -1249,10 +1463,16 @@ void EndTrayMode() {
     KillTimer(s_hwnd, kTimerTrayMenu);
 }
 
+void EndHoverOpen() {
+    s_hoverOpen = false;
+    KillTimer(s_hwnd, kTimerHoverLeave);
+}
+
 void HideNow() {
     HideThumb();
     EndStartMode();
     EndTrayMode();
+    EndHoverOpen();
     s_open = false;
     s_preview = false;
     KillTimer(s_hwnd, kTimerPreview);
@@ -1262,6 +1482,7 @@ void HideNow() {
     if (GetCapture() == s_hwnd) ReleaseCapture();
     KillTimer(s_hwnd, kTimerClock);
     ShowWindow(s_hwnd, SW_HIDE);
+    Attention_Update();
 }
 
 void BeginStart();
@@ -1355,6 +1576,7 @@ void MoveSelection(int delta) {
     s_hover = -1;
     s_hoverControl = kNone;  // 鼠标停在调节条上时，标题也要换成选中的窗口
     s_hoverRadio = -1;
+    s_hoverExtra = kExtraNone;
     s_hoverTray = -1;
     s_overTray = false;
     s_keyNav = true;
@@ -1398,6 +1620,7 @@ void ApplyFilter() {
     s_hover = -1;
     s_hoverControl = kNone;
     s_hoverRadio = -1;
+    s_hoverExtra = kExtraNone;
     s_hoverTray = -1;
     s_pillIndex = -1;
     s_sel = f.empty() ? DefaultSelection() : (s_items.empty() ? -1 : 1);  // 没有匹配的就什么都不选
@@ -1443,6 +1666,22 @@ void OpenRadioPanel(int k) {
         Log(L"右键%ls按钮：打开 %ls 失败（%lu），改开系统设置", wifi ? L" Wi-Fi " : L"蓝牙", panel, GetLastError());
     }
     Launch(wifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
+}
+
+// 点了媒体按钮、输入法：发命令或者切换中英文，马上按新的样子画
+void ClickExtra(int extra) {
+    if (extra == kExtraIme) {
+        if (!s_ime.canToggle) return;
+        if (!Ime_Toggle(s_imeTarget)) Log(L"输入法：切换中英文没成功");
+        s_ime = Ime_Get(s_imeTarget);
+    } else if (extra >= kMediaPrevious && extra <= kMediaNext) {
+        if (!MediaEnabled(extra)) return;
+        Media_Command(extra);
+        s_media = Media_Get();
+    } else {
+        return;
+    }
+    Redraw();
 }
 
 void ActivateIndex(int idx, bool newInstance = false) {
@@ -1908,6 +2147,9 @@ void WatchStart() {
     }
 }
 
+void WatchEdge();
+void WatchHoverLeave();
+
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_NCHITTEST:
@@ -1919,6 +2161,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_ACTIVATE:
+            if (s_open && s_hoverOpen && LOWORD(wParam) != WA_INACTIVE) {
+                // 鼠标停在边上弹出的，点了它：接着当平常的迷你任务栏用，点别处才收起
+                EndHoverOpen();
+                SetFocus(hwnd);
+                return 0;
+            }
             if (s_open && s_trayMode) {
                 // 右键了托盘图标：系统托盘、程序的菜单拿走前台时不收起，WatchTrayMenu 等菜单关了再看。
                 // 又回到迷你任务栏上（点了它）就接着当平常的用
@@ -1971,6 +2219,9 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kTimerClock) {
                 if (s_levels && s_drag != kVolumeTrack) RefreshVolume();  // 别处改了音量（键盘上的音量键）也跟着变
+                if (s_showBattery) s_battery = Battery_Get();
+                if (s_showIme) s_ime = Ime_Get(s_imeTarget);  // 在别处（比如按 Shift）切换过
+                if (s_showMedia) Media_Query();
                 // Wi-Fi 刚打开、还没连上网络：每 2 秒再读一遍，连上了标题就显示网络名
                 const RadioInfo& wifi = s_radio[kRadioWifi];
                 if (std::find(s_radioIds, s_radioIds + s_radioCount, kRadioWifi) != s_radioIds + s_radioCount &&
@@ -2001,6 +2252,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 WatchTrayMenu();
             } else if (wParam == kTimerTray) {
                 if (g_settings.trayIcons && !s_open) Tray_Refresh();
+            } else if (wParam == kTimerEdge) {
+                WatchEdge();
+            } else if (wParam == kTimerHoverLeave) {
+                WatchHoverLeave();
             }
             return 0;
 
@@ -2013,6 +2268,13 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_APP_APPS:
             if (s_open && !s_filter.empty()) ApplyFilter();  // 应用列表刚读完：把匹配的应用补上
+            return 0;
+
+        case WM_APP_MEDIA:
+            if (s_open && s_showMedia) {
+                s_media = Media_Get();
+                Redraw();
+            }
             return 0;
 
         case WM_APP_RADIOS:
@@ -2050,14 +2312,17 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int hit = HitTest(x, y);
             int control = hit < 0 ? ControlAt(x, y) : kNone;
             int radio = hit < 0 && control == kNone ? RadioAt(x, y) : -1;
-            int tray = hit < 0 && control == kNone && radio < 0 ? TrayAt(x, y) : -1;
-            bool overTray = hit < 0 && control == kNone && radio < 0 && OverTray(x, y);
-            if (hit != s_hover || control != s_hoverControl || radio != s_hoverRadio || tray != s_hoverTray ||
-                overTray != s_overTray) {
+            int extra = hit < 0 && control == kNone && radio < 0 ? ExtraAt(x, y) : kExtraNone;
+            bool free = hit < 0 && control == kNone && radio < 0 && extra == kExtraNone;
+            int tray = free ? TrayAt(x, y) : -1;
+            bool overTray = free && OverTray(x, y);
+            if (hit != s_hover || control != s_hoverControl || radio != s_hoverRadio || extra != s_hoverExtra ||
+                tray != s_hoverTray || overTray != s_overTray) {
                 if (radio != s_hoverRadio && s_hoverRadio >= 0) s_radioFailed &= ~(1 << s_radioIds[s_hoverRadio]);
                 s_hover = hit;
                 s_hoverControl = control;
                 s_hoverRadio = radio;
+                s_hoverExtra = extra;
                 s_hoverTray = tray;
                 s_overTray = overTray;
                 if (hit >= 0) s_sel = hit;
@@ -2074,6 +2339,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_hoverControl = kNone;
             s_hoverRadio = -1;
             s_radioFailed = 0;
+            s_hoverExtra = kExtraNone;
             s_hoverTray = -1;
             s_overTray = false;
             Redraw();
@@ -2106,6 +2372,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             if (int radio = RadioAt(x, y); radio >= 0) {
                 ToggleRadio(radio);
+                return 0;
+            }
+            if (int extra = ExtraAt(x, y); extra != kExtraNone) {
+                ClickExtra(extra);
                 return 0;
             }
             int hit = HitTest(x, y);
@@ -2350,12 +2620,14 @@ HMONITOR MonitorForPopup(HWND fg, bool preview, bool startMenu = false) {
 }
 
 // 弹出。preview：设置窗口里调大小时的预览，不抢前台。
-// startMenu：任务栏藏着时短按了 Win，只留一行格子（竖排时一列）贴着屏幕边弹出来，弹完打开开始菜单
-void Open(bool preview, bool startMenu = false) {
+// startMenu：任务栏藏着时短按了 Win，只留一行格子（竖排时一列）贴着屏幕边弹出来，弹完打开开始菜单。
+// hover：鼠标停在屏幕边上弹出的，弹在鼠标所在的屏幕上，不抢前台，点了它才拿前台
+void Open(bool preview, bool startMenu = false, bool hover = false) {
     if (!s_hwnd) return;
     s_preview = preview;
+    EndHoverOpen();
     HWND fg = GetForegroundWindow();
-    HMONITOR mon = MonitorForPopup(fg, preview, startMenu);
+    HMONITOR mon = MonitorForPopup(fg, preview, startMenu || hover);
     if (preview) {
         s_edge = s_previewEdge;
         s_align = s_previewAlign;
@@ -2403,6 +2675,18 @@ void Open(bool preview, bool startMenu = false) {
     s_hoverRadio = -1;
     s_radioFailed = 0;
     s_radioPolls = 0;
+
+    // 媒体按钮看后台最近读到的有没有在放（面板宽度弹出时就定了），弹出以后再读一遍；
+    // 输入法看弹出前的前台窗口；没有电池不显示电量
+    s_media = g_settings.showMedia ? Media_Get() : MediaInfo();
+    s_showMedia = g_settings.showMedia && !s_compact && s_media.present;
+    if (g_settings.showMedia && !preview) Media_Query();
+    s_imeTarget = s_prevForeground;
+    s_showIme = g_settings.showIme && !s_compact;
+    if (s_showIme) s_ime = Ime_Get(s_imeTarget);
+    s_battery = Battery_Get();
+    s_showBattery = g_settings.showBattery && !s_compact && s_battery.present;
+    s_hoverExtra = kExtraNone;
 
     // 托盘图标用后台读好的（面板宽度弹出时就定了，弹出期间读到的新结果留到下次）
     s_tray = g_settings.trayIcons ? Tray_Hidden() : std::vector<TrayApp>();
@@ -2457,8 +2741,13 @@ void Open(bool preview, bool startMenu = false) {
     s_anim = Anim::Showing;
     s_animStart = s_shownAt;
     Render(SlideDistance(), 0);
-    if (preview) {
+    if (preview || hover) {
         ShowWindow(s_hwnd, SW_SHOWNOACTIVATE);
+        if (hover) {
+            s_hoverOpen = true;
+            s_hoverAwayAt = 0;
+            SetTimer(s_hwnd, kTimerHoverLeave, kHoverWatchMs, nullptr);
+        }
     } else {
         ShowWindow(s_hwnd, SW_SHOW);
         ForceForeground(s_hwnd);
@@ -2469,11 +2758,104 @@ void Open(bool preview, bool startMenu = false) {
     }
     RequestFrame();
     SetTimer(s_hwnd, kTimerClock, 1000, nullptr);
+    if (!preview) Attention_Update();  // 这块屏上提醒的光让给迷你任务栏
+}
+
+// 鼠标在不在这块屏幕上迷你任务栏那条边上（最外面一排像素）
+bool AtPopupEdge(POINT pt, HMONITOR mon) {
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetMonitorInfoW(mon, &mi)) return false;
+    int edge = kEdgeBottom, align = kAlignSystem;
+    PopupPlaceFor(mon, edge, align);
+    const RECT& m = mi.rcMonitor;
+    if (edge == kEdgeLeft) return pt.x <= m.left;
+    if (edge == kEdgeRight) return pt.x >= m.right - 1;
+    return pt.y >= m.bottom - 1;
+}
+
+bool CursorHidden() {
+    CURSORINFO ci = {sizeof(ci)};
+    return GetCursorInfo(&ci) && !(ci.flags & CURSOR_SHOWING);
+}
+
+// 任务栏藏着时鼠标在迷你任务栏那条边上停一下就弹出。按着鼠标键（在拖东西）、光标藏着、
+// 前台是那块屏上全屏的游戏或视频时不弹；弹过一次以后鼠标要先离开那条边
+void WatchEdge() {
+    if (!g_settings.edgePopup || s_open || !Fullscreen_TaskbarHidden()) {
+        s_edgeSince = 0;
+        return;
+    }
+    POINT pt;
+    if (!GetCursorPos(&pt)) return;
+    HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+    if (!mon || !AtPopupEdge(pt, mon) || Taskbar_IsShownOn(mon)) {
+        s_edgeSince = 0;
+        s_edgeArmed = true;
+        return;
+    }
+    HWND fg = GetForegroundWindow();
+    if (!s_edgeArmed || MouseButtonDown() || CursorHidden() ||
+        (IsFullscreenApp(fg) && MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) == mon)) {
+        s_edgeSince = 0;
+        return;
+    }
+    DWORD now = GetTickCount();
+    if (!s_edgeSince) {
+        s_edgeSince = now ? now : 1;
+        return;
+    }
+    if (now - s_edgeSince < kEdgeDwellMs) return;
+    s_edgeSince = 0;
+    s_edgeArmed = false;
+    Log(L"鼠标停在屏幕边上：弹出迷你任务栏");
+    Open(false, false, true);
+}
+
+// 鼠标停在边上弹出、还没点过它：鼠标离开迷你任务栏一会儿就收起。点了它（拿到了前台）以后照平常的来
+void WatchHoverLeave() {
+    if (!s_open || !s_hoverOpen) {
+        EndHoverOpen();
+        return;
+    }
+    if (GetForegroundWindow() == s_hwnd) {
+        EndHoverOpen();
+        return;
+    }
+    POINT pt;
+    GetCursorPos(&pt);
+    RECT r = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
+    if (PtInRect(&r, pt) || s_menuOpen || s_drag != kNone || s_trayMode) {
+        s_hoverAwayAt = 0;
+        return;
+    }
+    DWORD now = GetTickCount();
+    if (!s_hoverAwayAt) {
+        s_hoverAwayAt = now ? now : 1;
+        return;
+    }
+    if (now - s_hoverAwayAt < kHoverLeaveMs) return;
+    Log(L"鼠标离开了迷你任务栏（鼠标停在边上弹出的），收起");
+    Popup_Hide();
 }
 
 }  // namespace
 
 void Popup_Show() { Open(false); }
+
+void Popup_Configure() {
+    if (!s_hwnd) return;
+    if (g_settings.edgePopup) {
+        SetTimer(s_hwnd, kTimerEdge, kEdgeWatchMs, nullptr);
+    } else {
+        KillTimer(s_hwnd, kTimerEdge);
+        s_edgeSince = 0;
+    }
+    Media_Configure(g_settings.showMedia, s_hwnd);
+}
+
+void Popup_Refresh() { Redraw(); }
+
+HMONITOR Popup_Monitor() { return s_open && !s_preview ? s_monitor : nullptr; }
 
 void Popup_PreviewGlass(bool frosted, bool light, int transparency) {
     bool restyle = frosted != s_previewFrosted;
@@ -2527,6 +2909,7 @@ void Popup_Hide() {
     if (!s_open) return;
     EndStartMode();
     EndTrayMode();
+    EndHoverOpen();
     s_open = false;
     bool atRest = s_anim == Anim::None;
     s_hideFromSlide = atRest ? 0 : s_lastSlide;
@@ -2535,6 +2918,7 @@ void Popup_Hide() {
     s_animStart = NowMs();
     KillTimer(s_hwnd, kTimerClock);
     RequestFrame();
+    if (!s_preview) Attention_Update();
 }
 
 void Popup_Toggle() {

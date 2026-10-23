@@ -144,6 +144,17 @@ bool IsOwnProcess(HWND hwnd) {
     return pid == GetCurrentProcessId();
 }
 
+bool IsFullscreenApp(HWND hwnd) {
+    if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd) || IsOwnProcess(hwnd)) return false;
+    std::wstring cls = GetClassNameStr(hwnd);
+    if (cls == L"Progman" || cls == L"WorkerW") return false;
+    RECT r;
+    MONITORINFO mi = {sizeof(mi)};
+    if (!GetWindowRect(hwnd, &r) || !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return false;
+    const RECT& m = mi.rcMonitor;
+    return r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
+}
+
 // 后台进程直接 SetForegroundWindow 常被系统拒绝，先把输入队列挂到当前前台线程上再切换
 void ForceForeground(HWND hwnd) {
     HWND fg = GetForegroundWindow();

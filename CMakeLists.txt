@@ -27,6 +27,9 @@ add_executable(TaskbarPopup WIN32
     src/tray.cpp
     src/lang.cpp
     src/radios.cpp
+    src/attention.cpp
+    src/indicators.cpp
+    src/media.cpp
     src/app.rc
 )
 
@@ -35,7 +38,7 @@ target_compile_definitions(TaskbarPopup PRIVATE
 
 target_link_libraries(TaskbarPopup PRIVATE
     user32 gdi32 gdiplus shell32 comctl32 dwmapi shcore advapi32 ole32 uuid
-    oleaut32 dxva2 winhttp iphlpapi)
+    oleaut32 dxva2 winhttp iphlpapi imm32)
 
 if(MSVC)
     target_compile_options(TaskbarPopup PRIVATE /utf-8 /W4)

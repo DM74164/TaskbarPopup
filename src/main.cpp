@@ -178,6 +178,8 @@ void Shutdown() {
     Hook_Uninstall();
     Brightness_Stop();
     Radios_Stop();
+    Media_Stop();
+    Attention_Shutdown();
     Fullscreen_SetEnabled(false);
     Log(L"退出：还原任务栏");
     Taskbar_RestoreAll();
@@ -277,6 +279,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
             return 0;
     }
+    if (Attention_OnMessage(msg, wParam, lParam)) return 0;
     if (msg == s_msgTaskbarCreated && s_msgTaskbarCreated) {
         AddTrayIcon();  // 资源管理器重启后托盘图标需要重新添加
         Fullscreen_OnTaskbarCreated();
@@ -364,6 +367,11 @@ void LoadSettings() {
     g_settings.showLevels = GetPrivateProfileIntW(L"General", L"ShowLevels", 1, f.c_str()) != 0;
     g_settings.trayIcons = GetPrivateProfileIntW(L"General", L"TrayIcons", 1, f.c_str()) != 0;
     g_settings.showRadios = GetPrivateProfileIntW(L"General", L"ShowRadios", 1, f.c_str()) != 0;
+    g_settings.showMedia = GetPrivateProfileIntW(L"General", L"ShowMedia", 1, f.c_str()) != 0;
+    g_settings.showIme = GetPrivateProfileIntW(L"General", L"ShowIme", 1, f.c_str()) != 0;
+    g_settings.showBattery = GetPrivateProfileIntW(L"General", L"ShowBattery", 1, f.c_str()) != 0;
+    g_settings.flashAlert = GetPrivateProfileIntW(L"General", L"FlashAlert", 1, f.c_str()) != 0;
+    g_settings.edgePopup = GetPrivateProfileIntW(L"General", L"EdgePopup", 0, f.c_str()) != 0;
     g_settings.trayStyle = GetPrivateProfileIntW(L"General", L"TrayStyle", kTrayStacked, f.c_str()) == kTrayRow ? kTrayRow : kTrayStacked;
     int scale = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupScale", kDefaultPopupScale, f.c_str()));
     int edge = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupEdge", kEdgeBottom, f.c_str()));
@@ -453,6 +461,11 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"ShowLevels", g_settings.showLevels ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"TrayIcons", g_settings.trayIcons ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowRadios", g_settings.showRadios ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowMedia", g_settings.showMedia ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowIme", g_settings.showIme ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowBattery", g_settings.showBattery ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"FlashAlert", g_settings.flashAlert ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"EdgePopup", g_settings.edgePopup ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"TrayStyle", std::to_wstring(g_settings.trayStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupEdge", std::to_wstring(g_settings.popupEdge).c_str(), f.c_str());
@@ -545,6 +558,8 @@ void ApplySettings() {
     Update_Configure();
     FloatWindows_Configure(g_settings.keepFloatsOnTop, g_settings.pinTopmost);
     Hotkeys_Apply();
+    Attention_Configure();
+    Popup_Configure();
 }
 
 }  // namespace app

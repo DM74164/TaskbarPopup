@@ -82,6 +82,11 @@ struct Settings {
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     int glassTransparency = kDefaultGlassTransparency;  // 迷你任务栏液态玻璃的透明度，百分比，深浅色共用
+    bool flashAlert = true;    // 任务栏藏着时提醒新消息：程序闪烁时屏幕边亮起，迷你任务栏里它的图标变色
+    bool edgePopup = false;    // 任务栏藏着时，鼠标停在迷你任务栏那条屏幕边上就弹出
+    bool showMedia = true;     // 迷你任务栏里显示正在播放的媒体（暂停、上一首、下一首）
+    bool showIme = true;       // 迷你任务栏里显示输入法的中英文状态
+    bool showBattery = true;   // 迷你任务栏里显示电量（没有电池时不显示）
     // 名单里是小写的程序文件名，如 notepad.exe。“最大化或全屏时隐藏任务栏”开着时用 excludeApps，关着时用 includeApps
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序
     std::vector<std::wstring> includeApps;  // 最大化时隐藏任务栏的程序
@@ -334,6 +339,52 @@ void Popup_Preview(int percent, int edge, int align, bool hold);
 // 预览用的玻璃：毛玻璃还是液态玻璃、浅色还是深色、液态玻璃的透明度。在 Popup_Preview 之前调用，预览开着时马上换上
 void Popup_PreviewGlass(bool frosted, bool light, int transparency);
 void Popup_EndPreview();  // 马上收起预览
+void Popup_Configure();   // 按设置开关“鼠标停在屏幕边上时弹出”
+void Popup_Refresh();     // 开着的话重画（比如要提醒的窗口变了）
+HMONITOR Popup_Monitor();  // 迷你任务栏开着（不算预览）时在哪块屏幕上，没开着为空
+
+// ---------------- 消息提醒（attention.cpp）----------------
+// 程序在任务栏上闪烁（来了新消息）时记下它：迷你任务栏里它的格子变色；任务栏被本程序藏着时，
+// 那块屏幕放任务栏的那条边上再亮起一道光。窗口到了前台、关掉或者藏起来以后不再提醒
+void Attention_Configure();  // 按 g_settings.flashAlert 开关，主窗口建好以后调用
+bool Attention_OnMessage(UINT msg, WPARAM wParam, LPARAM lParam);  // 主窗口收到的是外壳钩子消息就处理掉，返回 true
+bool Attention_IsUrgent(HWND hwnd);  // 这个窗口闪过、还没去看
+void Attention_Update();     // 迷你任务栏弹出、收起以后：马上重新看光要不要亮
+void Attention_Shutdown();
+
+// ---------------- 电量和输入法（indicators.cpp）----------------
+struct BatteryInfo {
+    bool present = false;  // 有电池
+    int percent = -1;      // 0 – 100，-1 = 不知道
+    bool charging = false;
+    bool plugged = false;  // 接着电源
+    int secondsLeft = -1;  // 还能用多久，-1 = 不知道
+};
+BatteryInfo Battery_Get();
+struct ImeInfo {
+    std::wstring label;      // 格子里显示的：中 / 英 / あ / A / ENG
+    std::wstring text;       // 鼠标指着时的标题
+    bool canToggle = false;  // 点一下能切换中英文
+};
+ImeInfo Ime_Get(HWND window);  // window 所在线程的输入法；读不到中英文时按键盘布局的语言显示
+bool Ime_Toggle(HWND window);  // 切换中英文，成功返回 true
+
+// ---------------- 正在播放的媒体（media.cpp）----------------
+// 走 WinRT 的 GlobalSystemMediaTransportControlsSessionManager（和系统音量弹窗里的媒体控制是同一个），
+// 读和发命令都在后台线程上做，读到的和上次不一样（或者是要求读的）时 PostMessage(notify, WM_APP_MEDIA, 0, 0)
+constexpr UINT WM_APP_MEDIA = WM_APP + 33;
+enum MediaCommand { kMediaPrevious, kMediaPlayPause, kMediaNext };
+struct MediaInfo {
+    bool present = false;  // 有在播放或者暂停着的
+    bool playing = false;
+    bool canPrevious = false, canNext = false, canPlayPause = false;
+    std::wstring title, artist;
+};
+void Media_Configure(bool enabled, HWND notify);  // 开着时后台每隔几秒读一遍，弹出时就知道有没有在放
+void Media_Query();                // 马上读一遍
+void Media_Command(int command);   // MediaCommand
+MediaInfo Media_Get();             // 最近读到的
+void Media_Stop();                 // 退出前结束后台线程
 
 // ---------------- 音量和亮度 ----------------
 // 音量：默认播放设备的主音量（Core Audio）。在调用线程上同步执行（线程需已初始化 COM），很快
@@ -490,6 +541,8 @@ std::wstring WindowExeName(HWND hwnd);  // 窗口所属程序的小写文件名�
 std::wstring GetWindowAumid(HWND hwnd, bool keepCase = false);  // 默认转成小写
 bool IsCloaked(HWND hwnd);
 bool IsOwnProcess(HWND hwnd);
+// 游戏、全屏视频这类盖住整块屏幕又不是最大化的窗口（最大化的窗口铺满整块屏不算）
+bool IsFullscreenApp(HWND hwnd);
 void ForceForeground(HWND hwnd);
 float MonitorScale(HMONITOR monitor);
 std::wstring MonitorKey(HMONITOR monitor);    // 认出同一块屏幕用的：接口名（换了排列、重新接上都不变），取不到时用设备名

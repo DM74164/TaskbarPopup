@@ -48,6 +48,18 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ![Drag to set the volume, click to turn Wi-Fi off and on, right-click for the network list](docs/demo/en/quick.webp)
 
+### Media, input mode and battery
+
+Next to the clock you'll find what's playing, with pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings.
+
+### New message alerts
+
+While the taskbar is hidden, when a program flashes on the taskbar (a new message, for example), an orange glow lights up in the middle of the bottom edge, and its icon in the mini taskbar turns orange. Both go away once you switch to it.
+
+### Open by resting the mouse on the edge
+
+Turn it on in Settings. While the taskbar is hidden, rest the mouse on the bottom edge of the screen (or the side the mini taskbar is on) and the mini taskbar appears without taking focus from your window. If you don't click it, it closes when the mouse moves away.
+
 ### Type to filter
 
 Start typing once it's open to filter windows and pinned apps. Programs from the Start menu show up too. Press Enter to open.
@@ -103,11 +115,14 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
 | Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the system's network list or Bluetooth device list (Bluetooth on Windows 10 opens Settings) |
+| Media buttons | Pause / play, previous, next |
+| Input mode | Click to switch between native and English input |
+| Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
 | Esc / click elsewhere | Close |
 
 ## Settings
 
-Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Appearance, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Appearance, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
 ![Settings grouped by page, with the language switching instantly](docs/demo/en/settings.webp)
 
@@ -128,6 +143,8 @@ Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini t
 - **Old games in exclusive full screen** cover the mini taskbar. Switch the game to borderless windowed.
 - **Brightness on external monitors** needs DDC/CI supported and turned on in the monitor; otherwise the slider is grayed out.
 - **Wi-Fi / Bluetooth button grayed out**: the adapter is turned off by a hardware switch or disabled in Device Manager. A radio the PC doesn't have isn't shown.
+- **Media** shows only what appears in the system's volume flyout (most browsers and players do).
+- **Input mode**: a few third-party IMEs manage Chinese / English themselves, so the indicator may be off and clicking may not switch. Use the IME's own shortcut then.
 - **Tray icons** are clicked for you in the system tray through UI Automation, which may miss for a few programs. If it does, try once with the diagnostic log on.
 - **The mini taskbar's glass background** is a snapshot from when it opened, so a video playing behind it won't move.
 - **Antivirus false positives**: the exe isn't signed and uses keyboard and mouse hooks (only to detect holding Win and your hotkeys; no keys are recorded or sent anywhere). Release builds are compiled from source by GitHub Actions. If it's blocked, allow it in Windows Security → Protection history.
@@ -162,6 +179,9 @@ Requires C++17. From the repository root:
 | `src/windows.cpp` | List windows, get icons |
 | `src/levels.cpp` | Volume and brightness |
 | `src/radios.cpp` | Wi-Fi and Bluetooth toggles |
+| `src/media.cpp` | Now playing |
+| `src/indicators.cpp` | Battery and input mode |
+| `src/attention.cpp` | New message alerts |
 | `src/elevation.cpp` | Run as administrator |
 | `src/update.cpp` | Update check |
 | `src/settings_dialog.cpp` | Settings window |

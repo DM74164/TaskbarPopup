@@ -40,12 +40,12 @@ constexpr float kRowPad = 14;  // 卡片里左右的边距
 constexpr float kChipH = 28;
 
 // 分类：左边导航一项一页
-enum Page { kPageTaskbar, kPageMini, kPageLook, kPageHotkeys, kPageStartup, kPageCount };
-const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"外观", L"快捷键", L"启动和更新"};
+enum Page { kPageTaskbar, kPageMini, kPageControls, kPageLook, kPageHotkeys, kPageStartup, kPageCount };
+const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"状态和控制", L"外观", L"快捷键", L"启动和更新"};
 
 // 开关
 enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
-             kAlwaysHide, kToggleCount };
+             kAlwaysHide, kFlashAlert, kEdgePopup, kMedia, kIme, kBattery, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -63,6 +63,11 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"自动检查更新", L"每天看一次 GitHub 上有没有新版本"},
     {L"每块屏幕分别设置位置和对齐", L"改的是设置窗口所在的那块屏幕"},
     {L"一直隐藏任务栏", L"没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出"},
+    {L"任务栏藏着时提醒新消息", L"程序闪烁时屏幕边亮起，迷你任务栏里的图标也变色"},
+    {L"鼠标停在屏幕边上时弹出", L"任务栏藏着时，鼠标在迷你任务栏那条边上停一下"},
+    {L"显示正在播放的媒体", L"暂停、上一首、下一首"},
+    {L"显示输入法中英文", L"点一下切换中英文"},
+    {L"显示电量", L"没有电池时不显示"},
 };
 
 // 滑块
@@ -378,7 +383,8 @@ float BuildPage(int page, float x, float y) {
         case kPageTaskbar: {
             y = AddGroup(x, y, L"全屏",
                          {[](float x, float y, float w) { return ToggleRow(kAutoHide, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kAlwaysHide, x, y, w); }});
+                          [](float x, float y, float w) { return ToggleRow(kAlwaysHide, x, y, w); },
+                          [](float x, float y, float w) { return ToggleRow(kFlashAlert, x, y, w); }});
             // “小窗口留在上面”关着时收起“在所有窗口上面”
             std::vector<RowFn> floats = {[](float x, float y, float w) { return ToggleRow(kKeepFloats, x, y, w); }};
             if (s_v.on[kKeepFloats]) floats.push_back([](float x, float y, float w) { return ToggleRow(kPinTopmost, x, y, w); });
@@ -389,17 +395,23 @@ float BuildPage(int page, float x, float y) {
             // 长按 Win 关着时收起长按时长
             std::vector<RowFn> popup = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
             if (s_v.on[kLongPress]) popup.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
+            popup.push_back([](float x, float y, float w) { return ToggleRow(kEdgePopup, x, y, w); });
             // 只有一块屏幕时不用选弹在哪块
             if (MultiScreen() || s_v.seg[kSegMonitor] != kPopupAtCursor)
                 popup.push_back([](float x, float y, float w) { return SegRow(kSegMonitor, x, y, w); });
             y = AddGroup(x, y, L"弹出", popup);
             std::vector<RowFn> show = {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
-                                       [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
-                                       [](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); },
                                        [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); }};
             if (s_v.on[kTray]) show.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });  // 托盘图标关着时收起样式
             return AddGroup(x, y, L"显示", show);
         }
+        case kPageControls:
+            return AddGroup(x, y, nullptr,
+                            {[](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
+                             [](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); },
+                             [](float x, float y, float w) { return ToggleRow(kMedia, x, y, w); },
+                             [](float x, float y, float w) { return ToggleRow(kIme, x, y, w); },
+                             [](float x, float y, float w) { return ToggleRow(kBattery, x, y, w); }});
         case kPageLook: {
             y = AddGroup(x, y, L"界面",
                          {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
@@ -1513,6 +1525,11 @@ void Apply() {
     if (changed(kLevels)) g_settings.showLevels = s_v.on[kLevels];
     if (changed(kRadios)) g_settings.showRadios = s_v.on[kRadios];
     if (changed(kTray)) g_settings.trayIcons = s_v.on[kTray];
+    if (changed(kFlashAlert)) g_settings.flashAlert = s_v.on[kFlashAlert];
+    if (changed(kEdgePopup)) g_settings.edgePopup = s_v.on[kEdgePopup];
+    if (changed(kMedia)) g_settings.showMedia = s_v.on[kMedia];
+    if (changed(kIme)) g_settings.showIme = s_v.on[kIme];
+    if (changed(kBattery)) g_settings.showBattery = s_v.on[kBattery];
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
     if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
@@ -1981,6 +1998,11 @@ void SettingsDialog_Show() {
     s_initial.on[kLevels] = g_settings.showLevels;
     s_initial.on[kRadios] = g_settings.showRadios;
     s_initial.on[kTray] = g_settings.trayIcons;
+    s_initial.on[kFlashAlert] = g_settings.flashAlert;
+    s_initial.on[kEdgePopup] = g_settings.edgePopup;
+    s_initial.on[kMedia] = g_settings.showMedia;
+    s_initial.on[kIme] = g_settings.showIme;
+    s_initial.on[kBattery] = g_settings.showBattery;
     s_initial.on[kAutoStart] = IsAutoStartEnabled();
     s_initial.on[kUpdates] = g_settings.checkUpdates;
     s_initial.slider[kLongPressMs] = g_settings.longPressMs;
