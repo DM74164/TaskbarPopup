@@ -38,7 +38,7 @@ target_compile_definitions(TaskbarPopup PRIVATE
 
 target_link_libraries(TaskbarPopup PRIVATE
     user32 gdi32 gdiplus shell32 comctl32 dwmapi shcore advapi32 ole32 uuid
-    oleaut32 dxva2 winhttp iphlpapi imm32)
+    oleaut32 dxva2 winhttp iphlpapi imm32 comdlg32)
 
 if(MSVC)
     target_compile_options(TaskbarPopup PRIVATE /utf-8 /W4)

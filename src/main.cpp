@@ -355,6 +355,54 @@ void EnsureUnicodeIni() {
     CloseHandle(h);
 }
 
+namespace {
+
+const wchar_t* const kModuleKeys[kModuleCount] = {L"windows", L"tray", L"media", L"ime", L"battery", L"clock"};
+
+// 模块的顺序：名字用逗号隔开。认不出的跳过，没写到的按默认顺序补在后面
+void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
+    bool used[kModuleCount] = {};
+    int n = 0;
+    for (size_t start = 0; start < text.size() && n < kModuleCount;) {
+        size_t end = text.find(L',', start);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring name = ToLower(text.substr(start, end - start));
+        for (int m = 0; m < kModuleCount; ++m)
+            if (name == kModuleKeys[m] && !used[m]) {
+                used[m] = true;
+                order[n++] = m;
+            }
+        start = end + 1;
+    }
+    for (int m = 0; m < kModuleCount; ++m)
+        if (!used[m]) order[n++] = m;
+}
+
+std::wstring ModuleOrderText(const int order[kModuleCount]) {
+    std::wstring text;
+    for (int i = 0; i < kModuleCount; ++i) text += (i ? L"," : L"") + std::wstring(kModuleKeys[order[i]]);
+    return text;
+}
+
+// 颜色存成 #RRGGBB
+std::wstring ColorText(COLORREF c) {
+    wchar_t text[16];
+    swprintf(text, 16, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return text;
+}
+
+COLORREF ParseColor(const std::wstring& text, COLORREF fallback) {
+    std::wstring hex = text;
+    if (!hex.empty() && hex[0] == L'#') hex.erase(0, 1);
+    if (hex.size() != 6 || hex.find_first_not_of(L"0123456789abcdefABCDEF") != std::wstring::npos) return fallback;
+    unsigned long v = wcstoul(hex.c_str(), nullptr, 16);
+    return RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+}
+
+int ClampOffset(int offset) { return std::clamp(offset, 0, kMaxPopupOffset); }
+
+}  // namespace
+
 void LoadSettings() {
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
@@ -370,6 +418,15 @@ void LoadSettings() {
     g_settings.showMedia = GetPrivateProfileIntW(L"General", L"ShowMedia", 1, f.c_str()) != 0;
     g_settings.showIme = GetPrivateProfileIntW(L"General", L"ShowIme", 1, f.c_str()) != 0;
     g_settings.showBattery = GetPrivateProfileIntW(L"General", L"ShowBattery", 1, f.c_str()) != 0;
+    g_settings.showClock = GetPrivateProfileIntW(L"General", L"ShowClock", 1, f.c_str()) != 0;
+    g_settings.clockSeconds = GetPrivateProfileIntW(L"General", L"ClockSeconds", 0, f.c_str()) != 0;
+    g_settings.clockWeekday = GetPrivateProfileIntW(L"General", L"ClockWeekday", 0, f.c_str()) != 0;
+    g_settings.clockDate = GetPrivateProfileIntW(L"General", L"ClockDate", 1, f.c_str()) != 0;
+    g_settings.showTitle = GetPrivateProfileIntW(L"General", L"ShowTitle", 1, f.c_str()) != 0;
+    g_settings.iconSize = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"General", L"IconSize", 100, f.c_str())),
+                                     kMinIconSize, kMaxIconSize);
+    g_settings.iconGap = std::clamp(
+        static_cast<int>(GetPrivateProfileIntW(L"General", L"IconGap", kDefaultIconGap, f.c_str())), 0, kMaxIconGap);
     g_settings.flashAlert = GetPrivateProfileIntW(L"General", L"FlashAlert", 1, f.c_str()) != 0;
     g_settings.edgePopup = GetPrivateProfileIntW(L"General", L"EdgePopup", 0, f.c_str()) != 0;
     g_settings.trayStyle = GetPrivateProfileIntW(L"General", L"TrayStyle", kTrayStacked, f.c_str()) == kTrayRow ? kTrayRow : kTrayStacked;
@@ -377,7 +434,8 @@ void LoadSettings() {
     int edge = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupEdge", kEdgeBottom, f.c_str()));
     g_settings.popupEdge = edge == kEdgeLeft || edge == kEdgeRight ? edge : kEdgeBottom;
     int align = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupAlign", kAlignSystem, f.c_str()));
-    g_settings.popupAlign = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
+    g_settings.popupAlign = align >= kAlignSystem && align <= kAlignCustom ? align : kAlignSystem;
+    g_settings.popupOffset = ClampOffset(static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupOffset", 500, f.c_str())));
     g_settings.popupMonitor =
         GetPrivateProfileIntW(L"General", L"PopupMonitor", kPopupAtCursor, f.c_str()) == kPopupAtActive ? kPopupAtActive
                                                                                                        : kPopupAtCursor;
@@ -410,6 +468,15 @@ void LoadSettings() {
     g_settings.glassTransparency = std::clamp(
         static_cast<int>(GetPrivateProfileIntW(L"General", L"GlassTransparency", kDefaultGlassTransparency, f.c_str())), 0, 100);
     std::vector<wchar_t> buf(32768);
+    auto text = [&](const wchar_t* key) {
+        GetPrivateProfileStringW(L"General", key, L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+        return std::wstring(buf.data());
+    };
+    ParseModuleOrder(text(L"ModuleOrder"), g_settings.moduleOrder);
+    g_settings.customTint = GetPrivateProfileIntW(L"General", L"CustomTint", 0, f.c_str()) != 0;
+    g_settings.tintColor = ParseColor(text(L"TintColor"), RGB(32, 32, 36));
+    g_settings.customAccent = GetPrivateProfileIntW(L"General", L"CustomAccent", 0, f.c_str()) != 0;
+    g_settings.accentColor = ParseColor(text(L"AccentColor"), RGB(0, 120, 212));
     for (int id = 0; id < kHotkeyCount; ++id) {
         GetPrivateProfileStringW(L"General", kHotkeyKeys[id], L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
         g_settings.hotkey[id] = ParseHotkey(buf.data());
@@ -433,7 +500,7 @@ void LoadSettings() {
     };
     loadList(L"ExcludeApps", g_settings.excludeApps);
     loadList(L"IncludeApps", g_settings.includeApps);
-    // 每块屏幕的位置和对齐：屏幕|边|对齐，用 ; 隔开
+    // 每块屏幕的位置和对齐：屏幕|边|对齐|自定义位置（以前的版本没有最后一项），用 ; 隔开
     GetPrivateProfileStringW(L"General", L"ScreenPlaces", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.screens.clear();
     std::wstring places = buf.data();
@@ -445,9 +512,11 @@ void LoadSettings() {
         if (b != std::wstring::npos && a > 0) {
             ScreenPlace p;
             p.key = ToLower(item.substr(0, a));
-            int edge = _wtoi(item.substr(a + 1, b - a - 1).c_str()), align = _wtoi(item.substr(b + 1).c_str());
+            size_t c = item.find(L'|', b + 1);
+            int edge = _wtoi(item.substr(a + 1, b - a - 1).c_str()), align = _wtoi(item.substr(b + 1, c - b - 1).c_str());
             p.edge = edge == kEdgeLeft || edge == kEdgeRight ? edge : kEdgeBottom;
-            p.align = align >= kAlignSystem && align <= kAlignRight ? align : kAlignSystem;
+            p.align = align >= kAlignSystem && align <= kAlignCustom ? align : kAlignSystem;
+            if (c != std::wstring::npos) p.offset = ClampOffset(_wtoi(item.substr(c + 1).c_str()));
             if (!FindScreenPlace(g_settings.screens, p.key)) g_settings.screens.push_back(p);
         }
         start = end + 1;
@@ -468,12 +537,25 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"ShowMedia", g_settings.showMedia ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowIme", g_settings.showIme ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowBattery", g_settings.showBattery ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowClock", g_settings.showClock ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ClockSeconds", g_settings.clockSeconds ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ClockWeekday", g_settings.clockWeekday ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ClockDate", g_settings.clockDate ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"ModuleOrder", ModuleOrderText(g_settings.moduleOrder).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"ShowTitle", g_settings.showTitle ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"IconSize", std::to_wstring(g_settings.iconSize).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"IconGap", std::to_wstring(g_settings.iconGap).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"CustomTint", g_settings.customTint ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"TintColor", ColorText(g_settings.tintColor).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"CustomAccent", g_settings.customAccent ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"AccentColor", ColorText(g_settings.accentColor).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"FlashAlert", g_settings.flashAlert ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"EdgePopup", g_settings.edgePopup ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"TrayStyle", std::to_wstring(g_settings.trayStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupScale", std::to_wstring(g_settings.popupScale).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupEdge", std::to_wstring(g_settings.popupEdge).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupAlign", std::to_wstring(g_settings.popupAlign).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupOffset", std::to_wstring(g_settings.popupOffset).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupMonitor", std::to_wstring(g_settings.popupMonitor).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupPerScreen", g_settings.popupPerScreen ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"Language", std::to_wstring(g_settings.language).c_str(), f.c_str());
@@ -503,8 +585,121 @@ void SaveSettings() {
     saveList(L"IncludeApps", g_settings.includeApps);
     std::wstring places;
     for (const ScreenPlace& p : g_settings.screens)
-        places += (places.empty() ? L"" : L";") + p.key + L"|" + std::to_wstring(p.edge) + L"|" + std::to_wstring(p.align);
+        places += (places.empty() ? L"" : L";") + p.key + L"|" + std::to_wstring(p.edge) + L"|" + std::to_wstring(p.align) +
+                  L"|" + std::to_wstring(p.offset);
     WritePrivateProfileStringW(L"General", L"ScreenPlaces", places.c_str(), f.c_str());
+}
+
+namespace {
+
+// 外观方案里存的键（和 [General] 里的同名）：材质、颜色、大小、模块、时钟、位置
+const wchar_t* const kLookKeys[] = {
+    L"GlassStyle",  L"Theme",       L"GlassTransparency", L"PopupRadius", L"PopupScale",   L"PopupLength", L"IconSize",
+    L"IconGap",     L"ShowTitle",   L"CustomTint",        L"TintColor",   L"CustomAccent", L"AccentColor", L"ModuleOrder",
+    L"TrayIcons",   L"TrayStyle",   L"ShowMedia",         L"ShowIme",     L"ShowBattery",  L"ShowClock",   L"ClockSeconds",
+    L"ClockWeekday", L"ClockDate",  L"ShowLevels",        L"ShowRadios",  L"PopupEdge",    L"PopupAlign",  L"PopupOffset"};
+
+std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
+
+// 把外观方案的键从一节抄到另一节，没有的键跳过
+void CopyLookKeys(const wchar_t* fromSection, const wchar_t* toSection) {
+    std::wstring f = SettingsFile();
+    wchar_t value[512];
+    for (const wchar_t* key : kLookKeys) {
+        DWORD n = GetPrivateProfileStringW(fromSection, key, L"\x01", value, ARRAYSIZE(value), f.c_str());
+        if (n == 1 && value[0] == L'\x01') continue;
+        WritePrivateProfileStringW(toSection, key, value, f.c_str());
+    }
+}
+
+bool SectionExists(const wchar_t* section, const std::wstring& file) {
+    wchar_t buf[4] = {};
+    return GetPrivateProfileSectionW(section, buf, ARRAYSIZE(buf), file.c_str()) > 0;
+}
+
+}  // namespace
+
+std::vector<int> LookPresets() {
+    std::vector<int> slots;
+    std::wstring f = SettingsFile();
+    for (int slot = 1; slot <= kMaxLookPresets; ++slot)
+        if (SectionExists(LookSection(slot).c_str(), f)) slots.push_back(slot);
+    return slots;
+}
+
+int SaveLookPreset(int slot) {
+    if (slot <= 0) {
+        std::vector<int> used = LookPresets();
+        for (slot = 1; slot <= kMaxLookPresets && std::find(used.begin(), used.end(), slot) != used.end(); ++slot) {
+        }
+        if (slot > kMaxLookPresets) return 0;
+    }
+    SaveSettings();
+    CopyLookKeys(L"General", LookSection(slot).c_str());
+    Log(L"存了外观方案 %d", slot);
+    return slot;
+}
+
+void ApplyLookPreset(int slot) {
+    if (!SectionExists(LookSection(slot).c_str(), SettingsFile())) return;
+    SaveSettings();
+    CopyLookKeys(LookSection(slot).c_str(), L"General");
+    LoadSettings();
+    ApplySettings();
+    Log(L"换上了外观方案 %d", slot);
+}
+
+void DeleteLookPreset(int slot) {
+    WritePrivateProfileStringW(LookSection(slot).c_str(), nullptr, nullptr, SettingsFile().c_str());
+}
+
+bool ExportSettings(const std::wstring& path) {
+    SaveSettings();
+    // 新建一个 UTF-16 的文件，再把 [General] 和外观方案各节抄过去（[State] 是程序自己记的状态，不导出）
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    const wchar_t bom = 0xFEFF;
+    DWORD written = 0;
+    bool ok = WriteFile(h, &bom, sizeof(bom), &written, nullptr) && written == sizeof(bom);
+    CloseHandle(h);
+    if (!ok) return false;
+    std::wstring f = SettingsFile();
+    std::vector<wchar_t> buf(65536);
+    std::vector<std::wstring> sections = {L"General"};
+    for (int slot : LookPresets()) sections.push_back(LookSection(slot));
+    for (const std::wstring& section : sections) {
+        DWORD n = GetPrivateProfileSectionW(section.c_str(), buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+        if (n > 0 && !WritePrivateProfileSectionW(section.c_str(), buf.data(), path.c_str())) return false;
+    }
+    Log(L"导出了设置：%ls", path.c_str());
+    return true;
+}
+
+bool ImportSettings(const std::wstring& path) {
+    std::vector<wchar_t> buf(65536);
+    DWORD n = GetPrivateProfileSectionW(L"General", buf.data(), static_cast<DWORD>(buf.size()), path.c_str());
+    if (n == 0) return false;  // 不是本程序的设置文件
+    EnsureUnicodeIni();
+    std::wstring f = SettingsFile();
+    for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+        std::wstring line = p;
+        size_t eq = line.find(L'=');
+        if (eq == std::wstring::npos || eq == 0) continue;
+        std::wstring key = line.substr(0, eq);
+        // 以管理员身份运行要配合计划任务、UAC，诊断日志是排查问题时临时开的：都跟着这台电脑，不导入
+        if (_wcsicmp(key.c_str(), L"RunAsAdmin") == 0 || _wcsicmp(key.c_str(), L"DebugLog") == 0) continue;
+        WritePrivateProfileStringW(L"General", key.c_str(), line.substr(eq + 1).c_str(), f.c_str());
+    }
+    for (int slot = 1; slot <= kMaxLookPresets; ++slot) {  // 外观方案整个换成文件里的
+        std::wstring section = LookSection(slot);
+        WritePrivateProfileStringW(section.c_str(), nullptr, nullptr, f.c_str());
+        DWORD len = GetPrivateProfileSectionW(section.c_str(), buf.data(), static_cast<DWORD>(buf.size()), path.c_str());
+        if (len > 0) WritePrivateProfileSectionW(section.c_str(), buf.data(), f.c_str());
+    }
+    LoadSettings();
+    ApplySettings();
+    Log(L"导入了设置：%ls", path.c_str());
+    return true;
 }
 
 bool GetRestoreAutoHideFlag() {

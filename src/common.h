@@ -41,7 +41,9 @@ enum GlassStyle { kGlassLiquid, kGlassWin11 };
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
-enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight };  // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右
+// 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右 / 自定义（编辑模式里拖到的位置，见 popupOffset）。
+// 竖排时只看是不是自定义，别的都是上下居中
+enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight, kAlignCustom };
 enum Language { kLangSystem, kLangChinese, kLangEnglish };  // 界面语言
 enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排
 enum PopupMonitor { kPopupAtCursor, kPopupAtActive };  // 迷你任务栏弹在哪块屏幕上：鼠标所在的 / 前台窗口所在的
@@ -50,11 +52,21 @@ struct ScreenPlace {
     std::wstring key;  // MonitorKey
     int edge = kEdgeBottom;
     int align = kAlignSystem;
+    int offset = 500;  // 自定义位置：面板中心在那条屏幕边上的千分之几处
 };
+inline bool operator==(const ScreenPlace& a, const ScreenPlace& b) {
+    return a.key == b.key && a.edge == b.edge && a.align == b.align && a.offset == b.offset;
+}
+// 迷你任务栏里能排顺序的模块（编辑模式里拖着换位置），开始按钮总在最前面；后面几样（输入法、电量、时钟）挨着时中间没有分隔线
+enum Module { kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock, kModuleCount };
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
 constexpr int kDefaultGlassTransparency = 60;  // 液态玻璃的透明度（0 – 100%），60 是原来的样子
+constexpr int kMaxPopupOffset = 1000;
+constexpr int kMinIconSize = 80, kMaxIconSize = 150;  // 图标大小，百分比
+constexpr int kMaxIconGap = 16;                       // 图标间距，像素（按 100% 大小算）
+constexpr int kDefaultIconGap = 4;
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool alwaysHideTaskbar = false;    // 一直隐藏任务栏：没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出
@@ -70,6 +82,7 @@ struct Settings {
     int popupLength = 0;         // 迷你任务栏的长度（横排是宽，竖排是高）：占那条屏幕边的千分之几，0 = 跟着内容
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
+    int popupOffset = 500;          // 自定义位置：面板中心在那条屏幕边上的千分之几处（横排从左数，竖排从上数）
     int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
     bool popupPerScreen = false;        // 每块屏幕分别设置位置和对齐（screens），没设过的屏幕用上面两项
     std::vector<ScreenPlace> screens;
@@ -90,6 +103,18 @@ struct Settings {
     bool showMedia = true;     // 迷你任务栏里显示正在播放的媒体（暂停、上一首、下一首）
     bool showIme = true;       // 迷你任务栏里显示输入法的中英文状态
     bool showBattery = true;   // 迷你任务栏里显示电量（没有电池时不显示）
+    bool showClock = true;     // 迷你任务栏里显示时钟
+    bool clockSeconds = false; // 时钟显示秒
+    bool clockWeekday = false; // 时钟显示星期
+    bool clockDate = true;     // 时钟显示日期
+    int moduleOrder[kModuleCount] = {kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock};  // 模块的顺序，见 Module
+    int iconSize = 100;               // 迷你任务栏的图标（格子）大小，百分比，在“大小”的基础上再乘
+    int iconGap = kDefaultIconGap;    // 格子之间的间距，像素（按 100% 大小算）
+    bool showTitle = true;            // 横排时顶上有一行显示名字；关掉时名字显示在面板上方的小牌子里
+    bool customTint = false;          // 迷你任务栏用自己选的底色（tintColor），不跟随深浅色
+    COLORREF tintColor = RGB(32, 32, 36);
+    bool customAccent = false;        // 用自己选的强调色（accentColor），不跟随系统
+    COLORREF accentColor = RGB(0, 120, 212);
     // 名单里是小写的程序文件名，如 notepad.exe。“最大化或全屏时隐藏任务栏”开着时用 excludeApps，关着时用 includeApps
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序
     std::vector<std::wstring> includeApps;  // 最大化时隐藏任务栏的程序
@@ -103,7 +128,11 @@ bool IsExceptionExe(const std::wstring& exeName);              // 在现在用�
 void SetException(const std::wstring& exeName, bool listed);  // 改现在用的名单、保存并重新判断要不要藏任务栏
 
 ScreenPlace* FindScreenPlace(std::vector<ScreenPlace>& list, const std::wstring& key);
-void PopupPlaceFor(HMONITOR monitor, int& edge, int& align);  // 迷你任务栏在这块屏幕上弹在哪条边、怎么对齐
+// 迷你任务栏在这块屏幕上弹在哪条边、怎么对齐，自定义位置时在边上的千分之几处
+void PopupPlaceFor(HMONITOR monitor, int& edge, int& align, int& offset);
+// 系统的强调色：深色时用浅一些的，浅色时用深一些的（和系统的开关一样）。读不到时是默认的蓝色
+Gdiplus::Color SystemAccent(bool light);
+float ColorLuma(COLORREF c);  // 0 – 255
 
 constexpr int kMinPopupScale = 50;
 constexpr int kMaxPopupScale = 200;
@@ -122,6 +151,15 @@ std::wstring SettingsFile();  // SettingsDir() 下的 settings.ini
 void EnsureUnicodeIni();      // 写 settings.ini 之前调用：保证它是 UTF-16 编码
 void LoadSettings();
 void SaveSettings();
+// 外观方案：设置文件里的 [Look1] ~ [Look8]，存着外观、模块和位置相关的那些键
+constexpr int kMaxLookPresets = 8;
+std::vector<int> LookPresets();  // 存着的方案编号，从小到大
+int SaveLookPreset(int slot);    // 把现在的外观存成第 slot 个方案（0 = 新的一个），返回编号，存满了返回 0
+void ApplyLookPreset(int slot);  // 换上第 slot 个方案（保存并生效）
+void DeleteLookPreset(int slot);
+// 设置导出成一个文件 / 从文件导入（导入后马上生效；以管理员身份运行、诊断日志这些跟着电脑走的不导入）
+bool ExportSettings(const std::wstring& path);
+bool ImportSettings(const std::wstring& path);
 bool IsAutoStartEnabled();
 void SetAutoStart(bool enabled);
 void ApplySettings();
@@ -343,8 +381,19 @@ void Popup_StartMenu(DWORD vk);
 // 设置窗口里调“迷你任务栏大小”“位置”“对齐”时按 percent、edge（PopupEdge）、align（PopupAlign）弹出预览
 // （不抢前台，点不到）。hold：还按着滑块，先不收起；否则过一会儿自己收起
 void Popup_Preview(int percent, int edge, int align, bool hold);
-// 预览用的外观：材质（GlassStyle）、浅色还是深色、液态玻璃的透明度、圆角。在 Popup_Preview 之前调用，预览开着时马上换上
-void Popup_PreviewGlass(int style, bool light, int transparency, int radius);
+// 预览用的外观。在 Popup_Preview 之前调用，预览开着时马上换上
+struct PopupLook {
+    int style = kGlassLiquid;  // GlassStyle
+    bool light = false;        // 浅色玻璃（自定义底色时按底色的深浅定）
+    int transparency = kDefaultGlassTransparency;
+    int radius = 22;
+    int iconSize = 100, iconGap = kDefaultIconGap;
+    bool showTitle = true;
+    bool customTint = false, customAccent = false;
+    COLORREF tint = 0, accent = 0;
+};
+PopupLook LookFromSettings();  // 现在的设置对应的外观
+void Popup_PreviewLook(const PopupLook& look);
 void Popup_EndPreview();  // 马上收起预览
 void Popup_Configure();   // 按设置开关“鼠标停在屏幕边上时弹出”
 void Popup_Refresh();     // 开着的话重画（比如要提醒的窗口变了）
@@ -432,6 +481,7 @@ void Radios_Stop();  // 退出前结束后台线程
 
 // ---------------- 设置窗口 ----------------
 void SettingsDialog_Show();
+void SettingsDialog_SettingsChanged();  // 在别处（迷你任务栏的编辑模式里）改了设置：窗口开着的话没动过的项跟着变
 
 // ---------------- 小窗口留在全屏窗口上面 ----------------
 void FloatWindows_Configure(bool enabled, bool topmost = false);  // topmost：固定的小窗口在所有窗口上面
@@ -501,6 +551,11 @@ public:
     int Style() const { return m_style; }
     // 液态玻璃的透明度（0 – 100%）：越透明着色越淡。默认 kDefaultGlassTransparency
     void SetTransparency(int percent) { m_transparency = percent; }
+    // 自己选的底色（着色），custom 为 false 时按深浅色用默认的
+    void SetTint(bool custom, COLORREF color) {
+        m_customTint = custom;
+        m_tint = color;
+    }
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
     // width×height：窗口像素大小；panel：面板在窗口里的位置；radius：圆角半径
@@ -530,6 +585,8 @@ private:
     bool m_light = false;
     int m_style = kGlassLiquid;
     int m_transparency = kDefaultGlassTransparency;
+    bool m_customTint = false;
+    COLORREF m_tint = 0;
 
     std::vector<Texel> m_texels;  // 面板静止时窗口里每个像素的材质
     int m_texW = 0, m_texH = 0;

@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find what's playing: its cover art and title above pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings.
+Next to the clock you'll find what's playing: its cover art and title above pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings; the clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 
@@ -86,15 +86,26 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. Corner radius and liquid glass transparency preview live as you change them.
-
-Set the size and length right on the mini taskbar: press F2 while it's open to enter edit mode, drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it, and press Enter or Esc when you're done.
+Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. The accent color follows Windows unless you pick your own, and the mini taskbar can have its own tint. Corner radius, transparency, icon size and spacing preview live as you change them. You can also turn off the title row; window names then show above the panel.
 
 ![Liquid glass, light or dark, transparency all preview live](docs/demo/en/appearance.webp)
 
+### Edit mode
+
+Press F2 while the mini taskbar is open to arrange it your way:
+
+- Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it.
+- Drag the tray icons, media, input mode, battery or clock to reorder them, or drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too.
+- Drag the window icons or empty space to slide the whole panel anywhere along the screen edge; it snaps to the center and the ends. Double-click to reset.
+- Right-click to choose what shows, or reset the order and position. Press Enter or Esc when you're done.
+
+### Presets and backup
+
+On the Presets & backup page in Settings, save the current look as a preset (up to 8) and switch back to it with one click: material, colors, size, position and which items show all change together. Export saves all your settings to a file; import it on a new PC to get everything back.
+
 ### Position and alignment
 
-Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge. At the bottom it can follow the system, or be centered, left or right aligned.
+Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge. At the bottom it can follow the system, or be centered, left or right aligned, and in edit mode you can drag it anywhere.
 
 ![The mini taskbar at the bottom, on the left or on the right](docs/demo/en/side.webp)
 
@@ -120,15 +131,16 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Media buttons | Pause / play, previous, next |
 | Input mode | Click to switch between native and English input |
 | Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
+| F2 | Enter or leave edit mode: drag edges to resize, items to reorder, empty space to move |
 | Esc / click elsewhere | Close |
 
 ## Settings
 
-Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Appearance, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Size & position, Appearance, Presets & backup, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
 ![Settings grouped by page, with the language switching instantly](docs/demo/en/settings.webp)
 
-**Multiple monitors**: the mini taskbar opens on the display with the mouse by default; on the Mini taskbar page you can make it open on the active window's display instead. If Windows is set to show taskbar apps only on the taskbar where the window is open, it lists only the windows on that display. Turn on "Set position for each display" on the Appearance page, and position and alignment apply to whichever display the Settings window is on. While the active window is maximized, other displays that also have a maximized window keep their taskbars hidden too, so switching between them no longer slides the taskbars back and forth.
+**Multiple monitors**: the mini taskbar opens on the display with the mouse by default; on the Mini taskbar page you can make it open on the active window's display instead. If Windows is set to show taskbar apps only on the taskbar where the window is open, it lists only the windows on that display. Turn on "Set position for each display" on the Size & position page, and position and alignment apply to whichever display the Settings window is on. While the active window is maximized, other displays that also have a maximized window keep their taskbars hidden too, so switching between them no longer slides the taskbars back and forth.
 
 "Auto-check for updates" is off by default. When on, it checks GitHub Releases once a day and only notifies you; it never downloads or installs anything by itself.
 

@@ -77,14 +77,37 @@ ScreenPlace* FindScreenPlace(std::vector<ScreenPlace>& list, const std::wstring&
     return nullptr;
 }
 
-void PopupPlaceFor(HMONITOR monitor, int& edge, int& align) {
+void PopupPlaceFor(HMONITOR monitor, int& edge, int& align, int& offset) {
     edge = g_settings.popupEdge;
     align = g_settings.popupAlign;
+    offset = g_settings.popupOffset;
     if (!g_settings.popupPerScreen) return;
     if (const ScreenPlace* p = FindScreenPlace(g_settings.screens, MonitorKey(monitor))) {
         edge = p->edge;
         align = p->align;
+        offset = p->offset;
     }
+}
+
+float ColorLuma(COLORREF c) { return 0.299f * GetRValue(c) + 0.587f * GetGValue(c) + 0.114f * GetBValue(c); }
+
+Gdiplus::Color SystemAccent(bool light) {
+    // 系统的强调色：AccentPalette 里从浅到深 8 个颜色，深色时用第 2 个（浅色 2），浅色时用第 5 个（深色 1）。
+    // 读注册表不算快，隔一会儿才重新读一次
+    static BYTE palette[32] = {};
+    static bool valid = false;
+    static DWORD readAt = 0;
+    DWORD now = GetTickCount();
+    if (!readAt || now - readAt > 2000) {
+        readAt = now ? now : 1;
+        DWORD size = sizeof(palette);
+        valid = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+                             L"AccentPalette", RRF_RT_REG_BINARY, nullptr, palette, &size) == ERROR_SUCCESS &&
+                size == sizeof(palette);
+    }
+    if (!valid) return light ? Gdiplus::Color(255, 0, 95, 184) : Gdiplus::Color(255, 96, 205, 255);
+    const BYTE* p = palette + (light ? 4 * 4 : 1 * 4);
+    return Gdiplus::Color(255, p[0], p[1], p[2]);
 }
 
 std::vector<std::wstring>& ExceptionApps() {

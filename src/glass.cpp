@@ -364,8 +364,14 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
     const int w = m_texW, h = m_texH;
     const bool win11 = m_style == kGlassWin11;
     // Win11 原版用系统亚克力的灰：深色 #202020，浅色 #F3F3F3，着色浓，背景只透出一点
-    const float tintL = win11 ? (m_light ? 243.0f : 32.0f) : (m_light ? 252.0f : 16.0f);
-    const float tint[3] = {tintL, tintL, win11 ? tintL : (m_light ? 255.0f : 20.0f)};
+    float tintL = win11 ? (m_light ? 243.0f : 32.0f) : (m_light ? 252.0f : 16.0f);
+    float tint[3] = {tintL, tintL, win11 ? tintL : (m_light ? 255.0f : 20.0f)};
+    if (m_customTint) {  // 自己选的底色（m_light 已经按它的深浅定了）
+        tint[0] = GetRValue(m_tint);
+        tint[1] = GetGValue(m_tint);
+        tint[2] = GetBValue(m_tint);
+        tintL = ColorLuma(m_tint);
+    }
     float tintAlpha = win11 ? (m_light ? 0.9f : 0.93f) : (m_light ? 0.36f : 0.38f);
     // 液态玻璃的透明度：默认（60%）时 k = 1；更透明时着色变淡，下面看得清文字的保底也跟着放松
     float guard = 1;
@@ -379,7 +385,9 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
     const float borderTo = m_light ? 0.0f : 255.0f, borderAlpha = (m_light ? 0.1f : 0.12f) / 255.0f;
     const float sheen = (m_light ? 0.12f : 0.07f) / 255.0f;
     // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清。Win11 原版要求更严
-    const float bound = win11 ? (m_light ? 0.82f * 255 : 0.2f * 255) : (m_light ? 0.72f * 255 : 0.30f * 255);
+    float bound = win11 ? (m_light ? 0.82f * 255 : 0.2f * 255) : (m_light ? 0.72f * 255 : 0.30f * 255);
+    // 自己选的底色本身就越过了这条线（比如偏亮的深色）：线跟着往外挪一点，不然下面的公式算反了
+    if (m_customTint) bound = m_light ? std::min(bound, tintL - 20) : std::max(bound, tintL + 20);
     // 窗口像素 → 背景截图里的坐标
     const int offX = origin.x - m_area.left, offY = origin.y - m_area.top;
 
