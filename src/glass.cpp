@@ -6,6 +6,8 @@
 //
 // 这些只和面板形状有关的量在 Prepare 里一次算好；动画的每一帧只需要按位移去背景里取色，
 // 面板滑动时背景保持不动，像一块真的玻璃在上面移动。
+// 毛玻璃是平的，只有一圈淡淡的亮边；Win11 原版照系统的亚克力：模糊得更厉害、系统的灰色着色、
+// 一点点颗粒，一圈 1 像素的细边框。
 #include "common.h"
 
 #include <cmath>
@@ -174,14 +176,29 @@ float SampleChannel(const std::vector<DWORD>& px, int w, int h, float x, float y
     return top + (bottom - top) * ty;
 }
 
-}  // namespace
-
-bool Glass::Shoot(const RECT& window, float scale, bool frosted, GlassShot& out, const GlassShot* same) {
-    // 多截一圈，模糊和边缘折射取样都不会碰到截图的边
+// 截图的范围：多截一圈，模糊和边缘折射取样都不会碰到截图的边；不超出窗口所在的屏幕
+RECT ShotArea(const RECT& window, float scale) {
     int pad = static_cast<int>(std::lround(28 * scale));
     RECT area = {window.left - pad, window.top - pad, window.right + pad, window.bottom + pad};
     MONITORINFO mi = {sizeof(mi)};
     if (GetMonitorInfoW(MonitorFromRect(&window, MONITOR_DEFAULTTONEAREST), &mi)) IntersectRect(&area, &area, &mi.rcMonitor);
+    return area;
+}
+
+// 原图 → 背景：缩小一半再模糊、提高饱和度，再放大回来（模糊得很厉害，看不出区别，快好几倍）
+void Process(GlassShot& out, float scale, int style) {
+    int hw = (out.w + 1) / 2, hh = (out.h + 1) / 2;
+    std::vector<DWORD> half = HalfSize(out.raw, out.w, out.h, hw, hh);
+    float radius = style == kGlassWin11 ? 9.0f : style == kGlassFrosted ? 7.0f : 3.5f;
+    Blur(half, hw, hh, std::max(1, static_cast<int>(std::lround(radius * scale))));
+    Saturate(half, style == kGlassWin11 ? 1.2f : 1.45f);
+    DoubleSize(half, hw, hh, out.blur, out.w, out.h);
+}
+
+}  // namespace
+
+bool Glass::Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassShot* same) {
+    RECT area = ShotArea(window, scale);
     out.area = area;
     out.w = std::max(0L, area.right - area.left);
     out.h = std::max(0L, area.bottom - area.top);
@@ -198,19 +215,34 @@ bool Glass::Shoot(const RECT& window, float scale, bool frosted, GlassShot& out,
     if (same && EqualRect(&same->area, &area) && same->raw.size() == out.raw.size() &&
         memcmp(same->raw.data(), out.raw.data(), out.raw.size() * sizeof(DWORD)) == 0)
         return false;
-    // 缩小一半再模糊、提高饱和度，再放大回来：模糊得很厉害，看不出区别，快好几倍
-    int hw = (out.w + 1) / 2, hh = (out.h + 1) / 2;
-    std::vector<DWORD> half = HalfSize(out.raw, out.w, out.h, hw, hh);
-    Blur(half, hw, hh, std::max(1, static_cast<int>(std::lround((frosted ? 7.0f : 3.5f) * scale))));
-    Saturate(half, 1.45f);
-    DoubleSize(half, hw, hh, out.blur, out.w, out.h);
+    Process(out, scale, style);
     return true;
 }
 
 void Glass::Capture(const RECT& window, float scale) {
     GlassShot shot;
-    Shoot(window, scale, m_frosted, shot);
+    Shoot(window, scale, m_style, shot);
     Adopt(std::move(shot), scale);
+}
+
+void Glass::Extend(const RECT& window) {
+    GlassShot shot;
+    shot.area = ShotArea(window, m_scale);
+    RECT inside;
+    if (!m_raw.empty() && IntersectRect(&inside, &shot.area, &m_area) && EqualRect(&inside, &shot.area)) return;
+    shot.w = std::max(0L, shot.area.right - shot.area.left);
+    shot.h = std::max(0L, shot.area.bottom - shot.area.top);
+    if (shot.w <= 0 || shot.h <= 0) return;
+    if (!CaptureScreen(shot.area, shot.raw)) shot.raw.assign(static_cast<size_t>(shot.w) * shot.h, 0xFF202024);
+    RECT old;
+    if (!m_raw.empty() && IntersectRect(&old, &shot.area, &m_area)) {
+        for (LONG y = old.top; y < old.bottom; ++y)
+            memcpy(&shot.raw[static_cast<size_t>(y - shot.area.top) * shot.w + (old.left - shot.area.left)],
+                   &m_raw[static_cast<size_t>(y - m_area.top) * m_w + (old.left - m_area.left)],
+                   static_cast<size_t>(old.right - old.left) * sizeof(DWORD));
+    }
+    Process(shot, m_scale, m_style);
+    Adopt(std::move(shot), m_scale);
 }
 
 void Glass::Adopt(GlassShot&& shot, float scale) {
@@ -224,10 +256,10 @@ void Glass::Adopt(GlassShot&& shot, float scale) {
 
 void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float radius) {
     if (!m_texels.empty() && width == m_texW && height == m_texH && radius == m_texRadius && m_scale == m_texScale &&
-        m_frosted == m_texFrosted && panel.Equals(m_texPanel))
+        m_style == m_texStyle && panel.Equals(m_texPanel))
         return;
     m_texScale = m_scale;
-    m_texFrosted = m_frosted;
+    m_texStyle = m_style;
     m_texW = std::max(0, width);
     m_texH = std::max(0, height);
     m_texPanel = panel;
@@ -238,6 +270,7 @@ void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float ra
     const float bevel = 18 * s;        // 边缘弯曲的宽度
     const float refraction = 14 * s;   // 最外缘的折射位移
     const float rimWidth = 1.3f * s;   // 高光细边的宽度
+    const float border = std::max(1.0f, std::round(s));  // Win11 原版的边框宽度
     const float shadowSigma = 11 * s, shadowDy = 6 * s;
     const float lx = -0.5f, ly = -0.866f;  // 光从左上方照过来
 
@@ -270,7 +303,11 @@ void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float ra
             if (!t.cover) continue;
 
             float depth = std::max(0.0f, -d);
-            if (m_frosted) {  // 毛玻璃：平的，只有一圈淡淡的亮边
+            if (m_style == kGlassWin11) {  // 平的，最外面一圈细边框（深色时亮一点，浅色时暗一点，Render 时再分）
+                t.light = static_cast<BYTE>(std::lround(Clamp01(border + 0.5f - depth) * 255));
+                continue;
+            }
+            if (m_style == kGlassFrosted) {  // 毛玻璃：平的，只有一圈淡淡的亮边
                 float rim = depth < 8 * rimWidth ? std::exp(-depth / rimWidth) : 0;
                 t.light = static_cast<BYTE>(std::lround(Clamp01(0.14f * rim) * 255));
                 continue;
@@ -330,17 +367,22 @@ void Glass::Render(DWORD* pixels, POINT origin, int slide, int slideX) const {
 
 void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int rowBegin, int rowEnd) const {
     const int w = m_texW, h = m_texH;
-    const float tintL = m_light ? 252.0f : 16.0f;
-    const float tint[3] = {tintL, tintL, m_light ? 255.0f : 20.0f};
-    float tintAlpha = m_frosted ? (m_light ? 0.58f : 0.62f) : (m_light ? 0.36f : 0.38f);
+    const bool win11 = m_style == kGlassWin11;
+    // Win11 原版用系统亚克力的灰：深色 #202020 上下，浅色 #F0F0F0 上下
+    const float tintL = win11 ? (m_light ? 240.0f : 30.0f) : (m_light ? 252.0f : 16.0f);
+    const float tint[3] = {tintL, tintL, win11 ? tintL + 2 : (m_light ? 255.0f : 20.0f)};
+    float tintAlpha = win11 ? (m_light ? 0.82f : 0.86f)
+                            : m_style == kGlassFrosted ? (m_light ? 0.58f : 0.62f) : (m_light ? 0.36f : 0.38f);
     // 液态玻璃的透明度：默认（60%）时 k = 1；更透明时着色变淡，下面看得清文字的保底也跟着放松
     float guard = 1;
-    if (!m_frosted) {
+    if (m_style == kGlassLiquid) {
         float k = (100 - std::clamp(m_transparency, 0, 100)) / static_cast<float>(100 - kDefaultGlassTransparency);
         tintAlpha = std::min(0.94f, tintAlpha * k);
         guard = std::min(1.0f, k);
     }
-    const float shadowAlpha = m_light ? 0.22f : 0.32f;
+    const float shadowAlpha = win11 ? (m_light ? 0.16f : 0.3f) : (m_light ? 0.22f : 0.32f);
+    // Win11 原版的边框：深色时叠白，浅色时叠黑
+    const float borderTo = m_light ? 0.0f : 255.0f, borderAlpha = (m_light ? 0.1f : 0.12f) / 255.0f;
     const float sheen = (m_light ? 0.12f : 0.07f) / 255.0f;
     // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清
     const float bound = m_light ? 0.72f * 255 : 0.30f * 255;
@@ -381,9 +423,17 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
             float light = std::min(1.0f, t.light / 255.0f + t.gloss * sheen), cover = t.cover / 255.0f;
             float a = cover + t.shadow * shadowAlpha / 255.0f * (1 - cover);
             DWORD out = static_cast<DWORD>(a * 255 + 0.5f) << 24;
+            float grain = 0;
+            if (win11) {  // 亚克力上一点点颗粒：按面板上的位置固定，滑动时跟着面板走
+                unsigned n = static_cast<unsigned>(tx) * 374761393u + static_cast<unsigned>(ty) * 668265263u;
+                n = (n ^ (n >> 13)) * 1274126177u;
+                grain = static_cast<float>(static_cast<int>((n ^ (n >> 16)) & 255u) - 128) * (2.5f / 128);
+                light = 0;
+            }
             for (int k = 0; k < 3; ++k) {
                 float col = c[k] + (tint[k] - c[k]) * ta;
                 col += (255 - col) * light;
+                if (win11) col += (borderTo - col) * (t.light * borderAlpha) + grain;
                 out |= static_cast<DWORD>(std::clamp(col * cover, 0.0f, 255.0f) + 0.5f) << (16 - 8 * k);
             }
             row[x] = out;

@@ -36,7 +36,7 @@ using std::min;
 namespace app {
 
 // ---------------- 设置 ----------------
-enum GlassStyle { kGlassLiquid, kGlassFrosted };            // 液态玻璃 / 毛玻璃
+enum GlassStyle { kGlassLiquid, kGlassFrosted, kGlassWin11 };  // 液态玻璃 / 毛玻璃 / Win11 原版（平的亚克力，细边框）
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
@@ -64,7 +64,8 @@ struct Settings {
     bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
     bool showRadios = true;      // 迷你任务栏里显示 Wi-Fi 和蓝牙开关
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
-    int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘）
+    int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘），拖面板的边改
+    int popupRadius = 22;        // 迷你任务栏的圆角半径，像素（按 100% 大小算）
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
     int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
@@ -105,6 +106,9 @@ void PopupPlaceFor(HMONITOR monitor, int& edge, int& align);  // 迷你任务栏
 constexpr int kMinPopupScale = 50;
 constexpr int kMaxPopupScale = 200;
 constexpr int kDefaultPopupScale = 100;
+constexpr int kMaxPopupRadius = 40;
+// 各材质默认的圆角：Win11 原版和系统的弹出面板一样是 8
+inline int DefaultPopupRadius(int style) { return style == kGlassWin11 ? 8 : 22; }
 
 extern HINSTANCE g_instance;
 extern HWND g_mainWnd;  // 隐藏的主消息窗口，托盘和计时器都挂在它上面
@@ -336,8 +340,8 @@ void Popup_StartMenu(DWORD vk);
 // 设置窗口里调“迷你任务栏大小”“位置”“对齐”时按 percent、edge（PopupEdge）、align（PopupAlign）弹出预览
 // （不抢前台，点不到）。hold：还按着滑块，先不收起；否则过一会儿自己收起
 void Popup_Preview(int percent, int edge, int align, bool hold);
-// 预览用的玻璃：毛玻璃还是液态玻璃、浅色还是深色、液态玻璃的透明度。在 Popup_Preview 之前调用，预览开着时马上换上
-void Popup_PreviewGlass(bool frosted, bool light, int transparency);
+// 预览用的外观：材质（GlassStyle）、浅色还是深色、液态玻璃的透明度、圆角。在 Popup_Preview 之前调用，预览开着时马上换上
+void Popup_PreviewGlass(int style, bool light, int transparency, int radius);
 void Popup_EndPreview();  // 马上收起预览
 void Popup_Configure();   // 按设置开关“鼠标停在屏幕边上时弹出”
 void Popup_Refresh();     // 开着的话重画（比如要提醒的窗口变了）
@@ -474,20 +478,24 @@ struct GlassShot {
 // 画出来的玻璃是不透明的（背景已经画进去了），所以要和截图时的屏幕位置对齐。
 class Glass {
 public:
-    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度（frosted：毛玻璃，模糊得更厉害）。
+    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度（style：GlassStyle，毛玻璃、Win11 原版模糊得更厉害）。
     // 不碰任何成员，可以在后台线程里调用。
     // same 不为空、范围相同、截到的和它一模一样（或者截图失败）时不做后面的处理，返回 false
-    static bool Shoot(const RECT& window, float scale, bool frosted, GlassShot& out, const GlassShot* same = nullptr);
+    static bool Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassShot* same = nullptr);
     // 截下 window（要画玻璃的窗口在屏幕上的位置）后面的背景，按现在的材质处理
     void Capture(const RECT& window, float scale);
+    // 背景换成更大的 window 后面的：旧截图范围里那块用旧的原图（窗口自己正盖在上面），其余从屏幕上截。
+    // 已经截过这么大就不再截
+    void Extend(const RECT& window);
     // 换上一张截好的背景
     void Adopt(GlassShot&& shot, float scale);
     const std::vector<DWORD>& Raw() const { return m_raw; }
     void SetLight(bool light) { m_light = light; }        // 浅色玻璃配深色文字，深色玻璃配浅色文字
     bool Light() const { return m_light; }
     void SetScale(float scale) { m_scale = scale; }  // 只换边缘、阴影等的尺寸，背景不重新截
-    void SetFrosted(bool frosted) { m_frosted = frosted; }  // 毛玻璃：没有边缘折射和高光，着色更浓
-    bool Frosted() const { return m_frosted; }
+    // 材质（GlassStyle）。毛玻璃：没有边缘折射和高光，着色更浓；Win11 原版：再模糊一些，系统的灰色着色，一圈细边框
+    void SetStyle(int style) { m_style = style; }
+    int Style() const { return m_style; }
     // 液态玻璃的透明度（0 – 100%）：越透明着色越淡。默认 kDefaultGlassTransparency
     void SetTransparency(int percent) { m_transparency = percent; }
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
@@ -503,7 +511,7 @@ private:
         float dx = 0, dy = 0;  // 折射：去背景的哪里取色（相对本像素，绿色通道的位移）
         BYTE cover = 0;        // 面板覆盖率
         BYTE shadow = 0;       // 阴影的不透明度
-        BYTE light = 0;        // 叠加的白光（边缘高光）
+        BYTE light = 0;        // 叠加的白光（边缘高光）；Win11 原版是边框的浓淡
         BYTE gloss = 0;        // 顶部光泽的位置权重，乘上深浅色各自的强度
         BYTE bevel = 0;        // 1 = 在边缘弯曲的一圈里，要折射取样
     };
@@ -517,7 +525,7 @@ private:
     int m_w = 0, m_h = 0;
     float m_scale = 1;
     bool m_light = false;
-    bool m_frosted = false;
+    int m_style = kGlassLiquid;
     int m_transparency = kDefaultGlassTransparency;
 
     std::vector<Texel> m_texels;  // 面板静止时窗口里每个像素的材质
@@ -525,7 +533,7 @@ private:
     Gdiplus::RectF m_texPanel;
     float m_texRadius = 0;
     float m_texScale = 0;
-    bool m_texFrosted = false;
+    int m_texStyle = -1;
 };
 
 // 按颜色选项（Theme）决定用不用浅色玻璃。taskbar：跟随系统时看“Windows 模式”（任务栏、开始菜单），

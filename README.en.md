@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find what's playing with its cover art, plus pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings.
+Next to the clock you'll find what's playing: its cover art and title above pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings.
 
 ### New message alerts
 
@@ -86,9 +86,11 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass or frosted glass and a system, light or dark theme. The mini taskbar's size (50 – 200%) and liquid glass transparency preview live as you change them.
+Choose liquid glass, frosted glass or the original Windows 11 look (the system's acrylic with a thin border), and a system, light or dark theme. Corner radius and liquid glass transparency preview live as you change them.
 
-![Liquid or frosted glass, light or dark, transparency and size all preview live](docs/demo/en/appearance.webp)
+Resize the mini taskbar like a window by dragging its edge (50 – 200%). Double-click the edge to reset it.
+
+![Liquid or frosted glass, light or dark, transparency all preview live](docs/demo/en/appearance.webp)
 
 ### Position and alignment
 

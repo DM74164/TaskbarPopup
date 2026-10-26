@@ -72,14 +72,14 @@ const ToggleText kToggleText[kToggleCount] = {
 
 // 滑块
 // kPopupHoldMs、kPinHoldMs = kPopupHoldMs + HotkeyId
-enum SliderId { kLongPressMs, kScale, kPopupHoldMs, kPinHoldMs, kGlassAlpha, kSliderCount };
+enum SliderId { kLongPressMs, kRadius, kPopupHoldMs, kPinHoldMs, kGlassAlpha, kSliderCount };
 struct SliderSpec {
     const wchar_t* label;
     int minValue, maxValue, step;
 };
 const SliderSpec kSliderSpec[kSliderCount] = {
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
-    {L"迷你任务栏大小", kMinPopupScale, kMaxPopupScale, 10},
+    {L"圆角", 0, kMaxPopupRadius, 2},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"透明度", 0, 100, 5},
@@ -92,7 +92,7 @@ struct SegSpec {
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
 };
 const SegSpec kSegSpec[kSegCount] = {
-    {L"材质", {L"液态玻璃", L"毛玻璃"}},
+    {L"材质", {L"液态玻璃", L"毛玻璃", L"Win11"}},  // 下标是 GlassStyle
     {L"颜色", {L"跟随系统", L"浅色", L"深色"}},
     {L"托盘图标", {L"小图标堆叠", L"横向完整展示"}},  // 下标是 TrayStyle
     {L"对齐", {L"跟随系统", L"居中", L"靠左", L"靠右"}},  // 下标是 PopupAlign
@@ -200,7 +200,7 @@ std::vector<RectF> s_cards;  // 每组的卡片
 struct Text {
     std::wstring text;
     RectF rect;
-    int style;  // 0 组标题，1 提示，2 标题，3 版本号，4 一行的名字
+    int style;  // 0 组标题，1 提示，2 标题，3 版本号，4 一行的名字，5 迷你任务栏现在的大小（画的时候再读，拖边改了也跟着变）
 };
 std::vector<Text> s_texts;
 struct SliderGeom {
@@ -252,7 +252,8 @@ bool SliderEnabled(int which) {
 
 std::wstring SliderText(int which) {
     wchar_t text[32];
-    if (which == kScale || which == kGlassAlpha) swprintf(text, 32, L"%d%%", s_v.slider[which]);
+    if (which == kGlassAlpha) swprintf(text, 32, L"%d%%", s_v.slider[which]);
+    else if (which == kRadius) swprintf(text, 32, Tr(L"%d 像素"), s_v.slider[which]);
     else swprintf(text, 32, Tr(L"%d 毫秒"), s_v.slider[which]);
     return text;
 }
@@ -370,6 +371,15 @@ float ChipsRow(float x, float y, float w) {
     return bottom + Px(36) - y;
 }
 
+// 迷你任务栏大小：拖它的边改，这里只说怎么改、现在多大
+float SizeRow(float x, float y, float w) {
+    float pad = Px(kRowPad);
+    s_texts.push_back({Tr(L"大小"), RectF(x + pad, y + Px(8), w - 2 * pad, Px(20)), 4});
+    s_texts.push_back({L"", RectF(x + pad, y + Px(8), w - 2 * pad, Px(20)), 5});
+    s_texts.push_back({Tr(L"拖迷你任务栏的边调整，双击边恢复"), RectF(x + pad, y + Px(29), w - 2 * pad, Px(18)), 3});
+    return Px(56);
+}
+
 // 每块屏幕分别设置时：说明现在改的是哪块屏幕
 float ScreenRow(float x, float y, float w) {
     std::wstring text = TrF(L"现在改的是%ls，把设置窗口拖到别的屏幕上就改那块", MonitorLabel(s_screen).c_str());
@@ -417,8 +427,8 @@ float BuildPage(int page, float x, float y) {
                          {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
                           [](float x, float y, float w) { return SegRow(kSegTheme, x, y, w); },
                           [](float x, float y, float w) { return SegRow(kSegLang, x, y, w); }});
-            std::vector<RowFn> place = {[](float x, float y, float w) { return SliderRow(kScale, x, y, w); }};
-            if (s_v.seg[kSegStyle] == kGlassLiquid)  // 毛玻璃时收起透明度
+            std::vector<RowFn> place = {SizeRow, [](float x, float y, float w) { return SliderRow(kRadius, x, y, w); }};
+            if (s_v.seg[kSegStyle] == kGlassLiquid)  // 只有液态玻璃能调透明度
                 place.push_back([](float x, float y, float w) { return SliderRow(kGlassAlpha, x, y, w); });
             if (MultiScreen() || s_v.on[kPerScreen])
                 place.push_back([](float x, float y, float w) { return ToggleRow(kPerScreen, x, y, w); });
@@ -448,7 +458,7 @@ void BuildLayout() {
     float navW = Px(kNavW);  // 导航按最长的名字放宽
     for (const wchar_t* name : kPageNames) navW = std::max(navW, MeasureWidth(Tr(name), Px(13.5f)) + Px(36));
     float panelW = Px(kPad) * 2 + navW + Px(kNavGap) + ColW();
-    s_radius = Px(22);
+    s_radius = Px(s_v.seg[kSegStyle] == kGlassWin11 ? 8.0f : 22.0f);
     float navX = margin + Px(kPad), contentX = navX + navW + Px(kNavGap);
     float top = margin + Px(kHeaderH);
 
@@ -836,6 +846,12 @@ void DrawContent(Graphics& g) {
                 break;
             case 2: DrawText(g, t.text, Px(17), FontStyleBold, t.rect, pal.text); break;
             case 4: DrawText(g, t.text, Px(13.5f), FontStyleRegular, t.rect, pal.text); break;
+            case 5: {
+                wchar_t size[16];
+                swprintf(size, 16, L"%d%%", g_settings.popupScale);
+                DrawText(g, size, Px(12.5f), FontStyleRegular, t.rect, pal.subtle, StringAlignmentFar);
+                break;
+            }
             default: DrawText(g, t.text, Px(11.5f), FontStyleRegular, t.rect, pal.subtle); break;
         }
     }
@@ -964,7 +980,7 @@ struct ShotJob {
     UINT seq;
     RECT window;
     float scale;
-    bool frosted;
+    int style;
     bool compare;    // 和 prev 比较，一样就不处理
     GlassShot prev;  // 只有 area 和 raw
     GlassShot shot;
@@ -1043,7 +1059,7 @@ void CaptureBehind() {
 
 DWORD WINAPI ShotThread(void* param) {
     auto* job = static_cast<ShotJob*>(param);
-    job->changed = Glass::Shoot(job->window, job->scale, job->frosted, job->shot, job->compare ? &job->prev : nullptr);
+    job->changed = Glass::Shoot(job->window, job->scale, job->style, job->shot, job->compare ? &job->prev : nullptr);
     if (!PostMessageW(job->hwnd, WM_APP_SHOT, 0, reinterpret_cast<LPARAM>(job))) delete job;
     return 0;
 }
@@ -1056,7 +1072,7 @@ bool StartShot() {
     LONG extra = s_moving ? static_cast<LONG>(std::lround(Px(320))) : 0;
     job->window = {s_pos.x - extra, s_pos.y - extra, s_pos.x + s_width + extra, s_pos.y + s_height + extra};
     job->scale = s_scale;
-    job->frosted = s_glass.Frosted();
+    job->style = s_glass.Style();
     job->compare = !s_moving;
     if (job->compare) {
         job->prev.area = s_glass.Area();
@@ -1114,7 +1130,7 @@ void OnShot(ShotJob* raw) {
         CloseHandle(s_shotThread);
         s_shotThread = nullptr;
     }
-    if (job->seq == s_shotSeq && job->frosted == s_glass.Frosted()) {
+    if (job->seq == s_shotSeq && job->style == s_glass.Style()) {
         if (job->changed) {
             s_glass.Adopt(std::move(job->shot), job->scale);
             s_baseValid = false;
@@ -1162,12 +1178,11 @@ void EndMove() {
     FollowScreen();
 }
 
-// 材质、颜色选项变了（或者系统换了深浅色）：换玻璃，毛玻璃模糊得更厉害，要重新截
+// 材质、颜色选项变了（或者系统换了深浅色）：换玻璃，各种材质模糊得不一样，要重新截
 void ApplyLook() {
     s_glass.SetLight(ThemeIsLight(s_v.seg[kSegTheme], false));
-    bool frosted = s_v.seg[kSegStyle] == kGlassFrosted;
-    if (frosted != s_glass.Frosted()) {
-        s_glass.SetFrosted(frosted);
+    if (s_v.seg[kSegStyle] != s_glass.Style()) {
+        s_glass.SetStyle(s_v.seg[kSegStyle]);
         if (s_hwnd && IsWindowVisible(s_hwnd)) CaptureBehind();  // 还没显示时打开窗口那里会截
     }
     s_baseValid = false;
@@ -1269,12 +1284,13 @@ void SetPage(int page) {
 }
 
 // 调这个滑块时弹出迷你任务栏预览
-bool PreviewsPopup(int which) { return which == kScale || which == kGlassAlpha; }
+bool PreviewsPopup(int which) { return which == kRadius || which == kGlassAlpha; }
 
-// 按窗口里现在选的大小、位置、对齐、材质、颜色和透明度弹出迷你任务栏预览。hold：还按着滑块，先不收起
+// 按窗口里现在选的位置、对齐、材质、颜色、透明度和圆角弹出迷你任务栏预览（大小是现在的）。hold：还按着滑块，先不收起
 void PreviewPopup(bool hold) {
-    Popup_PreviewGlass(s_v.seg[kSegStyle] == kGlassFrosted, ThemeIsLight(s_v.seg[kSegTheme], true), s_v.slider[kGlassAlpha]);
-    Popup_Preview(s_v.slider[kScale], s_v.seg[kSegEdge], s_v.seg[kSegAlign], hold);
+    Popup_PreviewGlass(s_v.seg[kSegStyle], ThemeIsLight(s_v.seg[kSegTheme], true), s_v.slider[kGlassAlpha],
+                       s_v.slider[kRadius]);
+    Popup_Preview(g_settings.popupScale, s_v.seg[kSegEdge], s_v.seg[kSegAlign], hold);
 }
 
 void SetSlider(int which, int value) {
@@ -1532,7 +1548,7 @@ void Apply() {
     if (changed(kBattery)) g_settings.showBattery = s_v.on[kBattery];
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
-    if (s_v.slider[kScale] != s_initial.slider[kScale]) g_settings.popupScale = s_v.slider[kScale];
+    if (s_v.slider[kRadius] != s_initial.slider[kRadius]) g_settings.popupRadius = s_v.slider[kRadius];
     if (s_v.slider[kGlassAlpha] != s_initial.slider[kGlassAlpha]) g_settings.glassTransparency = s_v.slider[kGlassAlpha];
     for (int i = 0; i < kHotkeyCount; ++i)
         if (s_v.slider[kPopupHoldMs + i] != s_initial.slider[kPopupHoldMs + i])
@@ -1584,8 +1600,12 @@ void Activate(const Item& it) {
     }
     switch (it.kind) {
         case kToggleRow: SetToggle(it.index, !s_v.on[it.index]); break;
-        case kSegment:
-            s_v.seg[it.index / kSegStride] = it.index % kSegStride;
+        case kSegment: {
+            int group = it.index / kSegStride, old = s_v.seg[group];
+            s_v.seg[group] = it.index % kSegStride;
+            // 换材质时圆角还是原来那种的默认值：跟着换成新材质的（Win11 原版是 8）
+            if (group == kSegStyle && s_v.slider[kRadius] == DefaultPopupRadius(old))
+                s_v.slider[kRadius] = DefaultPopupRadius(s_v.seg[group]);
             if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) StorePlace();
             ApplyLook();  // 马上换上看看效果，取消时不保存
             if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言看看，取消时换回去
@@ -1595,8 +1615,10 @@ void Activate(const Item& it) {
             // 竖排时收起对齐那一行；毛玻璃时收起透明度；换语言字的宽度变了
             if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegStyle || it.index / kSegStride == kSegLang)
                 Relayout(true);
-            if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) PreviewPopup(false);  // 弹在选的位置看看
+            if (group == kSegEdge || group == kSegAlign || group == kSegStyle || group == kSegTheme)
+                PreviewPopup(false);  // 弹在选的位置、换上选的样子看看
             break;
+        }
         case kHotkeyRow:
             if (s_capture == it.index) EndCapture();  // 再点一下不录了
             else StartCapture(it.index);
@@ -2006,7 +2028,7 @@ void SettingsDialog_Show() {
     s_initial.on[kAutoStart] = IsAutoStartEnabled();
     s_initial.on[kUpdates] = g_settings.checkUpdates;
     s_initial.slider[kLongPressMs] = g_settings.longPressMs;
-    s_initial.slider[kScale] = g_settings.popupScale;
+    s_initial.slider[kRadius] = g_settings.popupRadius;
     s_initial.slider[kGlassAlpha] = g_settings.glassTransparency;
     s_initial.seg[kSegStyle] = g_settings.glassStyle;
     s_initial.seg[kSegTheme] = g_settings.theme;

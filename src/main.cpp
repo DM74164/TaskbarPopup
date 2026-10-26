@@ -400,7 +400,9 @@ void LoadSettings() {
     g_settings.keepFloatsOnTop = GetPrivateProfileIntW(L"General", L"KeepFloatsOnTop", 1, f.c_str()) != 0;
     g_settings.pinTopmost = GetPrivateProfileIntW(L"General", L"PinTopmost", 0, f.c_str()) != 0;
     int style = static_cast<int>(GetPrivateProfileIntW(L"General", L"GlassStyle", kGlassLiquid, f.c_str()));
-    g_settings.glassStyle = style == kGlassFrosted ? kGlassFrosted : kGlassLiquid;
+    g_settings.glassStyle = style == kGlassFrosted || style == kGlassWin11 ? style : kGlassLiquid;
+    int radius = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupRadius", DefaultPopupRadius(g_settings.glassStyle), f.c_str()));
+    g_settings.popupRadius = std::max(0, std::min(radius, kMaxPopupRadius));
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
     g_settings.theme = theme == kThemeLight || theme == kThemeDark ? theme : kThemeSystem;
     g_settings.glassTransparency = std::clamp(
@@ -479,6 +481,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"KeepFloatsOnTop", g_settings.keepFloatsOnTop ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"PinTopmost", g_settings.pinTopmost ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupRadius", std::to_wstring(g_settings.popupRadius).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassTransparency", std::to_wstring(g_settings.glassTransparency).c_str(), f.c_str());
     for (int id = 0; id < kHotkeyCount; ++id) {
