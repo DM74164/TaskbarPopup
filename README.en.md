@@ -86,11 +86,11 @@ Set one hotkey to open the mini taskbar and one to pin a small window. Key combo
 
 ### Appearance
 
-Choose liquid glass, frosted glass or the original Windows 11 look (the system's acrylic with a thin border), and a system, light or dark theme. Corner radius and liquid glass transparency preview live as you change them.
+Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. Corner radius and liquid glass transparency preview live as you change them.
 
-Resize the mini taskbar like a window by dragging its edge (50 – 200%). Double-click the edge to reset it.
+Set the size and length right on the mini taskbar: press F2 while it's open to enter edit mode, drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it, and press Enter or Esc when you're done.
 
-![Liquid or frosted glass, light or dark, transparency all preview live](docs/demo/en/appearance.webp)
+![Liquid glass, light or dark, transparency all preview live](docs/demo/en/appearance.webp)
 
 ### Position and alignment
 

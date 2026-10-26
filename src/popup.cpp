@@ -13,7 +13,7 @@
 // 设置里打开“鼠标停在屏幕边上时弹出”时，任务栏藏着、鼠标在迷你任务栏那条边上停一下就弹出（不抢前台），
 // 没点过它、鼠标走开就收起。
 // 拖面板的边（不贴着屏幕的那几条）像拖窗口边框一样改变大小，双击边恢复原来的大小。
-// 材质有液态玻璃、毛玻璃和 Win11 原版（平的亚克力，细边框，高亮块是平的），圆角大小在设置里调。
+// 材质有液态玻璃和 Win11 原版（平的亚克力，细边框，高亮块是平的，字更清楚），圆角大小在设置里调。
 #include "common.h"
 
 #include <climits>
@@ -76,6 +76,15 @@ const Palette kLight = {Color(235, 18, 18, 22), Color(165, 18, 18, 22),    Color
                         Color(34, 0, 0, 0),     Color(16, 0, 0, 0),        Color(230, 255, 255, 255),
                         Color(150, 20, 20, 24), Color(255, 0, 95, 184),    Color(120, 255, 255, 255),
                         Color(55, 0, 0, 0),     Color(255, 255, 255, 255), Color(50, 0, 0, 0)};
+// Win11 原版：底色浓，字不透明、不加阴影，次要的字也深一些
+const Palette kWin11Dark = {Color(255, 255, 255, 255), Color(205, 255, 255, 255), Color(45, 255, 255, 255),
+                            Color(28, 255, 255, 255),  Color(14, 255, 255, 255),  Color(60, 255, 255, 255),
+                            Color(200, 255, 255, 255), Color(255, 96, 205, 255),  Color(0, 0, 0, 0),
+                            Color(90, 255, 255, 255),  Color(255, 69, 69, 69),    Color(70, 255, 255, 255)};
+const Palette kWin11Light = {Color(255, 26, 26, 26),   Color(195, 26, 26, 26),    Color(40, 0, 0, 0),
+                             Color(26, 0, 0, 0),       Color(10, 0, 0, 0),        Color(200, 255, 255, 255),
+                             Color(150, 26, 26, 26),   Color(255, 0, 95, 184),    Color(0, 0, 0, 0),
+                             Color(70, 0, 0, 0),       Color(255, 255, 255, 255), Color(45, 0, 0, 0)};
 
 // 一个格子：打开的窗口，或者固定了但还没运行的应用
 struct Tile {
@@ -154,14 +163,17 @@ int s_previewTransparency = kDefaultGlassTransparency;
 int s_edge = kEdgeBottom;           // 这次弹在哪条边（弹出时按设置定下来）
 int s_align = kAlignSystem;         // 这次在底边时怎么对齐（弹出时按设置定下来）
 double s_shownAt = 0;      // 这次弹出的时间
-// 拖面板的边改变大小
+// 编辑模式（弹出后按 F2）：拖面板的边改大小（粗细）和长度，别的点击不管用，回车、Esc 或再按 F2 退出
+bool s_editing = false;
 enum ResizeEdge { kResizeLeft = 1, kResizeTop = 2, kResizeRight = 4, kResizeBottom = 8 };
 int s_resize = 0;          // 正在拖的边（ResizeEdge 组合），0 = 没在拖
-int s_resizeFrom = 100;    // 开始拖时的大小（百分比）
-float s_resizeDist = 1;    // 开始拖时鼠标离固定的那一点多远
-DWORD s_edgeClickAt = 0;   // 上一次在边上按下的时间和位置：双击边恢复原来的大小
+int s_resizeFrom = 100;    // 开始拖时的大小（百分比）和长度（千分之几）
+int s_resizeLenFrom = 0;
+float s_resizeDist = 1;    // 开始拖时鼠标离固定的那条屏幕边多远（改大小用）
+float s_resizeLen = 0;     // 开始拖时面板的长度，像素（改长度用）
+POINT s_resizeAt = {};     // 开始拖时鼠标在屏幕上的位置
+DWORD s_edgeClickAt = 0;   // 上一次在边上按下的时间和位置：双击边恢复
 POINT s_edgeClickPt = {};
-bool s_swallowUp = false;  // 双击边恢复了大小：面板变了，接下来松开鼠标时光标下的东西不算点到
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
 double s_animStart = 0;
@@ -266,15 +278,24 @@ float PopupScale(HMONITOR monitor) {
     return MonitorScale(monitor) * (s_preview ? s_previewPercent : g_settings.popupScale) / 100.0f;
 }
 
-const Palette& Colors() { return s_glass.Light() ? kLight : kDark; }
-
 bool Win11Style() { return s_glass.Style() == kGlassWin11; }
+
+const Palette& Colors() {
+    if (Win11Style()) return s_glass.Light() ? kWin11Light : kWin11Dark;
+    return s_glass.Light() ? kLight : kDark;
+}
 
 // 圆角半径（像素，按 100% 大小算）
 int PopupRadius() { return s_preview ? s_previewRadius : g_settings.popupRadius; }
 
 // 弹在屏幕左右两边：竖着排，从侧边滑出来
 bool Vertical() { return s_edge != kEdgeBottom; }
+
+// 面板贴着的那条屏幕边有多长（横排是宽，竖排是高）
+float ScreenSide() { return static_cast<float>(Vertical() ? s_bounds.bottom - s_bounds.top : s_bounds.right - s_bounds.left); }
+
+// 编辑模式里拖出来的面板长度（像素），0 = 跟着内容
+float CustomLength() { return g_settings.popupLength > 0 ? ScreenSide() * g_settings.popupLength / kMaxPopupLength : 0; }
 
 void ComputeLayout() {
     Layout& L = s_L;
@@ -338,8 +359,11 @@ void ComputeLayout() {
         // 从上到下：开始按钮、格子、托盘图标、媒体按钮、输入法、电量、时钟、两根竖的调节条、Wi-Fi 和蓝牙按钮
         float radiosH = s_radioCount > 0 ? Px(8) + s_radioCount * L.radioH + (s_radioCount - 1) * L.radioGap : 0;
         float extras = L.mediaH + mediaSep + L.imeH + L.battH;
-        // 屏幕不够高时至少留一个窗口格子：托盘图标少显示几个（多的滚着看），还不够就把调节条变短
-        float room = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - L.tile -
+        // 面板最长多长：拖过长度就是那么长（不超过屏幕），否则是屏幕高的九成
+        float custom = CustomLength(), screen = ScreenSide() - 2 * L.margin;
+        float maxLen = custom > 0 ? std::min(custom, screen) : ScreenSide() * 0.9f - 2 * L.margin;
+        // 不够长时至少留一个窗口格子：托盘图标少显示几个（多的滚着看），还不够就把调节条变短
+        float room = maxLen - L.tile -
                      (2 * L.pad + L.tile + 2 * L.sep + traySep + extras + L.clockH + L.rowGap + L.sliderH + radiosH);
         if (s_trayStyle == kTrayRow && trayCount > 0 && L.trayW > room) {
             s_trayRowMax = std::clamp(static_cast<int>(room / L.cellH), 1, kMaxTrayRow);
@@ -349,12 +373,13 @@ void ComputeLayout() {
         s_trayFirst = std::clamp(s_trayFirst, 0, std::max(0, trayCount - s_trayRowMax));
         float others =
             2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockH + L.rowGap + L.sliderH + radiosH;
-        float avail = (s_bounds.bottom - s_bounds.top) * 0.9f - 2 * L.margin - others;
+        float avail = std::max(L.tile, maxLen - others);
         s_visible = std::min(n, std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap))));
-        if (s_lockedItemsW > 0)
+        if (s_lockedItemsW > 0 && custom <= 0)
             s_visible = std::min(n, std::max(1, static_cast<int>((s_lockedItemsW + L.gap) / (L.tile + L.gap))));
         float tilesH = n == 0 ? L.emptyW : s_visible * (L.tile + L.gap) - L.gap;
-        L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : tilesH;
+        if (custom > 0) L.itemsW = std::max(avail, tilesH);  // 拖过长度：格子那段占满，格子在中间
+        else L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : tilesH;
         L.panelW = 2 * L.pad + L.tile;
         L.panelH = others + L.itemsW;
         L.panelX = s_edge == kEdgeLeft ? L.margin : L.bubbleW + L.margin;
@@ -386,19 +411,23 @@ void ComputeLayout() {
     }
 
     float extras = L.mediaW + mediaSep + L.imeW + L.battW;
-    float fixed = 2 * L.margin + 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockW;
-    float avail = (s_bounds.right - s_bounds.left) * 0.85f - fixed;
+    float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockW;
+    // 面板最长多长：拖过长度就是那么长（至少放得下一个格子和调节条，不超过屏幕），否则是屏幕宽的八成五
+    float custom = CustomLength();
+    float maxLen = ScreenSide() * 0.85f - 2 * L.margin;
+    if (custom > 0) maxLen = std::max(std::max(L.minPanelW, others + L.tile), std::min(custom, ScreenSide() - 2 * L.margin));
+    float avail = maxLen - others;
     int maxFit = std::max(1, static_cast<int>((avail + L.gap) / (L.tile + L.gap)));
     s_visible = std::min(n, maxFit);
 
     // 格子少的时候面板按最小宽度来，格子在中间那段里居中
-    float others = 2 * L.pad + L.tile + 2 * L.sep + traySep + L.trayW + extras + L.clockW;
-    if (s_lockedItemsW > 0) {
+    if (s_lockedItemsW > 0 && custom <= 0) {
         int fit = std::max(1, static_cast<int>((s_lockedItemsW + L.gap) / (L.tile + L.gap)));
         s_visible = std::min(n, fit);
     }
     float tilesW = n == 0 ? L.emptyW : s_visible * (L.tile + L.gap) - L.gap;
-    L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : std::max(tilesW, L.minPanelW - others);
+    if (custom > 0) L.itemsW = std::max(avail, tilesW);  // 拖过长度：格子那段占满，格子在中间
+    else L.itemsW = s_lockedItemsW > 0 ? s_lockedItemsW : std::max(tilesW, L.minPanelW - others);
     L.panelW = others + L.itemsW;
     L.panelH = 2 * L.pad + L.titleH + L.tile + L.rowGap + L.sliderH;
     L.panelX = L.panelY = L.margin;
@@ -1310,6 +1339,9 @@ void DrawBubble(Graphics& g, float anchorY, const std::wstring& title, const Fon
     }
 }
 
+void DrawEditFrame(Graphics& g);
+std::wstring SizeText();
+
 void DrawContent(Graphics& g) {
     const Layout& L = s_L;
     const Palette& pal = Colors();
@@ -1327,7 +1359,8 @@ void DrawContent(Graphics& g) {
     // 顶部一行显示鼠标所指或选中项的标题；在调节条上时显示音量 / 亮度
     std::wstring title;
     int shown = s_hover >= 0 ? s_hover : s_sel;
-    if (s_resize) title = TrF(L"大小 %d%%", g_settings.popupScale);
+    if (s_resize) title = SizeText();
+    else if (s_editing) title = Tr(L"拖边调整，双击边恢复，回车完成");
     else if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
     else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
     else if (s_hoverRadio >= 0) title = RadioText(s_radioIds[s_hoverRadio]);
@@ -1344,9 +1377,9 @@ void DrawContent(Graphics& g) {
         // 竖排：标题在面板旁边的小牌子上，对着它说的那一项。打字筛选时只在指着或选了一项时显示名字；
         // 开始菜单模式只在鼠标指着时显示
         bool pointing = s_hover >= 0 || s_hoverTray >= 0 || s_overTray || s_hoverControl != kNone || s_drag != kNone ||
-                        s_hoverRadio >= 0 || s_hoverExtra != kExtraNone || s_resize;
+                        s_hoverRadio >= 0 || s_hoverExtra != kExtraNone || s_editing;
         float anchorY = L.itemsY + L.tile / 2;
-        if (s_resize) {
+        if (s_editing) {
             anchorY = L.startY + L.tile / 2;
         } else if (s_drag != kNone || s_hoverControl != kNone) {
             const Slider& sl = s_sliders[SliderOf(s_drag != kNone ? s_drag : s_hoverControl)];
@@ -1366,11 +1399,11 @@ void DrawContent(Graphics& g) {
             RectF r = TileRect(shown);
             anchorY = r.Y + r.Height / 2;
         }
-        if (!s_filter.empty() && !(s_hover >= 0 || s_sel > 0)) title.clear();
+        if (!s_filter.empty() && !(s_hover >= 0 || s_sel > 0) && !s_editing) title.clear();
         if (!s_compact || pointing) DrawBubble(g, anchorY, title, titleFont);
     } else if (L.titleH <= 0) {
         // 开始菜单模式没有标题这一行
-    } else if (!s_filter.empty()) {
+    } else if (!s_filter.empty() && !s_editing) {
         // 打字筛选：左边一个搜索框显示打的字，右边是选中项的名字
         float boxW = SearchBoxWidth(g, titleFont, titleRect.Width * 0.5f);
         RectF box(titleRect.X - Px(6), titleRect.Y + Px(2), boxW, titleRect.Height - Px(4));
@@ -1435,7 +1468,11 @@ void DrawContent(Graphics& g) {
     if (vertical) swprintf(clock, 64, L"%02d:%02d\n%d/%d", st.wHour, st.wMinute, st.wMonth, st.wDay);
     else swprintf(clock, 64, L"%02d:%02d\n%d/%d/%d", st.wHour, st.wMinute, st.wYear, st.wMonth, st.wDay);
     RectF clockRect = vertical ? RectF(L.panelX, L.clockY, L.panelW, L.clockH) : RectF(L.clockX, L.tileY, L.clockW, L.tile);
-    DrawLabel(g, clock, smallFont, clockRect, center, pal.text);
+    // 不自动换行：有些大小下日期刚好比时钟那块宽一点点，会被折成两行
+    StringFormat clockFormat(StringFormatFlagsNoWrap | StringFormatFlagsNoClip);
+    clockFormat.SetAlignment(StringAlignmentCenter);
+    clockFormat.SetLineAlignment(StringAlignmentCenter);
+    DrawLabel(g, clock, smallFont, clockRect, clockFormat, pal.text);
     DrawMedia(g);
     DrawIme(g, center);
     DrawBattery(g, smallFont, center);
@@ -1445,6 +1482,7 @@ void DrawContent(Graphics& g) {
         DrawSlider(g, 1);
     }
     DrawRadios(g);
+    if (s_editing) DrawEditFrame(g);
 }
 
 void ReleaseCanvas() {
@@ -1494,7 +1532,7 @@ void HideThumb() {
 
 // 鼠标所指的格子（用键盘选时是选中的格子）是打开的窗口时显示它的缩略图；弹出、收起动画期间和右键菜单开着时不显示
 int ThumbIndex() {
-    if (!s_open || s_anim != Anim::None || s_drag != kNone || s_resize || s_menuOpen || s_startMode) return -1;  // 开始菜单会盖住缩略图
+    if (!s_open || s_anim != Anim::None || s_drag != kNone || s_editing || s_menuOpen || s_startMode) return -1;  // 开始菜单会盖住缩略图
     int idx = s_hover >= 0 ? s_hover : s_keyNav ? s_sel : -1;
     if (idx <= 0 || idx > ItemCount() || !IsTileVisible(idx) || !IsWindow(s_items[idx - 1].hwnd)) return -1;
     return idx;
@@ -1565,7 +1603,8 @@ void Render(float slide, BYTE alpha) {
         Bitmap canvas(s_width, s_height, s_width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(s_bits));
         Graphics g(&canvas);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
-        g.SetTextRenderingHint(TextRenderingHintAntiAlias);
+        // Win11 原版的字贴着像素画，小字更清楚
+        g.SetTextRenderingHint(Win11Style() ? TextRenderingHintAntiAliasGridFit : TextRenderingHintAntiAlias);
         g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
         g.SetPixelOffsetMode(PixelOffsetModeHalf);
         g.TranslateTransform(static_cast<REAL>(dx), static_cast<REAL>(dy));
@@ -1619,6 +1658,7 @@ void EndResize();
 
 void HideNow() {
     EndResize();
+    s_editing = false;
     HideThumb();
     EndStartMode();
     EndTrayMode();
@@ -2300,7 +2340,7 @@ void WatchStart() {
 void WatchEdge();
 void WatchHoverLeave();
 
-// ---- 拖边改变大小 ----
+// ---- 编辑模式：拖边改大小和长度 ----
 
 // 按最大的大小，迷你任务栏那条屏幕边上一整条：大小一直在变（预览、拖边）时背景截这么大，变大小时不用再截
 RECT GrowArea() {
@@ -2312,12 +2352,26 @@ RECT GrowArea() {
     return {b.left, b.bottom - h, b.right, b.bottom};
 }
 
-// 鼠标下是面板的哪几条边（ResizeEdge 组合）：边外的阴影里和边里各算几像素。贴着屏幕的那条边、
-// 靠屏幕一侧对齐时那一侧的边不动，不能拖
+// 改大小（粗细）的边：横排是上边，竖排是里侧的边；改长度的边：横排是左右两边，竖排是上下两边
+int ScaleEdges() { return Vertical() ? (s_edge == kEdgeLeft ? kResizeRight : kResizeLeft) : kResizeTop; }
+int LengthEdges() { return Vertical() ? (kResizeTop | kResizeBottom) : (kResizeLeft | kResizeRight); }
+
+// 能拖的边：靠屏幕一侧对齐时那一侧不动
+int ResizableEdges() {
+    int edges = ScaleEdges() | LengthEdges();
+    if (!Vertical()) {
+        int align = EffectiveAlign();
+        if (align == kAlignLeft) edges &= ~kResizeLeft;
+        else if (align == kAlignRight) edges &= ~kResizeRight;
+    }
+    return edges;
+}
+
+// 编辑模式里鼠标下是面板的哪几条边（ResizeEdge 组合）：边外的阴影里和边里各算几像素，两条边挨着的角上两条都算
 int ResizeEdgeAt(int x, int y) {
-    if (!s_open || s_preview || s_compact || s_anim != Anim::None) return 0;
+    if (!s_editing || s_anim != Anim::None) return 0;
     const Layout& L = s_L;
-    float out = Px(6), in = Px(3);
+    float out = Px(8), in = Px(14);
     float left = L.panelX, top = L.panelY, right = L.panelX + L.panelW, bottom = L.panelY + L.panelH;
     if (x < left - out || x > right + out || y < top - out || y > bottom + out) return 0;
     int edges = 0;
@@ -2325,15 +2379,7 @@ int ResizeEdgeAt(int x, int y) {
     if (x > right - in) edges |= kResizeRight;
     if (y < top + in) edges |= kResizeTop;
     if (y > bottom - in) edges |= kResizeBottom;
-    if (Vertical()) {
-        edges &= ~(s_edge == kEdgeLeft ? kResizeLeft : kResizeRight);
-    } else {
-        edges &= ~kResizeBottom;
-        int align = EffectiveAlign();
-        if (align == kAlignLeft) edges &= ~kResizeLeft;
-        else if (align == kAlignRight) edges &= ~kResizeRight;
-    }
-    return edges;
+    return edges & ResizableEdges();
 }
 
 LPCWSTR ResizeCursor(int edges) {
@@ -2342,28 +2388,36 @@ LPCWSTR ResizeCursor(int edges) {
     return v ? IDC_SIZENS : IDC_SIZEWE;
 }
 
-// 拖边时大小按鼠标离固定点的距离成比例变（pt 是屏幕坐标）。横排拖上边（或上面两个角）看离屏幕底边多高，
-// 拖左右边看离中线（靠一侧对齐时离那一侧）多远；竖排拖里侧的边看离屏幕边多远，拖上下边看离中线多远
-float ResizeDistance(POINT pt) {
+// 改大小：按鼠标离固定的那条屏幕边的距离成比例变（pt 是屏幕坐标）
+float ScaleDistance(POINT pt) {
     const RECT& b = s_bounds;
-    if (Vertical()) {
-        if (s_resize & (kResizeLeft | kResizeRight))
-            return static_cast<float>(s_edge == kEdgeLeft ? pt.x - b.left : b.right - pt.x);
-        return std::fabs(pt.y - (b.top + b.bottom) / 2.0f);
-    }
-    if (s_resize & kResizeTop) return static_cast<float>(b.bottom - pt.y);
-    int align = EffectiveAlign();
-    if (align == kAlignLeft) return static_cast<float>(pt.x - b.left);
-    if (align == kAlignRight) return static_cast<float>(b.right - pt.x);
-    return std::fabs(pt.x - (b.left + b.right) / 2.0f);
+    if (Vertical()) return static_cast<float>(s_edge == kEdgeLeft ? pt.x - b.left : b.right - pt.x);
+    return static_cast<float>(b.bottom - pt.y);
 }
 
-// 换个大小马上按新大小重新排、重画（图标还是弹出时读的，缩放着画）。变大时最多大到屏幕放得下
-void SetPopupScale(int percent) {
-    int was = g_settings.popupScale;
+// 改长度：拖的那条边跟着鼠标走，居中时（竖排一直是上下居中）另一头一起动
+float LengthAt(POINT pt) {
+    bool centered = Vertical() || EffectiveAlign() == kAlignCenter;
+    float d = static_cast<float>(Vertical() ? pt.y - s_resizeAt.y : pt.x - s_resizeAt.x);
+    if (s_resize & LengthEdges() & (kResizeLeft | kResizeTop)) d = -d;
+    return s_resizeLen + (centered ? 2 : 1) * d;
+}
+
+// 标题上显示的大小和长度
+std::wstring SizeText() {
+    if (g_settings.popupLength <= 0) return TrF(L"大小 %d%%，长度自动", g_settings.popupScale);
+    return TrF(L"大小 %d%%，长度 %d%%", g_settings.popupScale, (g_settings.popupLength + 5) / 10);
+}
+
+// 换个大小、长度马上重新排、重画（图标还是弹出时读的，缩放着画）。变大时最多大到屏幕放得下。
+// fit：在拖长度，记成面板实际的长度（拖得太短时内容放不下，按放得下的算）
+void SetPopupSize(int percent, int length, bool fit = false) {
+    int was = g_settings.popupScale, wasLen = g_settings.popupLength;
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
-    if (percent == was) return;
+    length = std::clamp(length, 0, kMaxPopupLength);
+    if (percent == was && length == wasLen) return;
     float old = s_scale, locked = s_lockedItemsW;
+    g_settings.popupLength = length;
     for (;; --percent) {
         g_settings.popupScale = percent;
         s_scale = PopupScale(s_monitor);
@@ -2372,7 +2426,13 @@ void SetPopupScale(int percent) {
         if (percent <= was || (s_width <= s_bounds.right - s_bounds.left && s_height <= s_bounds.bottom - s_bounds.top))
             break;
     }
-    if (percent == was) {
+    if (fit && length > 0) {
+        float actual = Vertical() ? s_L.panelH : s_L.panelW;
+        g_settings.popupLength = std::clamp(static_cast<int>(std::lround(actual / ScreenSide() * kMaxPopupLength)), 1,
+                                            kMaxPopupLength);
+    }
+    if (percent == was && g_settings.popupLength == wasLen) {
+        g_settings.popupLength = wasLen;
         s_scale = old;
         s_lockedItemsW = locked;
         ComputeLayout();
@@ -2385,51 +2445,98 @@ void SetPopupScale(int percent) {
     Redraw();
 }
 
+void SetEditing(bool on) {
+    if (on && (!s_open || s_preview || s_compact)) return;
+    if (on == s_editing) return;
+    EndResize();
+    s_editing = on;
+    if (on) {
+        HideThumb();
+        s_hover = -1;
+        s_hoverControl = kNone;
+        s_hoverRadio = -1;
+        s_hoverExtra = kExtraNone;
+        s_hoverTray = -1;
+        s_overTray = false;
+        Log(L"迷你任务栏进入编辑模式");
+    }
+    Redraw();
+}
+
 void BeginResize(int edges, POINT screen) {
-    // 双击边：恢复原来的大小
+    // 双击边恢复：改大小的边恢复 100%，改长度的边恢复成跟着内容
     DWORD now = GetTickCount();
     bool twice = s_edgeClickAt && now - s_edgeClickAt <= GetDoubleClickTime() &&
                  std::abs(screen.x - s_edgeClickPt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) / 2 &&
                  std::abs(screen.y - s_edgeClickPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK) / 2;
     s_edgeClickAt = twice ? 0 : now;
     s_edgeClickPt = screen;
-    bool thumb = s_thumbShown != nullptr;
-    HideThumb();
-    if (thumb) WaitForVBlank();  // 缩略图在面板上方，等它从屏幕上没了再截
     s_glass.Extend(GrowArea());  // 背景按最大的大小截一整条（迷你任务栏自己盖着的那块用弹出时截的）
     s_baseValid = false;
     if (twice) {
-        s_swallowUp = true;
-        if (g_settings.popupScale != kDefaultPopupScale) {
-            Log(L"双击迷你任务栏的边，大小恢复成 %d%%", kDefaultPopupScale);
-            SetPopupScale(kDefaultPopupScale);
+        int percent = edges & ScaleEdges() ? kDefaultPopupScale : g_settings.popupScale;
+        int length = edges & LengthEdges() ? 0 : g_settings.popupLength;
+        if (percent != g_settings.popupScale || length != g_settings.popupLength) {
+            SetPopupSize(percent, length);
+            Log(L"双击迷你任务栏的边恢复：%ls", SizeText().c_str());
             SaveSettings();
         }
         return;
     }
     s_resize = edges;
     s_resizeFrom = g_settings.popupScale;
-    s_resizeDist = std::max(Px(8), ResizeDistance(screen));
-    s_hover = -1;
-    s_hoverControl = kNone;
-    s_hoverRadio = -1;
-    s_hoverExtra = kExtraNone;
-    s_hoverTray = -1;
-    s_overTray = false;
+    s_resizeLenFrom = g_settings.popupLength;
+    s_resizeDist = std::max(Px(8), ScaleDistance(screen));
+    s_resizeLen = Vertical() ? s_L.panelH : s_L.panelW;
+    s_resizeAt = screen;
     SetCapture(s_hwnd);
     SetCursor(LoadCursorW(nullptr, ResizeCursor(edges)));
     Redraw();
+}
+
+void DragResize(POINT screen) {
+    int percent = g_settings.popupScale, length = g_settings.popupLength;
+    if (s_resize & ScaleEdges()) percent = static_cast<int>(std::lround(s_resizeFrom * ScaleDistance(screen) / s_resizeDist));
+    bool fit = (s_resize & LengthEdges()) != 0;
+    if (fit)
+        length = std::clamp(static_cast<int>(std::lround(LengthAt(screen) / ScreenSide() * kMaxPopupLength)), 1,
+                            kMaxPopupLength);
+    SetPopupSize(percent, length, fit);
 }
 
 void EndResize() {
     if (!s_resize) return;
     s_resize = 0;  // 先清掉：放开鼠标捕获时还会再进来
     if (GetCapture() == s_hwnd) ReleaseCapture();
-    if (g_settings.popupScale != s_resizeFrom) {
-        Log(L"拖边把迷你任务栏大小从 %d%% 改成 %d%%", s_resizeFrom, g_settings.popupScale);
+    if (g_settings.popupScale != s_resizeFrom || g_settings.popupLength != s_resizeLenFrom) {
+        Log(L"拖边改了迷你任务栏：%ls", SizeText().c_str());
         SaveSettings();
     }
     Redraw();
+}
+
+// 编辑模式：面板四周一圈虚线，能拖的边中间一个小把手
+void DrawEditFrame(Graphics& g) {
+    const Layout& L = s_L;
+    const Color& accent = Colors().accent;
+    float inset = Px(1.5f);
+    RectF r(L.panelX + inset, L.panelY + inset, L.panelW - 2 * inset, L.panelH - 2 * inset);
+    GraphicsPath path;
+    AddRoundRect(path, r, std::max(0.0f, L.radius - inset));
+    Pen pen(accent, std::max(1.0f, Px(1.5f)));
+    REAL dash[2] = {4, 3};
+    pen.SetDashPattern(dash, 2);
+    g.DrawPath(&pen, &path);
+    int edges = ResizableEdges();
+    float len = Px(36), th = Px(5);
+    float cx = L.panelX + L.panelW / 2, cy = L.panelY + L.panelH / 2;
+    auto bar = [&](float x, float y, bool across) {
+        FillRound(g, across ? RectF(x - len / 2, y - th / 2, len, th) : RectF(x - th / 2, y - len / 2, th, len), th / 2, accent);
+    };
+    if (edges & kResizeTop) bar(cx, r.Y, true);
+    if (edges & kResizeBottom) bar(cx, r.Y + r.Height, true);
+    if (edges & kResizeLeft) bar(r.X, cy, false);
+    if (edges & kResizeRight) bar(r.X + r.Width, cy, false);
 }
 
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2594,10 +2701,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (s_resize) {
                 // 窗口跟着大小挪了位置，按屏幕坐标算
                 DWORD pos = GetMessagePos();
-                POINT screen = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
-                SetPopupScale(static_cast<int>(std::lround(s_resizeFrom * ResizeDistance(screen) / s_resizeDist)));
+                DragResize({GET_X_LPARAM(pos), GET_Y_LPARAM(pos)});
                 return 0;
             }
+            if (s_editing) return 0;  // 编辑模式里不选格子
             if (s_drag != kNone) {
                 SetSliderAt(SliderOf(s_drag), x, y);
                 return 0;
@@ -2648,10 +2755,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_LBUTTONDOWN: {
             int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam), control = ControlAt(x, y);
-            s_swallowUp = false;
-            if (int edges = ResizeEdgeAt(x, y)) {
-                DWORD pos = GetMessagePos();
-                BeginResize(edges, {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)});
+            if (s_editing) {  // 编辑模式里只能拖边
+                if (int edges = ResizeEdgeAt(x, y)) {
+                    DWORD pos = GetMessagePos();
+                    BeginResize(edges, {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)});
+                }
                 return 0;
             }
             if ((control == kVolumeTrack || control == kBrightTrack) && SliderEnabled(SliderOf(control))) {
@@ -2663,9 +2771,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_LBUTTONUP: {
-            if (s_resize || s_swallowUp) {
+            if (s_resize || s_editing) {
                 EndResize();
-                s_swallowUp = false;
                 return 0;
             }
             if (s_drag != kNone) {
@@ -2705,10 +2812,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_MBUTTONUP:
+            if (s_editing) return 0;
             CloseItem(HitTest(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)));
             return 0;
 
         case WM_RBUTTONUP: {
+            if (s_editing) return 0;
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             int hit = HitTest(pt.x, pt.y);
             if (hit >= 0) ShowItemMenu(hit, pt);
@@ -2719,19 +2828,20 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_CONTEXTMENU:
             // 鼠标右键在上面处理了；这里是菜单键（DefWindowProc 在它松开时发来，坐标是 -1, -1）
-            if (GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1 && s_open) ShowSelectedMenu();
+            if (GET_X_LPARAM(lParam) == -1 && GET_Y_LPARAM(lParam) == -1 && s_open && !s_editing) ShowSelectedMenu();
             return 0;
 
         case WM_SYSKEYDOWN:
             // Shift+F10 和菜单键一样（F10 是系统键，不走 WM_KEYDOWN）。自己处理掉，不让 DefWindowProc 再发 WM_CONTEXTMENU、
             // 松开 F10 时进菜单模式
             if (wParam == VK_F10 && (GetKeyState(VK_SHIFT) & 0x8000)) {
-                if (s_open) ShowSelectedMenu();
+                if (s_open && !s_editing) ShowSelectedMenu();
                 return 0;
             }
             break;
 
         case WM_MOUSEWHEEL: {
+            if (s_editing) return 0;
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // 滚轮消息给的是屏幕坐标
             ScreenToClient(hwnd, &pt);
             int control = ControlAt(pt.x, pt.y);
@@ -2761,6 +2871,15 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 短按 Win 弹出、开始菜单还没出来：回车、空格是要给开始菜单的（在 WM_CHAR 里记下），别打开或最小化选中的窗口
             if (s_compact && !s_startSeen && (s_startPending || s_startMode) && (wParam == VK_RETURN || wParam == VK_SPACE))
                 return 0;
+            // F2：进出编辑模式（拖边改大小和长度）。编辑模式里回车、Esc 退出，别的键不管用
+            if (wParam == VK_F2) {
+                SetEditing(!s_editing);
+                return 0;
+            }
+            if (s_editing) {
+                if (wParam == VK_RETURN || wParam == VK_ESCAPE) SetEditing(false);
+                return 0;
+            }
             switch (wParam) {
                 case VK_LEFT:
                     if (!FlipTrayUnderMouse(-1)) MoveSelection(-1);
@@ -2801,6 +2920,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CHAR: {
+            if (s_editing) return 0;
             wchar_t ch = static_cast<wchar_t>(wParam);
             if (s_compact) {  // 开始菜单模式没有显示打的字的地方：开始菜单还没出来就先记下，出来以后补发给它
                 if (!s_startSeen && (s_startPending || s_startMode) && (ch >= 0x20 || ch == L'\r')) {

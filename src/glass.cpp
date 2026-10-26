@@ -6,7 +6,7 @@
 //
 // 这些只和面板形状有关的量在 Prepare 里一次算好；动画的每一帧只需要按位移去背景里取色，
 // 面板滑动时背景保持不动，像一块真的玻璃在上面移动。
-// 毛玻璃是平的，只有一圈淡淡的亮边；Win11 原版照系统的亚克力：模糊得更厉害、系统的灰色着色、
+// Win11 原版照系统的亚克力：平的，模糊得更厉害，浓浓的系统灰色着色（上面的字看得清），
 // 一点点颗粒，一圈 1 像素的细边框。
 #include "common.h"
 
@@ -189,7 +189,7 @@ RECT ShotArea(const RECT& window, float scale) {
 void Process(GlassShot& out, float scale, int style) {
     int hw = (out.w + 1) / 2, hh = (out.h + 1) / 2;
     std::vector<DWORD> half = HalfSize(out.raw, out.w, out.h, hw, hh);
-    float radius = style == kGlassWin11 ? 9.0f : style == kGlassFrosted ? 7.0f : 3.5f;
+    float radius = style == kGlassWin11 ? 9.0f : 3.5f;
     Blur(half, hw, hh, std::max(1, static_cast<int>(std::lround(radius * scale))));
     Saturate(half, style == kGlassWin11 ? 1.2f : 1.45f);
     DoubleSize(half, hw, hh, out.blur, out.w, out.h);
@@ -307,11 +307,6 @@ void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float ra
                 t.light = static_cast<BYTE>(std::lround(Clamp01(border + 0.5f - depth) * 255));
                 continue;
             }
-            if (m_style == kGlassFrosted) {  // 毛玻璃：平的，只有一圈淡淡的亮边
-                float rim = depth < 8 * rimWidth ? std::exp(-depth / rimWidth) : 0;
-                t.light = static_cast<BYTE>(std::lround(Clamp01(0.14f * rim) * 255));
-                continue;
-            }
             if (depth < bevel) {
                 // 沿法线往里取样：边缘像凸透镜一样把背景放大
                 float k = 1 - depth / bevel;
@@ -368,11 +363,10 @@ void Glass::Render(DWORD* pixels, POINT origin, int slide, int slideX) const {
 void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int rowBegin, int rowEnd) const {
     const int w = m_texW, h = m_texH;
     const bool win11 = m_style == kGlassWin11;
-    // Win11 原版用系统亚克力的灰：深色 #202020 上下，浅色 #F0F0F0 上下
-    const float tintL = win11 ? (m_light ? 240.0f : 30.0f) : (m_light ? 252.0f : 16.0f);
-    const float tint[3] = {tintL, tintL, win11 ? tintL + 2 : (m_light ? 255.0f : 20.0f)};
-    float tintAlpha = win11 ? (m_light ? 0.82f : 0.86f)
-                            : m_style == kGlassFrosted ? (m_light ? 0.58f : 0.62f) : (m_light ? 0.36f : 0.38f);
+    // Win11 原版用系统亚克力的灰：深色 #202020，浅色 #F3F3F3，着色浓，背景只透出一点
+    const float tintL = win11 ? (m_light ? 243.0f : 32.0f) : (m_light ? 252.0f : 16.0f);
+    const float tint[3] = {tintL, tintL, win11 ? tintL : (m_light ? 255.0f : 20.0f)};
+    float tintAlpha = win11 ? (m_light ? 0.9f : 0.93f) : (m_light ? 0.36f : 0.38f);
     // 液态玻璃的透明度：默认（60%）时 k = 1；更透明时着色变淡，下面看得清文字的保底也跟着放松
     float guard = 1;
     if (m_style == kGlassLiquid) {
@@ -384,8 +378,8 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
     // Win11 原版的边框：深色时叠白，浅色时叠黑
     const float borderTo = m_light ? 0.0f : 255.0f, borderAlpha = (m_light ? 0.1f : 0.12f) / 255.0f;
     const float sheen = (m_light ? 0.12f : 0.07f) / 255.0f;
-    // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清
-    const float bound = m_light ? 0.72f * 255 : 0.30f * 255;
+    // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清。Win11 原版要求更严
+    const float bound = win11 ? (m_light ? 0.82f * 255 : 0.2f * 255) : (m_light ? 0.72f * 255 : 0.30f * 255);
     // 窗口像素 → 背景截图里的坐标
     const int offX = origin.x - m_area.left, offY = origin.y - m_area.top;
 

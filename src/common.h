@@ -36,7 +36,8 @@ using std::min;
 namespace app {
 
 // ---------------- 设置 ----------------
-enum GlassStyle { kGlassLiquid, kGlassFrosted, kGlassWin11 };  // 液态玻璃 / 毛玻璃 / Win11 原版（平的亚克力，细边框）
+// 液态玻璃 / Win11 原版（平的亚克力，细边框）。以前的毛玻璃（1）由 Win11 原版顶替
+enum GlassStyle { kGlassLiquid, kGlassWin11 };
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
@@ -64,8 +65,9 @@ struct Settings {
     bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
     bool showRadios = true;      // 迷你任务栏里显示 Wi-Fi 和蓝牙开关
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
-    int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘），拖面板的边改
+    int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘），编辑模式里拖面板的边改
     int popupRadius = 22;        // 迷你任务栏的圆角半径，像素（按 100% 大小算）
+    int popupLength = 0;         // 迷你任务栏的长度（横排是宽，竖排是高）：占那条屏幕边的千分之几，0 = 跟着内容
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
     int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
@@ -107,6 +109,7 @@ constexpr int kMinPopupScale = 50;
 constexpr int kMaxPopupScale = 200;
 constexpr int kDefaultPopupScale = 100;
 constexpr int kMaxPopupRadius = 40;
+constexpr int kMaxPopupLength = 1000;
 // 各材质默认的圆角：Win11 原版和系统的弹出面板一样是 8
 inline int DefaultPopupRadius(int style) { return style == kGlassWin11 ? 8 : 22; }
 
@@ -478,7 +481,7 @@ struct GlassShot {
 // 画出来的玻璃是不透明的（背景已经画进去了），所以要和截图时的屏幕位置对齐。
 class Glass {
 public:
-    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度（style：GlassStyle，毛玻璃、Win11 原版模糊得更厉害）。
+    // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度（style：GlassStyle，Win11 原版模糊得更厉害）。
     // 不碰任何成员，可以在后台线程里调用。
     // same 不为空、范围相同、截到的和它一模一样（或者截图失败）时不做后面的处理，返回 false
     static bool Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassShot* same = nullptr);
@@ -493,7 +496,7 @@ public:
     void SetLight(bool light) { m_light = light; }        // 浅色玻璃配深色文字，深色玻璃配浅色文字
     bool Light() const { return m_light; }
     void SetScale(float scale) { m_scale = scale; }  // 只换边缘、阴影等的尺寸，背景不重新截
-    // 材质（GlassStyle）。毛玻璃：没有边缘折射和高光，着色更浓；Win11 原版：再模糊一些，系统的灰色着色，一圈细边框
+    // 材质（GlassStyle）。Win11 原版：没有边缘折射和高光，再模糊一些，浓浓的系统灰色着色，一圈细边框
     void SetStyle(int style) { m_style = style; }
     int Style() const { return m_style; }
     // 液态玻璃的透明度（0 – 100%）：越透明着色越淡。默认 kDefaultGlassTransparency

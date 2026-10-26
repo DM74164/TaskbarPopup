@@ -92,7 +92,7 @@ struct SegSpec {
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
 };
 const SegSpec kSegSpec[kSegCount] = {
-    {L"材质", {L"液态玻璃", L"毛玻璃", L"Win11"}},  // 下标是 GlassStyle
+    {L"材质", {L"液态玻璃", L"Win11"}},  // 下标是 GlassStyle
     {L"颜色", {L"跟随系统", L"浅色", L"深色"}},
     {L"托盘图标", {L"小图标堆叠", L"横向完整展示"}},  // 下标是 TrayStyle
     {L"对齐", {L"跟随系统", L"居中", L"靠左", L"靠右"}},  // 下标是 PopupAlign
@@ -200,7 +200,7 @@ std::vector<RectF> s_cards;  // 每组的卡片
 struct Text {
     std::wstring text;
     RectF rect;
-    int style;  // 0 组标题，1 提示，2 标题，3 版本号，4 一行的名字，5 迷你任务栏现在的大小（画的时候再读，拖边改了也跟着变）
+    int style;  // 0 组标题，1 提示，2 标题，3 版本号，4 一行的名字，5 迷你任务栏现在的大小和长度（画的时候再读，拖边改了也跟着变）
 };
 std::vector<Text> s_texts;
 struct SliderGeom {
@@ -371,12 +371,12 @@ float ChipsRow(float x, float y, float w) {
     return bottom + Px(36) - y;
 }
 
-// 迷你任务栏大小：拖它的边改，这里只说怎么改、现在多大
+// 迷你任务栏大小和长度：在它的编辑模式里拖边改，这里只说怎么改、现在多大
 float SizeRow(float x, float y, float w) {
     float pad = Px(kRowPad);
     s_texts.push_back({Tr(L"大小"), RectF(x + pad, y + Px(8), w - 2 * pad, Px(20)), 4});
     s_texts.push_back({L"", RectF(x + pad, y + Px(8), w - 2 * pad, Px(20)), 5});
-    s_texts.push_back({Tr(L"拖迷你任务栏的边调整，双击边恢复"), RectF(x + pad, y + Px(29), w - 2 * pad, Px(18)), 3});
+    s_texts.push_back({Tr(L"弹出后按 F2，拖边调整大小和长度，双击边恢复"), RectF(x + pad, y + Px(29), w - 2 * pad, Px(18)), 3});
     return Px(56);
 }
 
@@ -847,8 +847,9 @@ void DrawContent(Graphics& g) {
             case 2: DrawText(g, t.text, Px(17), FontStyleBold, t.rect, pal.text); break;
             case 4: DrawText(g, t.text, Px(13.5f), FontStyleRegular, t.rect, pal.text); break;
             case 5: {
-                wchar_t size[16];
-                swprintf(size, 16, L"%d%%", g_settings.popupScale);
+                std::wstring size = g_settings.popupLength > 0
+                                        ? TrF(L"%d%%，长度 %d%%", g_settings.popupScale, (g_settings.popupLength + 5) / 10)
+                                        : TrF(L"%d%%", g_settings.popupScale);
                 DrawText(g, size, Px(12.5f), FontStyleRegular, t.rect, pal.subtle, StringAlignmentFar);
                 break;
             }
@@ -1612,7 +1613,7 @@ void Activate(const Item& it) {
                 SetUiEnglish(LanguageIsEnglish(s_v.seg[kSegLang]));
                 SetWindowTextW(s_hwnd, Tr(L"TaskbarPopup 设置"));
             }
-            // 竖排时收起对齐那一行；毛玻璃时收起透明度；换语言字的宽度变了
+            // 竖排时收起对齐那一行；Win11 原版时收起透明度；换语言字的宽度变了
             if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegStyle || it.index / kSegStride == kSegLang)
                 Relayout(true);
             if (group == kSegEdge || group == kSegAlign || group == kSegStyle || group == kSegTheme)
