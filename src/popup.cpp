@@ -141,6 +141,7 @@ std::vector<Tile> s_items;     // 现在显示的格子（打字筛选后的）
 std::vector<Tile> s_allItems;  // 弹出时列出的全部格子
 std::wstring s_filter;         // 打的字
 float s_lockedItemsW = 0;      // 筛选期间格子区宽度不变（面板不跟着变窄变宽）；0 = 没锁
+float s_tileGrow = 1;          // 格子那段有空时格子放大补位的倍数，见 FitTiles
 bool s_keyNav = false;         // 最近是用键盘选的（选中项也显示缩略图）
 bool s_menuOpen = false;
 POINT s_lastMouse = {INT_MIN, INT_MIN};  // 上一次 WM_MOUSEMOVE 的位置：窗口出现、移动时系统会补发一条位置没变的
@@ -428,7 +429,7 @@ void ComputeLayout() {
     bool vertical = Vertical();
     L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕边的距离
     L.pad = s_compact ? Px(4) : Px(8);
-    L.tile = Px(48.0f * s_look.iconSize / 100);
+    L.tile = Px(48.0f * s_look.iconSize / 100 * s_tileGrow);
     L.gap = Px(static_cast<float>(s_look.iconGap));
     L.titleH = s_compact || vertical || !s_look.showTitle ? 0 : Px(24);  // 竖排时标题显示在面板旁边的小牌子上
     L.topGap = BubbleTitle() ? Px(40) : 0;
@@ -618,6 +619,31 @@ void ComputeLayout() {
     s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin));
     s_height = static_cast<int>(std::ceil(L.panelH + L.margin + L.topGap + L.bottomGap));
     L.radius = std::min(Px(static_cast<float>(PopupRadius())), L.panelH / 2);
+}
+
+// 排好布局。格子那段有空（关掉了一些模块，面板按调节条那行的最小长度来，或者拖过长度）时，格子按比例放大补上：
+// 面板长度不变、格子都放得下，最多放大到图标大小 150%。筛选时格子大小不变；开始菜单上面那一行不放大
+void FitTiles() {
+    if (s_lockedItemsW > 0) {
+        ComputeLayout();
+        return;
+    }
+    s_tileGrow = 1;
+    ComputeLayout();
+    if (s_compact) return;
+    int n = static_cast<int>(s_items.size());
+    float maxGrow = static_cast<float>(kMaxIconSize) / std::max(1, s_look.iconSize);
+    if (n == 0 || s_visible < n || maxGrow <= 1) return;
+    auto length = [] { return Vertical() ? s_L.panelH : s_L.panelW; };
+    float base = length(), lo = 1, hi = maxGrow;
+    for (int i = 0; i < 8; ++i) {
+        s_tileGrow = (lo + hi) / 2;
+        ComputeLayout();
+        if (s_visible == n && length() <= base + 0.5f) lo = s_tileGrow;
+        else hi = s_tileGrow;
+    }
+    s_tileGrow = lo < 1.02f ? 1 : lo;
+    ComputeLayout();
 }
 
 bool IsWindows11() {
@@ -2621,7 +2647,7 @@ void SetPopupSize(int percent, int length, bool fit = false) {
         g_settings.popupScale = percent;
         s_scale = PopupScale(s_monitor);
         s_lockedItemsW = locked * s_scale / old;
-        ComputeLayout();
+        FitTiles();
         if (percent <= was || (s_width <= s_bounds.right - s_bounds.left && s_height <= s_bounds.bottom - s_bounds.top))
             break;
     }
@@ -2634,7 +2660,7 @@ void SetPopupSize(int percent, int length, bool fit = false) {
         g_settings.popupLength = wasLen;
         s_scale = old;
         s_lockedItemsW = locked;
-        ComputeLayout();
+        FitTiles();
         return;
     }
     s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
@@ -2646,7 +2672,7 @@ void SetPopupSize(int percent, int length, bool fit = false) {
 
 // 编辑模式里改了布局（模块、位置）：重新排、摆好、重画（背景已经按最大的大小截了一整条）
 void EditRelayout() {
-    ComputeLayout();
+    FitTiles();
     s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
     UpdatePlacement();
     s_glass.Extend(GrowArea());
@@ -3783,7 +3809,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_menuOpen = false;
     s_lastMouse = {INT_MIN, INT_MIN};
     if (!preview) Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
-    ComputeLayout();
+    FitTiles();
     UpdatePlacement();
 
     // 截下玻璃后面的屏幕内容：这时弹窗自己不能在屏幕上
@@ -3975,7 +4001,7 @@ void Popup_PreviewLook(const PopupLook& look) {
     s_glass.SetTransparency(look.transparency);
     s_glass.SetTint(look.customTint, look.tint);
     if (reload) LoadModules(true);  // 改了显示哪些：重新定下这次显示的模块
-    ComputeLayout();
+    FitTiles();
     UpdatePlacement();
     s_baseValid = false;
     s_pillIndex = -1;
@@ -4000,7 +4026,7 @@ void Popup_Preview(int percent, int edge, int align, bool hold) {
         s_previewAlign = align;
         s_align = align;
         s_scale = PopupScale(s_monitor);
-        ComputeLayout();
+        FitTiles();
         UpdatePlacement();
         s_glass.SetScale(s_scale);
         Redraw();
