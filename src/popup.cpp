@@ -180,6 +180,7 @@ int s_resizeLenFrom = 0;
 float s_resizeDist = 1;    // 开始拖时鼠标离固定的那条屏幕边多远（改大小用）
 float s_resizeLen = 0;     // 开始拖时面板的长度，像素（改长度用）
 POINT s_resizeAt = {};     // 开始拖时鼠标在屏幕上的位置
+bool s_resizePinned = false;  // 开始拖时自定义位置的面板顶着屏幕的一头（另一头不跟着动）
 DWORD s_edgeClickAt = 0;   // 上一次在边上（或者挪面板的地方）按下的时间和位置：双击恢复
 POINT s_edgeClickPt = {};
 // 编辑模式里鼠标下、正在拖的东西：模块（Module）、调节条、Wi-Fi 蓝牙按钮，或者边、别的地方（挪面板）
@@ -752,10 +753,14 @@ int HitTest(int x, int y) {
 int ControlAt(int x, int y) {
     if (!s_levels) return kNone;
     REAL fx = static_cast<REAL>(x), fy = static_cast<REAL>(y);
+    // 竖排时两根挨得近（图标调小时不到 24 像素），各自只算半边，不重叠
+    float half = std::min(Px(12), s_L.tile / 4);
     for (int i = 0; i < 2; ++i) {
         const Slider& sl = s_sliders[i];
-        if (sl.icon.Contains(fx, fy)) return i == 0 ? kVolumeIcon : kBrightIcon;
-        RectF track = Vertical() ? RectF(sl.c - Px(12), sl.a1 - Px(10), Px(24), sl.a0 - sl.a1 + Px(20))
+        RectF icon = sl.icon;
+        if (Vertical()) icon = RectF(sl.c - half, sl.icon.Y, 2 * half, sl.icon.Height);
+        if (icon.Contains(fx, fy)) return i == 0 ? kVolumeIcon : kBrightIcon;
+        RectF track = Vertical() ? RectF(sl.c - half, sl.a1 - Px(10), 2 * half, sl.a0 - sl.a1 + Px(20))
                                  : RectF(sl.a0 - Px(10), sl.c - Px(15), sl.a1 - sl.a0 + Px(20), Px(30));
         if (track.Contains(fx, fy)) return i == 0 ? kVolumeTrack : kBrightTrack;
     }
@@ -1134,8 +1139,11 @@ void SetSlider(int which, float value) {
         s_brightnessEdited = true;
         std::vector<HMONITOR> screens = AllBrightness() ? MonitorsInOrder() : std::vector<HMONITOR>{s_monitor};
         for (HMONITOR m : screens) {
-            RememberBrightness(m, percent);
             Brightness_Set(m, percent);
+            // 别的屏幕只更新读到过的：没读过、调不了的不记，不然在那块屏上弹出时先显示一根能拖的调节条
+            bool known = m == s_monitor;
+            for (const auto& k : s_knownBrightness) known = known || k.first == m;
+            if (known) RememberBrightness(m, percent);
         }
     }
     Redraw();
@@ -2708,7 +2716,7 @@ float ScaleDistance(POINT pt) {
 
 // 改长度：拖的那条边跟着鼠标走，居中时（竖排一直是上下居中）另一头一起动
 float LengthAt(POINT pt) {
-    bool centered = Vertical() || EffectiveAlign() == kAlignCenter || EffectiveAlign() == kAlignCustom;
+    bool centered = (Vertical() || EffectiveAlign() == kAlignCenter || EffectiveAlign() == kAlignCustom) && !s_resizePinned;
     float d = static_cast<float>(Vertical() ? pt.y - s_resizeAt.y : pt.x - s_resizeAt.x);
     if (s_resize & LengthEdges() & (kResizeLeft | kResizeTop)) d = -d;
     return s_resizeLen + (centered ? 2 : 1) * d;
@@ -2776,6 +2784,10 @@ void SetEditing(bool on) {
     EndResize();
     EndModuleDrag(false);
     EndPanelMove(false);
+    if (s_drag != kNone) {  // 拖着音量、亮度时按了 F2
+        s_drag = kNone;
+        if (GetCapture() == s_hwnd) ReleaseCapture();
+    }
     s_editing = on;
     s_editHover = kPartNone;
     if (on) {
@@ -3094,9 +3106,12 @@ void EndPanelMove(bool drop) {
     Redraw();
 }
 
+// 已经在默认位置：底边跟随系统；竖排除了自定义都是上下居中（对齐是底边的，不动它）
+bool AtDefaultPlace() { return Vertical() ? s_align != kAlignCustom : s_align == kAlignSystem; }
+
 // 双击挪面板的地方：恢复默认位置（底边跟随系统，竖排上下居中）
 void ResetPlace() {
-    if (s_align == kAlignSystem) return;
+    if (AtDefaultPlace()) return;
     s_align = kAlignSystem;
     s_offset = 500;
     StorePlace();
@@ -3127,7 +3142,7 @@ void ShowEditMenu(POINT client) {
     bool defaultOrder = true;
     for (int i = 0; i < kModuleCount; ++i) defaultOrder = defaultOrder && mods.order[i] == i;
     AppendMenuW(menu, MF_STRING | (defaultOrder ? MF_GRAYED : 0), kCmdOrder, Tr(L"恢复默认顺序"));
-    AppendMenuW(menu, MF_STRING | (s_align == kAlignSystem ? MF_GRAYED : 0), kCmdPlace, Tr(L"恢复默认位置"));
+    AppendMenuW(menu, MF_STRING | (AtDefaultPlace() ? MF_GRAYED : 0), kCmdPlace, Tr(L"恢复默认位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdDone, Tr(L"完成"));
     POINT at = {client.x + s_pos.x, client.y + s_pos.y};
@@ -3162,6 +3177,7 @@ void BeginResize(int edges, POINT screen) {
             SetPopupSize(percent, length);
             Log(L"双击迷你任务栏的边恢复：%ls", SizeText().c_str());
             SaveSettings();
+            SettingsDialog_SettingsChanged();
         }
         return;
     }
@@ -3171,6 +3187,9 @@ void BeginResize(int edges, POINT screen) {
     s_resizeDist = std::max(Px(8), ScaleDistance(screen));
     s_resizeLen = Vertical() ? s_L.panelH : s_L.panelW;
     s_resizeAt = screen;
+    s_resizePinned = s_align == kAlignCustom &&
+                     (Vertical() ? s_pos.y <= s_bounds.top || s_pos.y + s_height >= s_bounds.bottom
+                                 : s_pos.x <= s_bounds.left || s_pos.x + s_width >= s_bounds.right);
     SetCapture(s_hwnd);
     SetCursor(LoadCursorW(nullptr, ResizeCursor(edges)));
     Redraw();
@@ -3211,6 +3230,7 @@ void EndResize() {
     if (g_settings.popupScale != s_resizeFrom || g_settings.popupLength != s_resizeLenFrom) {
         Log(L"拖边改了迷你任务栏：%ls", SizeText().c_str());
         SaveSettings();
+        SettingsDialog_SettingsChanged();
     }
     Redraw();
 }
@@ -3413,6 +3433,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int value = static_cast<int>(static_cast<INT_PTR>(wParam));
                 s_brightness = value < 0 ? -1 : std::min(value, 100);
                 if (value >= 0) RememberBrightness(s_monitor, s_brightness);
+                else
+                    s_knownBrightness.erase(std::remove_if(s_knownBrightness.begin(), s_knownBrightness.end(),
+                                                           [](const auto& k) { return k.first == s_monitor; }),
+                                            s_knownBrightness.end());
                 Redraw();
             }
             return 0;
@@ -4113,6 +4137,7 @@ void Popup_PreviewLook(const PopupLook& look) {
     s_glass.SetTint(look.customTint, look.tint);
     if (reload) LoadModules(true);  // 改了显示哪些：重新定下这次显示的模块
     FitTiles();
+    s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
     UpdatePlacement();
     s_baseValid = false;
     s_pillIndex = -1;
@@ -4138,6 +4163,7 @@ void Popup_Preview(int percent, int edge, int align, bool hold) {
         s_align = align;
         s_scale = PopupScale(s_monitor);
         FitTiles();
+        s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
         UpdatePlacement();
         s_glass.SetScale(s_scale);
         Redraw();
@@ -4152,6 +4178,14 @@ void Popup_EndPreview() {
 
 void Popup_Hide() {
     if (!s_open) return;
+    // 编辑模式、拖着的都现在就结束：收起动画没播完又弹出时不能还在编辑
+    EndResize();
+    EndModuleDrag(false);
+    EndPanelMove(false);
+    s_editing = false;
+    s_editHover = kPartNone;
+    s_drag = kNone;
+    if (GetCapture() == s_hwnd) ReleaseCapture();
     EndStartMode();
     EndTrayMode();
     EndHoverOpen();

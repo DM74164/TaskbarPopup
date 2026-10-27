@@ -1894,7 +1894,7 @@ void Reload(ReloadMode mode) {
     for (int i = 0; i < kToggleCount; ++i)
         if (!FindSideToggle(i))
             Take(s_v.on[i], s_initial.on[i], fresh.on[i],
-                 all || (look && in(i, {kClockSeconds, kClockWeekday, kClockDate, kShowTitle})));
+                 all || (look && in(i, {kClockSeconds, kClockWeekday, kClockDate, kShowTitle, kPerScreen})));
     for (int side = 0; side < 2; ++side)  // 底部、侧边各一份的：外观方案里也有
         for (const SideToggle& t : kSideToggles)
             Take(s_v.sides[side].*t.item, s_initial.sides[side].*t.item, fresh.sides[side].*t.item, look);
@@ -1911,7 +1911,7 @@ void Reload(ReloadMode mode) {
     Take(s_v.edge, s_initial.edge, fresh.edge, look);
     Take(s_v.align, s_initial.align, fresh.align, look);
     Take(s_v.offset, s_initial.offset, fresh.offset, look);
-    Take(s_v.screens, s_initial.screens, fresh.screens, all);
+    Take(s_v.screens, s_initial.screens, fresh.screens, look);
     for (int i = 0; i < kHotkeyCount; ++i) {
         Take(s_v.hotkey[i], s_initial.hotkey[i], fresh.hotkey[i], all);
         Take(s_v.hold[i], s_initial.hold[i], fresh.hold[i], all);
@@ -1927,10 +1927,10 @@ void Reload(ReloadMode mode) {
     }
     s_presets = LookPresets();
     s_hover = s_press = {};
-    if (!FindItem(s_focus)) s_focus = {};
     ShowPlace();
     ApplyLook();
     Relayout(true);
+    if (!FindItem(s_focus)) s_focus = {};
 }
 
 void Apply();

@@ -105,19 +105,23 @@ void HandleCommand(UINT id) {
             g_settings.autoHideOnFullscreen = !g_settings.autoHideOnFullscreen;
             SaveSettings();
             ApplySettings();
+            SettingsDialog_SettingsChanged();
             break;
         case ID_ALWAYSHIDE:
             g_settings.alwaysHideTaskbar = !g_settings.alwaysHideTaskbar;
             SaveSettings();
             ApplySettings();
+            SettingsDialog_SettingsChanged();
             break;
         case ID_LONGPRESS:
             g_settings.longPressPopup = !g_settings.longPressPopup;
             SaveSettings();
             ApplySettings();
+            SettingsDialog_SettingsChanged();
             break;
         case ID_AUTOSTART:
             SetAutoStart(!IsAutoStartEnabled());
+            SettingsDialog_SettingsChanged();
             break;
         case ID_RUNASADMIN:
             ToggleRunAsAdmin();
@@ -175,6 +179,7 @@ void ShowTrayMenu() {
 
 void Shutdown() {
     Log(L"退出");
+    if (HWND dlg = SettingsDialog_Hwnd()) DestroyWindow(dlg);  // 先关：关的时候会存下没存的设置、重新应用
     Hook_Uninstall();
     Brightness_Stop();
     Radios_Stop();
@@ -184,7 +189,6 @@ void Shutdown() {
     Log(L"退出：还原任务栏");
     Taskbar_RestoreAll();
     Shell_NotifyIconW(NIM_DELETE, &s_nid);
-    if (HWND dlg = SettingsDialog_Hwnd()) DestroyWindow(dlg);
 }
 
 LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -640,7 +644,7 @@ const wchar_t* const kLookKeys[] = {
     L"TrayIcons",   L"TrayStyle",   L"ShowMedia",         L"ShowIme",     L"ShowBattery",  L"ShowClock",   L"ClockSeconds",
     L"ClockWeekday", L"ClockDate",  L"ShowLevels",        L"ShowRadios",  L"PopupEdge",    L"PopupAlign",  L"PopupOffset",
     L"SideModuleOrder", L"SideTrayIcons", L"SideShowMedia", L"SideShowIme", L"SideShowBattery", L"SideShowClock",
-    L"SideShowLevels",  L"SideShowRadios"};
+    L"SideShowLevels",  L"SideShowRadios", L"PopupPerScreen", L"ScreenPlaces"};
 
 std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 
@@ -651,6 +655,8 @@ void CopyLookKeys(const wchar_t* fromSection, const wchar_t* toSection) {
     for (const wchar_t* key : kLookKeys) {
         DWORD n = GetPrivateProfileStringW(fromSection, key, L"\x01", value, ARRAYSIZE(value), f.c_str());
         bool missing = n == 1 && value[0] == L'\x01';
+        // 每块屏幕的位置是后来加进方案的：旧方案里没有就留着现在的
+        if (missing && (!wcscmp(key, L"PopupPerScreen") || !wcscmp(key, L"ScreenPlaces"))) continue;
         WritePrivateProfileStringW(toSection, key, missing ? nullptr : value, f.c_str());
     }
 }
@@ -727,6 +733,10 @@ bool ImportSettings(const std::wstring& path) {
     // 旧版本导出的没有侧边那份：先删掉现在的，读的时候跟着导入的底部
     for (const ModuleKey& k : kModuleSetKeys) WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), nullptr, f.c_str());
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), nullptr, f.c_str());
+    // 快捷键也先删掉：旧版本导出的没有后加的几个，留着现在的可能和导入的撞上
+    for (const wchar_t* key : kHotkeyKeys)
+        for (const wchar_t* suffix : {L"", L"Hold", L"HoldMs"})
+            WritePrivateProfileStringW(L"General", (std::wstring(key) + suffix).c_str(), nullptr, f.c_str());
     for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
         std::wstring line = p;
         size_t eq = line.find(L'=');

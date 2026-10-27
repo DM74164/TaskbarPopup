@@ -126,6 +126,7 @@ void SetException(const std::wstring& exeName, bool listed) {
     Log(L"%ls %ls%ls名单", exeName.c_str(), listed ? L"加入" : L"移出",
         g_settings.autoHideOnFullscreen ? L"最大化时不隐藏任务栏的" : L"最大化时隐藏任务栏的");
     ApplySettings();
+    SettingsDialog_SettingsChanged();
 }
 
 std::wstring GetWindowAumid(HWND hwnd, bool keepCase) {
@@ -268,6 +269,7 @@ RECT MapRect(const RECT& r, const RECT& from, const RECT& to) {
 struct PendingMove {
     HWND hwnd;
     HMONITOR to;
+    RECT normal;  // 算好的还原后的位置（工作区坐标）
 };
 std::vector<PendingMove> s_moves;
 
@@ -277,10 +279,12 @@ void CALLBACK OnMoveCheck(HWND, UINT, UINT_PTR id, DWORD) {
     moves.swap(s_moves);
     for (const PendingMove& m : moves) {
         if (!IsWindow(m.hwnd) || !IsZoomed(m.hwnd) || MonitorFromWindow(m.hwnd, MONITOR_DEFAULTTONEAREST) == m.to) continue;
+        if (IsHungAppWindow(m.hwnd)) continue;  // 还没处理完刚才的请求，别再排一遍
         // 还最大化在原来的屏上：先还原（还原后的位置已经在那块屏上了），再最大化
         Log(L"最大化的窗口没跟着换屏幕，还原到那块屏上再最大化");
         WINDOWPLACEMENT wp = {sizeof(wp)};
         if (!GetWindowPlacement(m.hwnd, &wp)) continue;
+        wp.rcNormalPosition = m.normal;  // 程序可能还没照刚才的改，读到的还是原来那块屏上的
         wp.showCmd = SW_SHOWNOACTIVATE;
         wp.flags = (wp.flags & ~WPF_RESTORETOMAXIMIZED) | WPF_ASYNCWINDOWPLACEMENT;
         SetWindowPlacement(m.hwnd, &wp);
@@ -331,7 +335,7 @@ bool MoveWindowToMonitor(HWND hwnd, HMONITOR to) {
     }
     if (zoomed) {
         if (s_moves.empty()) SetTimer(nullptr, 0, 300, OnMoveCheck);
-        s_moves.push_back({hwnd, to});
+        s_moves.push_back({hwnd, to, wp.rcNormalPosition});
     }
     return true;
 }
