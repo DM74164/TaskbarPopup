@@ -142,6 +142,7 @@ std::vector<Tile> s_allItems;  // 弹出时列出的全部格子
 std::wstring s_filter;         // 打的字
 float s_lockedItemsW = 0;      // 筛选期间格子区宽度不变（面板不跟着变窄变宽）；0 = 没锁
 float s_tileGrow = 1;          // 格子那段有空时格子放大补位的倍数，见 FitTiles
+float s_holderRoom = 0;        // 拖过长度时，预览给没在放的媒体多留的长度，见 FitTiles
 bool s_keyNav = false;         // 最近是用键盘选的（选中项也显示缩略图）
 bool s_menuOpen = false;
 POINT s_lastMouse = {INT_MIN, INT_MIN};  // 上一次 WM_MOUSEMOVE 的位置：窗口出现、移动时系统会补发一条位置没变的
@@ -336,7 +337,9 @@ ModuleSet& Mods() { return (s_preview ? s_look.modules : g_settings.modules)[Mod
 float ScreenSide() { return static_cast<float>(Vertical() ? s_bounds.bottom - s_bounds.top : s_bounds.right - s_bounds.left); }
 
 // 编辑模式里拖出来的面板长度（像素），0 = 跟着内容
-float CustomLength() { return g_settings.popupLength > 0 ? ScreenSide() * g_settings.popupLength / kMaxPopupLength : 0; }
+float CustomLength() {
+    return g_settings.popupLength > 0 ? ScreenSide() * g_settings.popupLength / kMaxPopupLength + s_holderRoom : 0;
+}
 
 const wchar_t* const kWeekdays[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
 
@@ -623,28 +626,51 @@ void ComputeLayout() {
 }
 
 // 排好布局。格子那段有空（关掉了一些模块，面板按调节条那行的最小长度来，或者拖过长度）时，格子按比例放大补上：
-// 面板长度不变、格子都放得下，最多放大到图标大小 150%。筛选时格子大小不变；开始菜单上面那一行不放大
+// 面板长度不变、格子都放得下，最多放大到图标大小 150%。筛选时格子大小不变；开始菜单上面那一行不放大。
+// 预览、编辑模式里没在放也显示出来的媒体先不算，格子和真弹出时一样大
 void FitTiles() {
+    s_holderRoom = 0;
     if (s_lockedItemsW > 0) {
         ComputeLayout();
         return;
     }
+    bool holder = s_showMedia && !s_media.present;
+    s_showMedia = s_showMedia && !holder;
     s_tileGrow = 1;
     ComputeLayout();
-    if (s_compact) return;
     int n = static_cast<int>(s_items.size());
-    float maxGrow = static_cast<float>(kMaxIconSize) / std::max(1, s_look.iconSize);
-    if (n == 0 || s_visible < n || maxGrow <= 1) return;
+    float grow = 1, maxGrow = static_cast<float>(kMaxIconSize) / std::max(1, s_look.iconSize);
     auto length = [] { return Vertical() ? s_L.panelH : s_L.panelW; };
-    float base = length(), lo = 1, hi = maxGrow;
-    for (int i = 0; i < 8; ++i) {
-        s_tileGrow = (lo + hi) / 2;
-        ComputeLayout();
-        if (s_visible == n && length() <= base + 0.5f) lo = s_tileGrow;
-        else hi = s_tileGrow;
+    // 1 到 hi 之间 fits() 还成立的最大倍数
+    auto largest = [](float hi, auto fits) {
+        float lo = 1;
+        for (int i = 0; i < 8; ++i) {
+            s_tileGrow = (lo + hi) / 2;
+            ComputeLayout();
+            if (fits()) lo = s_tileGrow;
+            else hi = s_tileGrow;
+        }
+        return lo < 1.02f ? 1 : lo;
+    };
+    if (!s_compact && n > 0 && s_visible == n && maxGrow > 1) {
+        float base = length();
+        grow = largest(maxGrow, [&] { return s_visible == n && length() <= base + 0.5f; });
     }
-    s_tileGrow = lo < 1.02f ? 1 : lo;
+    s_tileGrow = grow;
     ComputeLayout();
+    float others = length() - s_L.itemsW;
+    s_showMedia = s_showMedia || holder;
+    ComputeLayout();
+    // 拖过长度时预览把媒体占的地方加到长度上，格子那段和真弹出时一样长
+    if (holder && s_preview && CustomLength() > 0) {
+        s_holderRoom = std::max(0.0f, length() - s_L.itemsW - others);
+        ComputeLayout();
+    }
+    // 加上媒体后放大的格子还是放不下（编辑模式里拖过长度、或者到了屏幕边）：缩到都放得下
+    if (holder && grow > 1 && s_visible < n) {
+        s_tileGrow = largest(grow, [&] { return s_visible == n; });
+        ComputeLayout();
+    }
 }
 
 bool IsWindows11() {
