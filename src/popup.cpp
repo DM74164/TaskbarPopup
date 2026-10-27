@@ -327,8 +327,8 @@ bool BubbleTitle() { return s_edge == kEdgeBottom && !s_compact && !s_look.showT
 
 // 弹在屏幕左右两边：竖着排，从侧边滑出来
 bool Vertical() { return s_edge != kEdgeBottom; }
-// 这次弹出的那条边用哪份“显示哪些、什么顺序”（底部、侧边各一份）
-ModuleSet& Mods() { return g_settings.modules[ModuleSideOf(s_edge)]; }
+// 这次弹出的那条边用哪份“显示哪些、什么顺序”（底部、侧边各一份）。预览时用设置窗口里改着的
+ModuleSet& Mods() { return (s_preview ? s_look.modules : g_settings.modules)[ModuleSideOf(s_edge)]; }
 
 // 面板贴着的那条屏幕边有多长（横排是宽，竖排是高）
 float ScreenSide() { return static_cast<float>(Vertical() ? s_bounds.bottom - s_bounds.top : s_bounds.right - s_bounds.left); }
@@ -341,15 +341,15 @@ const wchar_t* const kWeekdays[7] = {L"周日", L"周一", L"周二", L"周三",
 // 时钟的文字：第一行时间，下面是日期和星期（横排时写在同一行；竖排时面板窄，日期只写月和日，星期另起一行）
 std::wstring ClockText(const SYSTEMTIME& st) {
     wchar_t text[64];
-    if (g_settings.clockSeconds) swprintf(text, 64, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
+    if (s_look.clockSeconds) swprintf(text, 64, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
     else swprintf(text, 64, L"%02d:%02d", st.wHour, st.wMinute);
     std::wstring clock = text, below;
-    if (g_settings.clockDate) {
+    if (s_look.clockDate) {
         if (Vertical()) swprintf(text, 64, L"%d/%d", st.wMonth, st.wDay);
         else swprintf(text, 64, L"%d/%d/%d", st.wYear, st.wMonth, st.wDay);
         below = text;
     }
-    if (g_settings.clockWeekday) below += (below.empty() ? L"" : Vertical() ? L"\n" : L" ") + std::wstring(Tr(kWeekdays[st.wDayOfWeek % 7]));
+    if (s_look.clockWeekday) below += (below.empty() ? L"" : Vertical() ? L"\n" : L" ") + std::wstring(Tr(kWeekdays[st.wDayOfWeek % 7]));
     return below.empty() ? clock : clock + L"\n" + below;
 }
 
@@ -2655,8 +2655,8 @@ void EditRelayout() {
     Redraw();
 }
 
-// 编辑模式里开着却暂时没有内容的媒体（没在放）也显示出来，好拖着排顺序
-void SyncMediaShown() { s_showMedia = Mods().media && !s_compact && (s_editing || s_media.present); }
+// 编辑模式里开着却暂时没有内容的媒体（没在放）也显示出来，好拖着排顺序；预览时也显示，看得出开着
+void SyncMediaShown() { s_showMedia = Mods().media && !s_compact && (s_editing || s_preview || s_media.present); }
 
 void SetEditing(bool on) {
     if (on && (!s_open || s_preview || s_compact)) return;
@@ -3691,42 +3691,17 @@ HMONITOR MonitorForPopup(HWND fg, bool preview, bool startMenu = false) {
 // 弹出。preview：设置窗口里调大小时的预览，不抢前台。
 // startMenu：任务栏藏着时短按了 Win，只留一行格子（竖排时一列）贴着屏幕边弹出来，弹完打开开始菜单。
 // hover：鼠标停在屏幕边上弹出的，弹在鼠标所在的屏幕上，不抢前台，点了它才拿前台
-void Open(bool preview, bool startMenu = false, bool hover = false) {
-    if (!s_hwnd) return;
-    s_preview = preview;
-    EndHoverOpen();
-    HWND fg = GetForegroundWindow();
-    HMONITOR mon = MonitorForPopup(fg, preview, startMenu || hover);
-    PopupPlaceFor(mon, s_edge, s_align, s_offset);
-    if (preview) {
-        s_edge = s_previewEdge;
-        s_align = s_previewAlign;
-    }
-    s_look = preview ? s_previewLook : LookFromSettings();
-    // 开始菜单靠左时会盖住贴在左边的那一列：这时从底边弹
-    if (startMenu && s_edge == kEdgeLeft && !SystemTaskbarCentered()) s_edge = kEdgeBottom;
-    KillTimer(s_hwnd, kTimerPreview);
-    EndStartMode();
-    s_compact = startMenu;
-    s_startPending = startMenu;
-    if (fg != s_hwnd) s_prevForeground = fg;
-
-    // 任务栏露着时弹在它上面，藏起来时贴着屏幕底边
-    MONITORINFO mi = {sizeof(mi)};
-    GetMonitorInfoW(mon, &mi);
-    s_bounds = Taskbar_IsShownOn(mon) ? mi.rcWork : mi.rcMonitor;
-    s_scale = PopupScale(mon);
-
+// 按这条边那份设置定下这次显示哪些模块，读好它们现在的状态（弹出时；预览时设置窗口里改了开关也再来一遍）
+void LoadModules(bool preview) {
     // 音量马上就能读到；亮度在后台读，读到之前先显示上次的值
     const ModuleSet& mods = Mods();
     s_levels = mods.levels && !s_compact;
-    s_monitor = mon;
     s_brightness = -2;
     for (const auto& known : s_knownBrightness)
-        if (known.first == mon) s_brightness = known.second;
+        if (known.first == s_monitor) s_brightness = known.second;
     if (s_levels) {
         RefreshVolume();
-        Brightness_Query(s_hwnd, mon);
+        Brightness_Query(s_hwnd, s_monitor);
     }
     s_brightnessEdited = false;
     s_hoverControl = kNone;
@@ -3761,7 +3736,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
 
     // 托盘图标用后台读好的（面板宽度弹出时就定了，弹出期间读到的新结果留到下次）
     s_tray = mods.tray ? Tray_Hidden() : std::vector<TrayApp>();
-    s_trayStyle = g_settings.trayStyle;
+    s_trayStyle = s_look.trayStyle;
     s_hoverTray = -1;
     s_overTray = false;
     s_trayPage = 0;
@@ -3769,6 +3744,36 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_flipFrom = -1;
     EndTrayMode();
     if (mods.tray && !preview) Tray_Refresh();
+}
+
+void Open(bool preview, bool startMenu = false, bool hover = false) {
+    if (!s_hwnd) return;
+    s_preview = preview;
+    EndHoverOpen();
+    HWND fg = GetForegroundWindow();
+    HMONITOR mon = MonitorForPopup(fg, preview, startMenu || hover);
+    PopupPlaceFor(mon, s_edge, s_align, s_offset);
+    if (preview) {
+        s_edge = s_previewEdge;
+        s_align = s_previewAlign;
+    }
+    s_look = preview ? s_previewLook : LookFromSettings();
+    // 开始菜单靠左时会盖住贴在左边的那一列：这时从底边弹
+    if (startMenu && s_edge == kEdgeLeft && !SystemTaskbarCentered()) s_edge = kEdgeBottom;
+    KillTimer(s_hwnd, kTimerPreview);
+    EndStartMode();
+    s_compact = startMenu;
+    s_startPending = startMenu;
+    if (fg != s_hwnd) s_prevForeground = fg;
+
+    // 任务栏露着时弹在它上面，藏起来时贴着屏幕底边
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(mon, &mi);
+    s_bounds = Taskbar_IsShownOn(mon) ? mi.rcWork : mi.rcMonitor;
+    s_scale = PopupScale(mon);
+
+    s_monitor = mon;
+    LoadModules(preview);
 
     s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, IconPx(), s_monitor));
     s_items = s_allItems;
@@ -3936,8 +3941,23 @@ PopupLook LookFromSettings() {
     look.tint = st.tintColor;
     look.customAccent = st.customAccent;
     look.accent = st.accentColor;
+    look.modules[kSideBottom] = st.modules[kSideBottom];
+    look.modules[kSideEdge] = st.modules[kSideEdge];
+    look.clockSeconds = st.clockSeconds;
+    look.clockWeekday = st.clockWeekday;
+    look.clockDate = st.clockDate;
+    look.trayStyle = st.trayStyle;
     return look;
 }
+
+namespace {
+
+bool SameModules(const ModuleSet& a, const ModuleSet& b) {
+    return a.tray == b.tray && a.levels == b.levels && a.radios == b.radios && a.media == b.media && a.ime == b.ime &&
+           a.battery == b.battery && a.clock == b.clock && std::equal(a.order, a.order + kModuleCount, b.order);
+}
+
+}  // namespace
 
 void Popup_PreviewLook(const PopupLook& look) {
     bool restyle = look.style != s_previewLook.style;
@@ -3948,10 +3968,13 @@ void Popup_PreviewLook(const PopupLook& look) {
         WaitForVBlank();  // 等屏幕上没了它再截，不然新背景里会有它的残影
         return;
     }
+    int side = ModuleSideOf(s_edge);
+    bool reload = !SameModules(look.modules[side], s_look.modules[side]) || look.trayStyle != s_look.trayStyle;
     s_look = look;
     s_glass.SetLight(look.light);
     s_glass.SetTransparency(look.transparency);
     s_glass.SetTint(look.customTint, look.tint);
+    if (reload) LoadModules(true);  // 改了显示哪些：重新定下这次显示的模块
     ComputeLayout();
     UpdatePlacement();
     s_baseValid = false;

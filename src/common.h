@@ -399,6 +399,10 @@ struct PopupLook {
     bool showTitle = true;
     bool customTint = false, customAccent = false;
     COLORREF tint = 0, accent = 0;
+    // 显示哪些（设置窗口里改开关时预览）
+    ModuleSet modules[2];
+    bool clockSeconds = false, clockWeekday = false, clockDate = true;
+    int trayStyle = 0;
 };
 PopupLook LookFromSettings();  // 现在的设置对应的外观
 void Popup_PreviewLook(const PopupLook& look);

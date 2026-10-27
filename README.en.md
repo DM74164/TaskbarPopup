@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find what's playing: its cover art and title above pause / play; click the cover to show previous and next, and again to hide them. There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
+Next to the clock you'll find what's playing: its cover art and title above pause / play; click the cover to show previous and next, and again to hide them. There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first), and the mini taskbar pops up to show each change. The clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 

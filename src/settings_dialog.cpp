@@ -1452,7 +1452,10 @@ void SetToggle(int which, bool on) {
     StartAnimation();
     // 跟着收起 / 放出来的行；“最大化或全屏时隐藏任务栏”换的是下面那个名单
     if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kClock) Relayout(true);
-    if (which == kShowTitle) PreviewPopup(false);
+    // 显示哪些、时钟显示什么：弹出来看看
+    if (which == kShowTitle || FindSideToggle(which) || which == kClockSeconds || which == kClockWeekday ||
+        which == kClockDate)
+        PreviewPopup(false);
     if (which == kPerScreen) {  // 位置和对齐换成这块屏幕自己的（或者共用的）
         ShowPlace();
         Relayout(true);
@@ -1495,13 +1498,28 @@ PopupLook DraftLook() {
     look.showTitle = s_v.on[kShowTitle];
     look.customAccent = s_v.seg[kSegAccent] == 1;
     look.accent = s_v.accent;
+    for (int side = 0; side < 2; ++side) {
+        look.modules[side] = g_settings.modules[side];  // 顺序在编辑模式里排，窗口里只改显示哪些
+        for (const SideToggle& t : kSideToggles) look.modules[side].*t.item = s_v.sides[side].*t.item;
+    }
+    look.clockSeconds = s_v.on[kClockSeconds];
+    look.clockWeekday = s_v.on[kClockWeekday];
+    look.clockDate = s_v.on[kClockDate];
+    look.trayStyle = s_v.seg[kSegTray];
     return look;
 }
 
-// 按窗口里现在选的位置、对齐和外观弹出迷你任务栏预览（大小是现在的）。hold：还按着滑块，先不收起
+// 预览弹在哪条边：在“状态和控制”页看的是“迷你任务栏在”选的那种（选了侧边、位置却在底部时弹在左边）
+int PreviewEdge() {
+    int edge = s_v.seg[kSegEdge];
+    if (s_page != kPageControls || ModuleSideOf(edge) == s_v.seg[kSegSide]) return edge;
+    return s_v.seg[kSegSide] == kSideBottom ? kEdgeBottom : kEdgeLeft;
+}
+
+// 按窗口里现在选的位置、对齐、外观和显示哪些弹出迷你任务栏预览（大小是现在的）。hold：还按着滑块，先不收起
 void PreviewPopup(bool hold) {
     Popup_PreviewLook(DraftLook());
-    Popup_Preview(g_settings.popupScale, s_v.seg[kSegEdge], s_v.seg[kSegAlign], hold);
+    Popup_Preview(g_settings.popupScale, PreviewEdge(), s_v.seg[kSegAlign], hold);
 }
 
 void SetSlider(int which, int value) {
@@ -2071,7 +2089,7 @@ void Activate(const Item& it) {
                 group == kSegAlign || group == kSegSide)
                 Relayout(true);
             if (group == kSegEdge || group == kSegAlign || group == kSegStyle || group == kSegTheme || group == kSegTint ||
-                group == kSegAccent)
+                group == kSegAccent || group == kSegSide || group == kSegTray)
                 PreviewPopup(false);  // 弹在选的位置、换上选的样子看看
             break;
         }
