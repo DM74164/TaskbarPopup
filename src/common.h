@@ -39,7 +39,8 @@ namespace app {
 // 液态玻璃 / Win11 原版（平的亚克力，细边框）。以前的毛玻璃（1）由 Win11 原版顶替
 enum GlassStyle { kGlassLiquid, kGlassWin11 };
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
-enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyCount };  // 弹出迷你任务栏 / 固定前台的小窗口
+// 弹出迷你任务栏 / 固定前台的小窗口 / 把窗口移到下一块屏幕 / 在下一块屏幕弹出迷你任务栏
+enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyMove, kHotkeyNextScreen, kHotkeyCount };
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
 // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右 / 自定义（编辑模式里拖到的位置，见 popupOffset）。
 // 竖排时只看是不是自定义，别的都是上下居中
@@ -47,6 +48,8 @@ enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight, kAlignCus
 enum Language { kLangSystem, kLangChinese, kLangEnglish };  // 界面语言
 enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排
 enum PopupMonitor { kPopupAtCursor, kPopupAtActive };  // 迷你任务栏弹在哪块屏幕上：鼠标所在的 / 前台窗口所在的
+// 迷你任务栏列哪些屏幕上的窗口：跟着系统任务栏的设置 / 所有屏幕上的 / 只列它所在那块屏幕上的
+enum PopupWindows { kWindowsSystem, kWindowsAll, kWindowsOwnScreen };
 // 某块屏幕自己的迷你任务栏位置和对齐（“每块屏幕分别设置”开着时用）
 struct ScreenPlace {
     std::wstring key;  // MonitorKey
@@ -105,7 +108,8 @@ struct Settings {
     bool pinTopmost = false;     // 固定的小窗口在所有窗口上面（置顶），不只是全屏窗口
     UINT hotkey[kHotkeyCount] = {};       // 快捷键（见 MakeHotkey），下标是 HotkeyId，0 = 没设
     bool hotkeyHold[kHotkeyCount] = {};   // 长按触发，否则单按
-    int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
+    int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs,
+                                      kDefaultLongPressMs};  // 长按要按住多久
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     int glassTransparency = kDefaultGlassTransparency;  // 迷你任务栏液态玻璃的透明度，百分比，深浅色共用
@@ -124,6 +128,12 @@ struct Settings {
     // 名单里是小写的程序文件名，如 notepad.exe。“最大化或全屏时隐藏任务栏”开着时用 excludeApps，关着时用 includeApps
     std::vector<std::wstring> excludeApps;  // 最大化时不隐藏任务栏的程序
     std::vector<std::wstring> includeApps;  // 最大化时隐藏任务栏的程序
+    // 多块屏幕
+    bool keepOtherTaskbars = true;  // 别的屏幕上的任务栏照常显示：肯直接拉伸的窗口不开（对所有屏幕都生效的）自动隐藏
+    std::vector<std::wstring> noHideScreens;  // 窗口最大化时也不隐藏任务栏的屏幕（MonitorKey）
+    int popupWindows = kWindowsSystem;        // 迷你任务栏列哪些屏幕上的窗口，见 PopupWindows
+    bool markScreens = true;                  // 迷你任务栏里别的屏幕上的窗口在格子角上标出屏幕编号
+    bool brightnessAllScreens = false;        // 亮度调节条同时调所有屏幕
 };
 
 std::wstring NormalizeExeName(const std::wstring& text);  // 路径或名字 → 小写文件名，没写扩展名的补上 .exe
@@ -187,6 +197,7 @@ constexpr UINT_PTR kTimerShowPopup = 3;
 constexpr UINT_PTR kTimerAfterAutoHide = 4;  // 关掉自动隐藏以后收拾窗口和桌面图标
 constexpr UINT_PTR kTimerRetryOff = 5;       // 没能关掉自动隐藏，过一会儿再试
 constexpr UINT_PTR kTimerUpdate = 6;         // 自动检查更新
+constexpr UINT_PTR kTimerAfterShow = 7;      // 没开自动隐藏时：任务栏放回来以后把拉伸过的窗口缩回去
 
 // 主窗口消息
 constexpr UINT WM_APP_TRAY = WM_APP + 1;       // 托盘图标的鼠标事件
@@ -208,6 +219,7 @@ void Fullscreen_OnAutoHideOn(UINT seq, bool done);   // 收到 WM_APP_AUTOHIDE_O
 void Fullscreen_OnTaskbarCreated();                  // 资源管理器（重新）启动了
 void Fullscreen_QuietStartMenu();                    // 接下来打开的开始菜单是迷你任务栏点的：不把藏着的任务栏放出来
 bool Fullscreen_TaskbarHidden();                     // 本程序现在藏着任务栏（有窗口最大化或全屏）
+void Fullscreen_DisplayChanged();                    // 接上、拔掉屏幕，改了分辨率或排列（WM_DISPLAYCHANGE）
 // 托盘图标那边要去“隐藏的图标”里点：show 时临时显示本程序藏着的任务栏 tb（UI 自动化看不到藏着的窗口里的按钮），
 // 否则把它藏回去。都不放动画。tb 不是本程序藏着的返回 false
 bool Fullscreen_PeekTaskbar(HWND tb, bool show);
@@ -273,6 +285,7 @@ struct WindowEntry {
     bool active = false;
 };
 // monitor：迷你任务栏弹在哪块屏幕上。系统设置成多块屏幕上的任务栏只显示自己屏幕上的窗口时，照样只列这块屏上的
+// （设置里的 popupWindows 可以改成总是列所有屏幕上的，或者总是只列这块屏上的）
 std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx, HMONITOR monitor);
 bool IsTaskbarWindow(HWND h);  // 按任务栏 / Alt+Tab 的规则算是应用窗口
 void Windows_ClearCache();
@@ -410,6 +423,8 @@ void Popup_EndPreview();  // 马上收起预览
 void Popup_Configure();   // 按设置开关“鼠标停在屏幕边上时弹出”
 void Popup_Refresh();     // 开着的话重画（比如要提醒的窗口变了）
 HMONITOR Popup_Monitor();  // 迷你任务栏开着（不算预览）时在哪块屏幕上，没开着为空
+void Popup_NextScreen();   // 在下一块屏幕上弹出（开着的话挪过去）
+void Popup_DisplayChanged();  // 屏幕变了：开着的话收起，记着的各屏亮度作废
 
 // ---------------- 消息提醒（attention.cpp）----------------
 // 程序在任务栏上闪烁（来了新消息）时记下它：迷你任务栏里它的格子变色；任务栏被本程序藏着时，
@@ -418,6 +433,7 @@ void Attention_Configure();  // 按 g_settings.flashAlert 开关，主窗口建�
 bool Attention_OnMessage(UINT msg, WPARAM wParam, LPARAM lParam);  // 主窗口收到的是外壳钩子消息就处理掉，返回 true
 bool Attention_IsUrgent(HWND hwnd);  // 这个窗口闪过、还没去看
 void Attention_Update();     // 迷你任务栏弹出、收起以后：马上重新看光要不要亮
+void Attention_DisplayChanged();  // 屏幕变了：亮着的光按新的屏幕重新摆
 void Attention_Shutdown();
 
 // ---------------- 电量和输入法（indicators.cpp）----------------
@@ -494,6 +510,7 @@ void Radios_Stop();  // 退出前结束后台线程
 // ---------------- 设置窗口 ----------------
 void SettingsDialog_Show();
 void SettingsDialog_SettingsChanged();  // 在别处（迷你任务栏的编辑模式里）改了设置：窗口开着的话没动过的项跟着变
+void SettingsDialog_DisplayChanged();   // 屏幕变了：开着的话重新排（屏幕列表、只有一块屏时收起的项）
 
 // ---------------- 小窗口留在全屏窗口上面 ----------------
 void FloatWindows_Configure(bool enabled, bool topmost = false);  // topmost：固定的小窗口在所有窗口上面
@@ -628,6 +645,11 @@ void ForceForeground(HWND hwnd);
 float MonitorScale(HMONITOR monitor);
 std::wstring MonitorKey(HMONITOR monitor);    // 认出同一块屏幕用的：接口名（换了排列、重新接上都不变），取不到时用设备名
 std::wstring MonitorLabel(HMONITOR monitor);  // 给人看的名字：屏幕 2（主屏幕）
+int MonitorNumber(HMONITOR monitor);          // 系统给的编号（设备名 \\.\DISPLAY2 里的 2），取不到时为 0
+std::vector<HMONITOR> MonitorsInOrder();      // 所有屏幕，从左到右（一样时从上到下）
+HMONITOR NextMonitor(HMONITOR monitor);       // MonitorsInOrder 里的下一块，最后一块的下一块是第一块
+// 把窗口挪到另一块屏幕上：在原来那块屏的什么位置，到新的屏上还在差不多的位置；最大化的还是最大化，最小化的在那块屏上还原
+bool MoveWindowToMonitor(HWND hwnd, HMONITOR to);
 void AddRoundRect(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& r, float radius);
 std::shared_ptr<Gdiplus::Bitmap> BitmapFromIcon(HICON hIcon);
 double NowMs();        // 高精度时钟，毫秒

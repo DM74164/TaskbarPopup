@@ -204,6 +204,7 @@ std::unique_ptr<FontFamily> s_fontFamily;
 bool s_levels = true;  // 这次弹出显不显示调节条（弹出时按设置定下来）
 Slider s_sliders[2];
 HMONITOR s_monitor = nullptr;  // 弹窗所在的屏幕，亮度调的是它
+HMONITOR s_forceMonitor = nullptr;  // 不为空：这次弹在这块屏幕上（快捷键“在下一块屏幕弹出”）
 bool s_hasVolume = false;      // 有没有可用的播放设备
 float s_volume = 0;
 bool s_muted = false;
@@ -994,6 +995,29 @@ Color UrgentColor(BYTE alpha = 255) { return s_glass.Light() ? Color(alpha, 235,
 
 bool IsUrgentItem(int i) { return s_items[i].hwnd && Attention_IsUrgent(s_items[i].hwnd); }
 
+// 别的屏幕上的窗口：格子右上角一个小圆，写着它在第几块屏幕（和设置里“屏幕 2”的编号一样）
+void DrawScreenBadge(Graphics& g, const RectF& tile, HWND hwnd) {
+    if (!hwnd || !g_settings.markScreens || GetSystemMetrics(SM_CMONITORS) < 2) return;
+    HMONITOR m = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    int number = m == s_monitor ? 0 : MonitorNumber(m);
+    if (number <= 0) return;
+    bool light = s_glass.Light();
+    float d = std::max(Px(14), tile.Width * 0.3f);
+    RectF r(tile.X + tile.Width - d - Px(1), tile.Y + Px(1), d, d);
+    FillRound(g, r, d / 2, light ? Color(235, 255, 255, 255) : Color(235, 48, 48, 54));
+    GraphicsPath rim;
+    AddRoundRect(rim, r, d / 2);
+    Pen pen(light ? Color(40, 0, 0, 0) : Color(60, 255, 255, 255), std::max(1.0f, Px(1)));
+    g.DrawPath(&pen, &rim);
+    Font font(s_fontFamily.get(), d * 0.6f, FontStyleBold, UnitPixel);
+    StringFormat format(StringFormatFlagsNoWrap);
+    format.SetAlignment(StringAlignmentCenter);
+    format.SetLineAlignment(StringAlignmentCenter);
+    SolidBrush brush(Colors().text);
+    std::wstring text = std::to_wstring(number);
+    g.DrawString(text.c_str(), -1, &font, r, &format, &brush);
+}
+
 void DrawTile(Graphics& g, int idx) {
     const Palette& pal = Colors();
     RectF r = TileRect(idx);
@@ -1021,6 +1045,7 @@ void DrawTile(Graphics& g, int idx) {
     RectF iconRect(cx - is / 2, cy - is / 2, is, is);
     if (item.icon) g.DrawImage(item.icon.get(), iconRect);
     else FillRound(g, iconRect, Px(4), pal.separator);
+    DrawScreenBadge(g, r, item.hwnd);
 
     // 和 Win11 任务栏一样：当前窗口是一条长的强调色短线，其它打开的窗口是短点，没运行的固定应用没有。
     // 竖排时竖着画在靠屏幕边的那一侧
@@ -1041,6 +1066,9 @@ float SliderValue(int which) {
     return s_brightness >= 0 ? s_brightness / 100.0f : 0;
 }
 
+// 亮度条同时调所有屏幕（设置里打开了，而且接着不止一块屏）
+bool AllBrightness() { return g_settings.brightnessAllScreens && GetSystemMetrics(SM_CMONITORS) > 1; }
+
 std::wstring SliderText(int which) {
     if (which == 0) {
         if (!s_hasVolume) return Tr(L"没有可用的播放设备");
@@ -1049,7 +1077,7 @@ std::wstring SliderText(int which) {
     }
     if (s_brightness == -2) return Tr(L"正在读取亮度…");
     if (s_brightness < 0) return Tr(L"这块屏幕不支持调节亮度");
-    return TrF(L"亮度 %d%%", s_brightness);
+    return TrF(AllBrightness() ? L"所有屏幕亮度 %d%%" : L"亮度 %d%%", s_brightness);
 }
 
 void RefreshVolume() { s_hasVolume = Volume_Get(s_volume, s_muted); }
@@ -1078,8 +1106,11 @@ void SetSlider(int which, float value) {
         if (percent == s_brightness) return;
         s_brightness = percent;
         s_brightnessEdited = true;
-        RememberBrightness(s_monitor, percent);
-        Brightness_Set(s_monitor, percent);
+        std::vector<HMONITOR> screens = AllBrightness() ? MonitorsInOrder() : std::vector<HMONITOR>{s_monitor};
+        for (HMONITOR m : screens) {
+            RememberBrightness(m, percent);
+            Brightness_Set(m, percent);
+        }
     }
     Redraw();
 }
@@ -2198,6 +2229,7 @@ enum MenuCmd : UINT {
     kCmdMinimize,
     kCmdMaximize,
     kCmdRecent = 100,  // 最近项：kCmdRecent + 序号
+    kCmdMoveTo = 200,  // 移到另一块屏幕：kCmdMoveTo + 它在 MonitorsInOrder 里的序号
 };
 constexpr size_t kMaxRecent = 10;
 constexpr size_t kMaxMenuText = 40;
@@ -2236,6 +2268,18 @@ void WindowCommand(HWND h, WPARAM command) {
     HideNow();
 }
 
+// 把窗口挪到另一块屏幕上，再和点格子一样切到它
+void MoveToScreen(HWND h, HMONITOR to) {
+    if (!IsWindow(h)) {
+        HideNow();
+        return;
+    }
+    s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
+    MoveWindowToMonitor(h, to);
+    ForceForeground(h);
+    HideNow();
+}
+
 // 开始按钮：和右键系统的开始按钮一样，打开 Win+X 菜单
 void ShowStartContextMenu() {
     HideNow();
@@ -2258,7 +2302,7 @@ POINT MenuAnchor(const RectF& r) {  // 客户区坐标
 
 // 右键格子：尽量和系统任务栏的右键菜单一样。
 // 运行中的窗口：跳转列表的“最近”项；应用名（再开一个）、以管理员身份运行、打开文件所在的位置；
-// 还原 / 最小化 / 最大化；“最大化时不隐藏任务栏”（关着“最大化或全屏时隐藏任务栏”时是“最大化时隐藏任务栏”）；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
+// 还原 / 最小化 / 最大化、移到另一块屏幕（不止两块时选哪一块）；“最大化时不隐藏任务栏”（关着“最大化或全屏时隐藏任务栏”时是“最大化时隐藏任务栏”）；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
 // 没运行的固定应用、打字筛选出来的应用：“最近”项；打开、以管理员身份运行、打开文件所在的位置。
 // at：菜单的位置（客户区坐标），对齐方式见 MenuAlign
 void ShowItemMenu(int idx, POINT at) {
@@ -2293,6 +2337,9 @@ void ShowItemMenu(int idx, POINT at) {
         if (exeName == L"applicationframehost.exe") exeName.clear();
     }
 
+    std::vector<HMONITOR> screens = hwnd ? MonitorsInOrder() : std::vector<HMONITOR>();
+    HMONITOR here = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
+
     HMENU menu = CreatePopupMenu();
     // 两组之间的分隔线：前面有东西、最后一项又不是分隔线时才加
     auto separate = [&] {
@@ -2316,6 +2363,15 @@ void ShowItemMenu(int idx, POINT at) {
         AppendMenuW(menu, MF_STRING | (iconic || zoomed ? 0 : MF_GRAYED), kCmdRestore, Tr(L"还原"));
         AppendMenuW(menu, MF_STRING | (iconic ? MF_GRAYED : 0), kCmdMinimize, Tr(L"最小化"));
         AppendMenuW(menu, MF_STRING | (!zoomed && canMaximize ? 0 : MF_GRAYED), kCmdMaximize, Tr(L"最大化"));
+        if (screens.size() == 2) {
+            AppendMenuW(menu, MF_STRING, kCmdMoveTo + (screens[0] == here ? 1 : 0), Tr(L"移到另一块屏幕"));
+        } else if (screens.size() > 2) {
+            HMENU sub = CreatePopupMenu();
+            for (size_t i = 0; i < screens.size(); ++i)
+                AppendMenuW(sub, MF_STRING | (screens[i] == here ? MF_GRAYED : 0), kCmdMoveTo + i,
+                            MenuText(MonitorLabel(screens[i])).c_str());
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), Tr(L"移到另一块屏幕"));
+        }
         if (!exeName.empty())
             AppendMenuW(menu, MF_STRING | (IsExceptionExe(exeName) ? MF_CHECKED : 0), kCmdExclude,
                         Tr(g_settings.autoHideOnFullscreen ? L"最大化时不隐藏任务栏" : L"最大化时隐藏任务栏"));
@@ -2343,6 +2399,10 @@ void ShowItemMenu(int idx, POINT at) {
     if (cmd >= kCmdRecent && cmd < kCmdRecent + recent.size()) {
         OpenRecentItem(recent[cmd - kCmdRecent], app.exe);
         HideNow();
+        return;
+    }
+    if (cmd >= kCmdMoveTo && cmd < kCmdMoveTo + screens.size()) {
+        MoveToScreen(hwnd, screens[cmd - kCmdMoveTo]);
         return;
     }
     switch (cmd) {
@@ -3701,6 +3761,7 @@ namespace {
 // 设成跟着前台窗口时，前台是桌面、任务栏、本程序这类没有“所在屏幕”的窗口的话还是跟着鼠标。
 // startMenu：短按 Win 要接着打开开始菜单，照旧跟着鼠标
 HMONITOR MonitorForPopup(HWND fg, bool preview, bool startMenu = false) {
+    if (s_forceMonitor && !preview) return s_forceMonitor;
     if (preview)
         if (HWND dialog = SettingsDialog_Hwnd()) return MonitorFromWindow(dialog, MONITOR_DEFAULTTONEAREST);
     if (g_settings.popupMonitor == kPopupAtActive && !startMenu && fg && IsWindowVisible(fg) && !IsIconic(fg) &&
@@ -3952,6 +4013,30 @@ void Popup_Configure() {
 void Popup_Refresh() { Redraw(); }
 
 HMONITOR Popup_Monitor() { return s_open && !s_preview ? s_monitor : nullptr; }
+
+void Popup_NextScreen() {
+    if (!s_hwnd) return;
+    if (GetSystemMetrics(SM_CMONITORS) < 2) {  // 只有一块屏幕：和弹出迷你任务栏的快捷键一样
+        Popup_Toggle();
+        return;
+    }
+    HMONITOR from = s_open && !s_preview ? s_monitor : MonitorForPopup(GetForegroundWindow(), false);
+    HMONITOR to = NextMonitor(from);
+    if (!to) return;
+    Log(L"按了在下一块屏幕弹出的快捷键：弹在%ls", MonitorLabel(to).c_str());
+    if (s_open) {
+        HideNow();
+        WaitForVBlank();  // 等屏幕上没了它再截背景
+    }
+    s_forceMonitor = to;
+    Open(false);
+    s_forceMonitor = nullptr;
+}
+
+void Popup_DisplayChanged() {
+    s_knownBrightness.clear();  // 屏幕的句柄可能换了，记着的亮度对不上
+    if (s_hwnd && s_open) HideNow();  // 位置、大小都是按原来的屏幕算的
+}
 
 PopupLook LookFromSettings() {
     const Settings& st = g_settings;

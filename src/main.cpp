@@ -29,7 +29,7 @@ NOTIFYICONDATAW s_nid = {};
 HICON s_trayIcon = nullptr;
 UINT s_msgTaskbarCreated = 0;
 std::wstring s_balloonUrl;  // 最近一次弹出的气泡被点时要打开的网址，空 = 点了不做什么
-const wchar_t* const kHotkeyKeys[kHotkeyCount] = {L"PopupHotkey", L"PinHotkey"};  // 设置文件里的名字，长按的再加 Hold
+const wchar_t* const kHotkeyKeys[kHotkeyCount] = {L"PopupHotkey", L"PinHotkey", L"MoveHotkey", L"NextScreenHotkey"};  // 设置文件里的名字，长按的再加 Hold
 
 // 运行时画托盘图标：底部一条任务栏 + 向上的箭头
 HICON CreateAppIcon() {
@@ -228,6 +228,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_DISPLAYCHANGE:
             DesktopIcons_DisplayChanged();
+            Fullscreen_DisplayChanged();
+            Popup_DisplayChanged();
+            Attention_DisplayChanged();
+            SettingsDialog_DisplayChanged();
             break;
 
         case WM_TIMER:
@@ -449,6 +453,11 @@ void LoadSettings() {
         GetPrivateProfileIntW(L"General", L"PopupMonitor", kPopupAtCursor, f.c_str()) == kPopupAtActive ? kPopupAtActive
                                                                                                        : kPopupAtCursor;
     g_settings.popupPerScreen = GetPrivateProfileIntW(L"General", L"PopupPerScreen", 0, f.c_str()) != 0;
+    g_settings.keepOtherTaskbars = GetPrivateProfileIntW(L"General", L"KeepOtherTaskbars", 1, f.c_str()) != 0;
+    int windows = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupWindows", kWindowsSystem, f.c_str()));
+    g_settings.popupWindows = windows == kWindowsAll || windows == kWindowsOwnScreen ? windows : kWindowsSystem;
+    g_settings.markScreens = GetPrivateProfileIntW(L"General", L"MarkScreens", 1, f.c_str()) != 0;
+    g_settings.brightnessAllScreens = GetPrivateProfileIntW(L"General", L"BrightnessAllScreens", 0, f.c_str()) != 0;
     // 没设过语言：新装的跟随系统；以前用过的（设置文件里已经有东西，哪怕只有程序自己记的状态）保持原来的中文界面。
     // 马上记下来，不然新装的用过一次、设置文件里有了东西，下次启动就被当成以前用过的
     int language = static_cast<int>(GetPrivateProfileIntW(L"General", L"Language", -1, f.c_str()));
@@ -515,6 +524,17 @@ void LoadSettings() {
     };
     loadList(L"ExcludeApps", g_settings.excludeApps);
     loadList(L"IncludeApps", g_settings.includeApps);
+    // 不隐藏任务栏的屏幕（MonitorKey），用 ; 隔开
+    GetPrivateProfileStringW(L"General", L"NoHideScreens", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+    g_settings.noHideScreens.clear();
+    std::wstring screens = buf.data();
+    for (size_t start = 0; start < screens.size();) {
+        size_t end = screens.find(L';', start);
+        if (end == std::wstring::npos) end = screens.size();
+        std::wstring key = ToLower(screens.substr(start, end - start));
+        if (!key.empty() && !InAppList(g_settings.noHideScreens, key)) g_settings.noHideScreens.push_back(key);
+        start = end + 1;
+    }
     // 每块屏幕的位置和对齐：屏幕|边|对齐|自定义位置（以前的版本没有最后一项），用 ; 隔开
     GetPrivateProfileStringW(L"General", L"ScreenPlaces", L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
     g_settings.screens.clear();
@@ -574,6 +594,10 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PopupOffset", std::to_wstring(g_settings.popupOffset).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupMonitor", std::to_wstring(g_settings.popupMonitor).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupPerScreen", g_settings.popupPerScreen ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"KeepOtherTaskbars", g_settings.keepOtherTaskbars ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"PopupWindows", std::to_wstring(g_settings.popupWindows).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"MarkScreens", g_settings.markScreens ? L"1" : L"0", f.c_str());
+    WritePrivateProfileStringW(L"General", L"BrightnessAllScreens", g_settings.brightnessAllScreens ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"Language", std::to_wstring(g_settings.language).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"DebugLog", g_settings.debugLog ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"RunAsAdmin", g_settings.runAsAdmin ? L"1" : L"0", f.c_str());
@@ -599,6 +623,7 @@ void SaveSettings() {
     };
     saveList(L"ExcludeApps", g_settings.excludeApps);
     saveList(L"IncludeApps", g_settings.includeApps);
+    saveList(L"NoHideScreens", g_settings.noHideScreens);
     std::wstring places;
     for (const ScreenPlace& p : g_settings.screens)
         places += (places.empty() ? L"" : L";") + p.key + L"|" + std::to_wstring(p.edge) + L"|" + std::to_wstring(p.align) +

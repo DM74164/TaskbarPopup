@@ -42,14 +42,17 @@ constexpr float kRowPad = 14;  // 卡片里左右的边距
 constexpr float kChipH = 28;
 
 // 分类：左边导航一项一页
-enum Page { kPageTaskbar, kPageMini, kPageControls, kPageSize, kPageLook, kPagePresets, kPageHotkeys, kPageStartup, kPageCount };
-const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"状态和控制", L"大小和位置",
+enum Page {
+    kPageTaskbar, kPageMini, kPageControls, kPageSize, kPageScreens, kPageLook, kPagePresets, kPageHotkeys, kPageStartup,
+    kPageCount
+};
+const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏", L"状态和控制", L"大小和位置", L"多屏幕",
                                                L"外观",   L"方案和备份", L"快捷键",     L"启动和更新"};
 
 // 开关
 enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
              kAlwaysHide, kFlashAlert, kEdgePopup, kMedia, kIme, kBattery, kClock, kClockSeconds, kClockWeekday, kClockDate,
-             kShowTitle, kToggleCount };
+             kShowTitle, kKeepOtherBars, kMarkScreens, kBrightAll, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -77,11 +80,15 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"星期", nullptr},
     {L"日期", nullptr},
     {L"显示标题行", L"关掉时名字显示在面板上方"},
+    {L"其它屏幕的任务栏照常显示", L"Edge、Chrome 这类程序最大化时还是一起藏"},
+    {L"标出其它屏幕上的窗口", L"图标右上角显示屏幕编号"},
+    {L"所有屏幕亮度一起调", nullptr},
 };
 
 // 滑块
-// kPopupHoldMs、kPinHoldMs = kPopupHoldMs + HotkeyId
-enum SliderId { kLongPressMs, kRadius, kPopupHoldMs, kPinHoldMs, kGlassAlpha, kIconSize, kIconGap, kSliderCount };
+// 快捷键的长按时长：kPopupHoldMs + HotkeyId
+enum SliderId { kLongPressMs, kRadius, kPopupHoldMs, kPinHoldMs, kMoveHoldMs, kNextHoldMs, kGlassAlpha, kIconSize, kIconGap, kSliderCount };
+static_assert(kPopupHoldMs + kHotkeyCount == kGlassAlpha, "每个快捷键一个长按时长");
 struct SliderSpec {
     const wchar_t* label;
     int minValue, maxValue, step;
@@ -91,13 +98,18 @@ const SliderSpec kSliderSpec[kSliderCount] = {
     {L"圆角", 0, kMaxPopupRadius, 2},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
+    {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
+    {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"透明度", 0, 100, 5},
     {L"图标大小", kMinIconSize, kMaxIconSize, 5},
     {L"图标间距", 0, kMaxIconGap, 1},
 };
 
 // 几选一（分段按钮）
-enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegMonitor, kSegTint, kSegAccent, kSegSide, kSegCount };
+enum SegId {
+    kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegMonitor, kSegTint, kSegAccent, kSegSide, kSegWindows,
+    kSegCount
+};
 struct SegSpec {
     const wchar_t* label;
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
@@ -113,6 +125,7 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"底色", {L"跟随颜色", L"自定义"}},
     {L"强调色", {L"跟随系统", L"自定义"}},
     {L"迷你任务栏在", {L"底部", L"侧边"}},  // 下标是 ModuleSide：“状态和控制”页的开关改的是哪一份（只是换着看，不存）
+    {L"显示的窗口", {L"跟随系统", L"所有屏幕", L"这块屏幕"}},  // 下标是 PopupWindows
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -120,13 +133,15 @@ constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSeg
 const ToggleText kHotkeyText[kHotkeyCount] = {
     {L"弹出迷你任务栏", L"再按一次收起"},
     {L"固定前台的小窗口", L"再按一次取消；鼠标键固定鼠标下的窗口"},
+    {L"把前台窗口移到下一块屏幕", L"鼠标键移的是鼠标下的窗口"},
+    {L"在下一块屏幕弹出迷你任务栏", L"再按一次换到再下一块"},
 };
 const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 kHotkeyMode：Item::index = 第几个 * kSegStride + 这个下标
 
 // 能点的东西
 enum Kind {
     kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kClose,
-    kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip
+    kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip, kScreenChip
 };
 struct Item {
     Kind kind = kNoItem;
@@ -149,6 +164,7 @@ struct Values {
     bool hold[kHotkeyCount] = {};
     std::vector<std::wstring> exclude;  // 最大化时不隐藏任务栏的程序
     std::vector<std::wstring> include;  // 最大化时隐藏任务栏的程序（关着“最大化或全屏时隐藏任务栏”时用）
+    std::vector<std::wstring> noHide;   // 不隐藏任务栏的屏幕（MonitorKey）
 };
 Values s_v, s_initial;
 
@@ -300,7 +316,7 @@ const Palette& Colors() {
 bool HotkeyEnabled(int which) { return which != kHotkeyPin || s_v.on[kKeepFloats]; }  // 固定了也要它开着才有用
 bool SliderEnabled(int which) {
     if (which == kLongPressMs) return s_v.on[kLongPress];
-    if (which == kPopupHoldMs || which == kPinHoldMs) return HotkeyEnabled(which - kPopupHoldMs);
+    if (which >= kPopupHoldMs && which < kPopupHoldMs + kHotkeyCount) return HotkeyEnabled(which - kPopupHoldMs);
     return true;
 }
 
@@ -512,6 +528,38 @@ float ScreenRow(float x, float y, float w) {
     return Px(44);
 }
 
+// 隐藏任务栏的屏幕：每块屏幕一个小胶囊（从左往右按屏幕的位置排），开着的是强调色，点一下切换
+std::vector<std::pair<std::wstring, std::wstring>> s_screenChips;  // 每块屏幕的 MonitorKey 和名字
+
+bool ScreenHides(const std::wstring& key) { return !InAppList(s_v.noHide, key); }
+
+float ScreenChipsRow(float x, float y, float w) {
+    s_screenChips.clear();
+    for (HMONITOR m : MonitorsInOrder()) s_screenChips.push_back({MonitorKey(m), MonitorLabel(m)});
+    std::wstring label = Tr(L"隐藏任务栏的屏幕");
+    std::vector<float> widths;
+    float total = -Px(6);
+    for (const auto& chip : s_screenChips) {
+        widths.push_back(MeasureWidth(chip.second, Px(12.5f)) + Px(28));
+        total += widths.back() + Px(6);
+    }
+    float labelW = MeasureWidth(label, Px(13.5f));
+    float h = Px(50), ch = Px(kChipH);
+    if (labelW + Px(16) + total <= w - 2 * Px(kRowPad)) {  // 放得下就和名字排在一行
+        float cx = x + w - Px(kRowPad) - total;
+        s_texts.push_back({label, RectF(x + Px(kRowPad), y, cx - x - Px(kRowPad) - Px(4), h), 4});
+        for (size_t i = 0; i < widths.size(); ++i) {
+            s_items.push_back({kScreenChip, static_cast<int>(i), RectF(cx, y + (h - ch) / 2, widths[i], ch)});
+            cx += widths[i] + Px(6);
+        }
+        return h;
+    }
+    s_texts.push_back({label, RectF(x + Px(kRowPad), y + Px(4), w - 2 * Px(kRowPad), Px(32)), 4});
+    ChipFlow flow(x, y + Px(32), w);
+    for (size_t i = 0; i < widths.size(); ++i) s_items.push_back({kScreenChip, static_cast<int>(i), flow.Place(widths[i])});
+    return flow.Bottom() + Px(4) - y;
+}
+
 // 一页的内容，从 (x, y) 往下排，返回最后一组下面的位置
 float BuildPage(int page, float x, float y) {
     switch (page) {
@@ -531,9 +579,6 @@ float BuildPage(int page, float x, float y) {
             std::vector<RowFn> popup = {[](float x, float y, float w) { return ToggleRow(kLongPress, x, y, w); }};
             if (s_v.on[kLongPress]) popup.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
             popup.push_back([](float x, float y, float w) { return ToggleRow(kEdgePopup, x, y, w); });
-            // 只有一块屏幕时不用选弹在哪块
-            if (MultiScreen() || s_v.seg[kSegMonitor] != kPopupAtCursor)
-                popup.push_back([](float x, float y, float w) { return SegRow(kSegMonitor, x, y, w); });
             y = AddGroup(x, y, L"弹出", popup);
             return AddGroup(x, y, L"显示",
                             {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
@@ -567,6 +612,17 @@ float BuildPage(int page, float x, float y) {
             if (s_v.on[kPerScreen]) place.push_back(ScreenRow);
             return AddGroup(x, y, L"位置", place);
         }
+        case kPageScreens: {
+            y = AddGroup(x, y, L"任务栏",
+                         {[](float x, float y, float w) { return ToggleRow(kKeepOtherBars, x, y, w); }, ScreenChipsRow});
+            // 只显示这块屏幕上的窗口时用不着标出别的屏幕
+            std::vector<RowFn> mini = {[](float x, float y, float w) { return SegRow(kSegMonitor, x, y, w); },
+                                       [](float x, float y, float w) { return SegRow(kSegWindows, x, y, w); }};
+            if (s_v.seg[kSegWindows] != kWindowsOwnScreen)
+                mini.push_back([](float x, float y, float w) { return ToggleRow(kMarkScreens, x, y, w); });
+            mini.push_back([](float x, float y, float w) { return ToggleRow(kBrightAll, x, y, w); });
+            return AddGroup(x, y, L"迷你任务栏", mini);
+        }
         case kPageLook: {
             y = AddGroup(x, y, L"界面",
                          {[](float x, float y, float w) { return SegRow(kSegStyle, x, y, w); },
@@ -585,7 +641,9 @@ float BuildPage(int page, float x, float y) {
         case kPageHotkeys:
             return AddGroup(x, y, nullptr,
                             {[](float x, float y, float w) { return HotkeyRow(kHotkeyPopup, x, y, w); },
-                             [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); }});
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); },
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeyMove, x, y, w); },
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeyNextScreen, x, y, w); }});
         default:
             return AddGroup(x, y, nullptr,
                             {[](float x, float y, float w) { return ToggleRow(kAutoStart, x, y, w); },
@@ -919,12 +977,13 @@ void DrawChip(Graphics& g, const Item& it) {
         DrawText(g, PresetName(it.index), Px(12.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
         return;
     }
-    if (it.kind == kToggleChip) {
-        bool on = s_v.on[it.index];
+    if (it.kind == kToggleChip || it.kind == kScreenChip) {
+        bool screen = it.kind == kScreenChip;
+        bool on = screen ? ScreenHides(s_screenChips[it.index].first) : s_v.on[it.index];
         if (on) FillRound(g, r, r.Height / 2, hot ? Mix(pal.accent, Color(255, 255, 255, 255), 0.15f) : pal.accent);
         else DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
-        DrawText(g, Tr(kToggleText[it.index].label), Px(12.5f), FontStyleRegular, r, on ? pal.onAccent : pal.text,
-                 StringAlignmentCenter);
+        DrawText(g, screen ? s_screenChips[it.index].second : Tr(kToggleText[it.index].label), Px(12.5f), FontStyleRegular, r,
+                 on ? pal.onAccent : pal.text, StringAlignmentCenter);
         return;
     }
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
@@ -1028,7 +1087,8 @@ void DrawContent(Graphics& g) {
             case kAddChip:
             case kPreset:
             case kAddPreset:
-            case kToggleChip: DrawChip(g, it); break;
+            case kToggleChip:
+            case kScreenChip: DrawChip(g, it); break;
             case kSwatch: DrawSwatch(g, it); break;
             case kNav: DrawNav(g, it); break;
             default: DrawButton(g, it); break;
@@ -1553,8 +1613,8 @@ void SetHotkey(int which, UINT hotkey) {
 // which 设成 hotkey、按 hold（单按 / 长按）触发行不行，不行的话为什么
 const wchar_t* HotkeyRefusal(int which, UINT hotkey, bool hold) {
     if (const wchar_t* problem = HotkeyProblem(hotkey, hold)) return problem;
-    int other = 1 - which;
-    if (hotkey == s_v.hotkey[other] && hold == s_v.hold[other]) return Tr(L"和另一个快捷键重复了");
+    for (int other = 0; other < kHotkeyCount; ++other)
+        if (other != which && hotkey == s_v.hotkey[other] && hold == s_v.hold[other]) return Tr(L"和另一个快捷键重复了");
     return nullptr;
 }
 
@@ -1785,6 +1845,10 @@ Values ValuesFromSettings() {
     v.on[kAutoStart] = IsAutoStartEnabled();
     v.on[kUpdates] = st.checkUpdates;
     v.on[kPerScreen] = st.popupPerScreen;
+    v.on[kKeepOtherBars] = st.keepOtherTaskbars;
+    v.on[kMarkScreens] = st.markScreens;
+    v.on[kBrightAll] = st.brightnessAllScreens;
+    v.seg[kSegWindows] = st.popupWindows;
     v.slider[kLongPressMs] = st.longPressMs;
     v.slider[kRadius] = st.popupRadius;
     v.slider[kGlassAlpha] = st.glassTransparency;
@@ -1810,6 +1874,7 @@ Values ValuesFromSettings() {
     }
     v.exclude = st.excludeApps;
     v.include = st.includeApps;
+    v.noHide = st.noHideScreens;
     return v;
 }
 
@@ -1853,6 +1918,7 @@ void Reload(ReloadMode mode) {
     }
     Take(s_v.exclude, s_initial.exclude, fresh.exclude, all);
     Take(s_v.include, s_initial.include, fresh.include, all);
+    Take(s_v.noHide, s_initial.noHide, fresh.noHide, all);
     if (all) {
         EndCapture();
         for (auto& error : s_hotkeyError) error.clear();
@@ -1888,7 +1954,8 @@ bool Dirty() {
         if (i != kSegEdge && i != kSegAlign && i != kSegSide && a.seg[i] != b.seg[i]) return true;
     return a.edge != b.edge || a.align != b.align || a.offset != b.offset || !(a.screens == b.screens) ||
            a.tint != b.tint || a.accent != b.accent || !std::equal(a.hotkey, a.hotkey + kHotkeyCount, b.hotkey) ||
-           !std::equal(a.hold, a.hold + kHotkeyCount, b.hold) || a.exclude != b.exclude || a.include != b.include;
+           !std::equal(a.hold, a.hold + kHotkeyCount, b.hold) || a.exclude != b.exclude || a.include != b.include ||
+           a.noHide != b.noHide;
 }
 
 // 改了什么过一小会儿就存下、生效；拖着滑块时等松开
@@ -2033,6 +2100,10 @@ void Apply() {
     if (s_v.edge != s_initial.edge) g_settings.popupEdge = s_v.edge;
     if (s_v.seg[kSegMonitor] != s_initial.seg[kSegMonitor]) g_settings.popupMonitor = s_v.seg[kSegMonitor];
     if (changed(kPerScreen)) g_settings.popupPerScreen = s_v.on[kPerScreen];
+    if (changed(kKeepOtherBars)) g_settings.keepOtherTaskbars = s_v.on[kKeepOtherBars];
+    if (changed(kMarkScreens)) g_settings.markScreens = s_v.on[kMarkScreens];
+    if (changed(kBrightAll)) g_settings.brightnessAllScreens = s_v.on[kBrightAll];
+    if (s_v.seg[kSegWindows] != s_initial.seg[kSegWindows]) g_settings.popupWindows = s_v.seg[kSegWindows];
     for (const ScreenPlace& p : s_v.screens) {  // 只改动过的屏幕
         ScreenPlace* before = FindScreenPlace(s_initial.screens, p.key);
         if (before && *before == p) continue;
@@ -2058,6 +2129,7 @@ void Apply() {
     };
     merge(s_initial.exclude, s_v.exclude, g_settings.excludeApps);
     merge(s_initial.include, s_v.include, g_settings.includeApps);
+    merge(s_initial.noHide, s_v.noHide, g_settings.noHideScreens);
 
     SaveSettings();
     if (changed(kAutoStart)) SetAutoStart(s_v.on[kAutoStart]);
@@ -2096,7 +2168,7 @@ void Activate(const Item& it) {
             }
             // 竖排时收起对齐那一行；Win11 原版时收起透明度；换语言字的宽度变了；自定义颜色时多一个色块
             if (group == kSegEdge || group == kSegStyle || group == kSegLang || group == kSegTint || group == kSegAccent ||
-                group == kSegAlign || group == kSegSide)
+                group == kSegAlign || group == kSegSide || group == kSegWindows)
                 Relayout(true);
             if (group == kSegEdge || group == kSegAlign || group == kSegStyle || group == kSegTheme || group == kSegTint ||
                 group == kSegAccent || group == kSegSide || group == kSegTray)
@@ -2121,6 +2193,13 @@ void Activate(const Item& it) {
             return;
         case kNav: SetPage(it.index); return;
         case kChip: RemoveExclude(it.index); return;
+        case kScreenChip: {
+            const std::wstring& key = s_screenChips[it.index].first;
+            if (key.empty()) break;  // 认不出这块屏幕
+            if (ScreenHides(key)) s_v.noHide.push_back(key);
+            else s_v.noHide.erase(std::remove(s_v.noHide.begin(), s_v.noHide.end(), key), s_v.noHide.end());
+            break;
+        }
         case kAddChip: ShowAddMenu(it.rect); return;
         case kClose: DestroyWindow(s_hwnd); return;
         default: break;
@@ -2481,6 +2560,31 @@ HWND SettingsDialog_Hwnd() { return s_hwnd; }
 
 void SettingsDialog_SettingsChanged() {
     if (s_hwnd) Reload(kMerge);
+}
+
+// 插拔了显示器、改了分辨率或缩放：系统可能把窗口挪到了别的屏幕上，按它现在所在的屏幕重新排，别跑出屏幕
+void SettingsDialog_DisplayChanged() {
+    if (!s_hwnd) return;
+    RECT r;
+    if (GetWindowRect(s_hwnd, &r)) s_pos = {r.left, r.top};
+    HMONITOR monitor = MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTONEAREST);
+    s_screen = monitor;
+    s_screenKey = MonitorKey(monitor);
+    ShowPlace();
+    s_hover = s_press = {};
+    Relayout(true);
+    if (!FindItem(s_focus)) s_focus = {};  // 比如拔掉的那块屏幕的小胶囊
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(monitor, &mi);
+    const RECT& work = mi.rcWork;
+    POINT pos = {std::clamp<LONG>(s_pos.x, work.left, std::max(work.left, work.right - s_width)),
+                 std::clamp<LONG>(s_pos.y, work.top, std::max(work.top, work.bottom - s_height))};
+    if (pos.x != s_pos.x || pos.y != s_pos.y) {
+        s_pos = pos;
+        SetWindowPos(s_hwnd, nullptr, s_pos.x, s_pos.y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        CaptureBehind();
+        Render();
+    }
 }
 
 void SettingsDialog_Show() {

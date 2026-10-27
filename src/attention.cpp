@@ -309,6 +309,13 @@ void Attention_Update() {
     if (!s_urgent.empty() || !s_glows.empty()) UpdateGlows();
 }
 
+// 屏幕变了：光条的大小、位置按旧屏幕算的，全部重建
+void Attention_DisplayChanged() {
+    for (Glow& g : s_glows) DestroyGlow(g);
+    s_glows.clear();
+    if (!s_urgent.empty()) UpdateGlows();
+}
+
 void Attention_Shutdown() {
     if (s_hooked && g_mainWnd) DeregisterShellHookWindow(g_mainWnd);
     s_hooked = false;

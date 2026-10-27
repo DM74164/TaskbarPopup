@@ -286,6 +286,24 @@ const wchar_t* const kEnglish[][2] = {
     {L"资源管理器还没准备好，稍后再试一次。", L"File Explorer isn't ready yet. Try again in a moment."},
     {L"暂时无法启动", L"Can't start right now"},
 
+    // 多屏幕
+    {L"多屏幕", L"Displays"},
+    {L"其它屏幕的任务栏照常显示", L"Keep taskbars on other displays"},
+    {L"Edge、Chrome 这类程序最大化时还是一起藏", L"Edge, Chrome and similar apps still hide them all when maximized"},
+    {L"标出其它屏幕上的窗口", L"Mark windows on other displays"},
+    {L"图标右上角显示屏幕编号", L"Shows the display number on the icon"},
+    {L"所有屏幕亮度一起调", L"Adjust brightness on all displays"},
+    {L"显示的窗口", L"Windows shown"},
+    {L"所有屏幕", L"All displays"},
+    {L"这块屏幕", L"This display"},
+    {L"隐藏任务栏的屏幕", L"Hide taskbar on"},
+    {L"把前台窗口移到下一块屏幕", L"Move active window to next display"},
+    {L"鼠标键移的是鼠标下的窗口", L"Mouse buttons move the window under the mouse"},
+    {L"在下一块屏幕弹出迷你任务栏", L"Show mini taskbar on next display"},
+    {L"再按一次换到再下一块", L"Press again to go on to the next one"},
+    {L"移到另一块屏幕", L"Move to other display"},
+    {L"所有屏幕亮度 %d%%", L"All displays brightness %d%%"},
+
     // 检查更新
     {L"连接超时", L"Connection timed out"},
     {L"找不到服务器，可能没有联网", L"Server not found; you may be offline"},

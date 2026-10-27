@@ -1,4 +1,4 @@
-// 快捷键：弹出迷你任务栏、固定（或取消固定）小窗口。可以是组合键、单个键或鼠标键，单按或长按触发。
+// 快捷键：弹出迷你任务栏、固定（或取消固定）小窗口、把窗口移到下一块屏幕、在下一块屏幕弹出迷你任务栏。可以是组合键、单个键或鼠标键，单按或长按触发。
 // 单按的键盘按键用 RegisterHotKey 挂在主窗口上，管理员权限的程序在前台时也收得到；
 // 鼠标键、长按、单独的 Ctrl / Shift / Alt 和锁定键 RegisterHotKey 做不了，交给键盘钩子线程（hook.cpp）。
 // 在设置窗口里录，存进设置文件时写成 Ctrl+Alt+Z、MouseMiddle 这样的文字
@@ -83,7 +83,22 @@ bool UsesRegisterHotKey(int id, UINT want) {
     return true;
 }
 
-const wchar_t* ActionName(int id) { return id == kHotkeyPopup ? L"弹出迷你任务栏" : L"固定小窗口"; }
+const wchar_t* ActionName(int id) {
+    static const wchar_t* const kNames[kHotkeyCount] = {L"弹出迷你任务栏", L"固定小窗口", L"把窗口移到下一块屏幕",
+                                                         L"在下一块屏幕弹出迷你任务栏"};
+    return kNames[id];
+}
+
+// 把前台窗口（鼠标键触发时是鼠标下面那个）移到下一块屏幕
+void MoveToNextScreen(HWND target) {
+    HWND h = target ? GetAncestor(target, GA_ROOT) : GetForegroundWindow();
+    if (!h || !IsWindowVisible(h) || IsOwnProcess(h) || (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW)) return;
+    std::wstring cls = GetClassNameStr(h);
+    if (cls == L"Progman" || cls == L"WorkerW" || cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd") return;
+    HMONITOR from = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+    HMONITOR to = NextMonitor(from);
+    if (to && to != from) MoveWindowToMonitor(h, to);
+}
 
 }  // namespace
 
@@ -199,6 +214,10 @@ void Hotkeys_Run(int id, HWND target) {
         Popup_Toggle();
     } else if (id == kHotkeyPin) {
         FloatWindows_TogglePin(target);
+    } else if (id == kHotkeyMove) {
+        MoveToNextScreen(target);
+    } else if (id == kHotkeyNextScreen) {
+        Popup_NextScreen();
     }
 }
 

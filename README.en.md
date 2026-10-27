@@ -80,7 +80,7 @@ Double-click a small floating window (or use a hotkey) and it stays on top even 
 
 ### Hotkeys
 
-Set one hotkey to open the mini taskbar and one to pin a small window. Key combos, single keys and mouse buttons all work, triggered by a tap or a hold. None are set by default.
+Set hotkeys to open the mini taskbar, pin a small window, move the active window to the next display, and open the mini taskbar on the next display. Key combos, single keys and mouse buttons all work, triggered by a tap or a hold. None are set by default.
 
 ![Hotkeys can be key combos, single keys or mouse buttons](docs/demo/en/hotkeys.webp)
 
@@ -136,11 +136,21 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 
 ## Settings
 
-Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Size & position, Appearance, Presets & backup, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Changes take effect right away; there is no OK button. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Size & position, Displays, Appearance, Presets & backup, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Changes take effect right away; there is no OK button. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
 ![Settings grouped by page, with the language switching instantly](docs/demo/en/settings.webp)
 
-**Multiple monitors**: the mini taskbar opens on the display with the mouse by default; on the Mini taskbar page you can make it open on the active window's display instead. If Windows is set to show taskbar apps only on the taskbar where the window is open, it lists only the windows on that display. Turn on "Set position for each display" on the Size & position page, and position and alignment apply to whichever display the Settings window is on. While the active window is maximized, other displays that also have a maximized window keep their taskbars hidden too, so switching between them no longer slides the taskbars back and forth.
+**Multiple monitors** (the Displays page in Settings):
+
+- When a window is maximized on one display, only that display's taskbar hides; the other displays keep theirs. Edge, Chrome and similar apps (and apps that won't fill the screen when stretched) still need Windows' auto-hide, which hides the taskbars on all displays. Turn off "Keep taskbars on other displays" to treat every app that way.
+- Untick a display under "Hide taskbar on" and maximizing a window there keeps its taskbar.
+- Other displays that also have a maximized window keep their taskbars hidden too, so switching between them no longer slides the taskbars back and forth.
+- The mini taskbar opens on the display with the mouse by default, or on the active window's display if you choose. The "Show mini taskbar on next display" hotkey moves it to the next display.
+- "Windows shown" follows Windows by default (if Windows shows taskbar apps only where the window is open, it lists only that display's windows), or pick All displays or This display. Windows on other displays have the display number on their icon.
+- Right-click a window icon → Move to other display (pick one when there are three or more). A maximized window stays maximized. A hotkey can move the active window to the next display.
+- Turn on "Adjust brightness on all displays" and the brightness slider changes every display.
+- After you plug in or unplug a monitor or change the resolution, the taskbars and the mini taskbar are laid out for the new displays.
+- Turn on "Set position for each display" on the Size & position page, and position and alignment apply to whichever display the Settings window is on.
 
 "Auto-check for updates" is off by default. When on, it checks GitHub Releases once a day and only notifies you; it never downloads or installs anything by itself.
 
@@ -150,7 +160,7 @@ Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini t
 
 - **Holding Win does nothing in admin programs and games**: Windows doesn't pass their key presses to a normal-privilege program. Tick "Run as administrator" in the tray menu. With start-at-login on as well, there's no UAC prompt at startup.
 - **Edge / Chrome may show a thin line (about 2 px) at the bottom**: the browser leaves it for the auto-hidden taskbar and it can't be changed from outside.
-- **Multiple monitors**: system auto-hide applies to every monitor, so while a window is maximized, the taskbars on monitors without a maximized window auto-hide too.
+- **Multiple monitors**: Edge, Chrome and similar apps need Windows' auto-hide when maximized. It applies to every monitor, so the taskbars on the other monitors auto-hide too. The same happens when only one monitor has a taskbar.
 - **Notifications may not show while maximized**: go to Settings → System → Notifications → Turn on do not disturb automatically, and turn off "When using an app in full-screen mode".
 - **Some windows won't stretch**: the taskbar stays visible while that window is in front.
 - **Taskbar settings locked** (for example by group policy on a work PC): the taskbar stays visible.

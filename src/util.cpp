@@ -1,5 +1,6 @@
 #include "common.h"
 
+#include <cmath>
 #include <cstdarg>
 #include <cwchar>
 #include <cwctype>
@@ -208,17 +209,131 @@ std::wstring MonitorKey(HMONITOR monitor) {
     return ToLower(mi.szDevice);
 }
 
-std::wstring MonitorLabel(HMONITOR monitor) {
+int MonitorNumber(HMONITOR monitor) {
     MONITORINFOEXW mi = {};
     mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfoW(monitor, &mi)) return Tr(L"屏幕");
+    if (!GetMonitorInfoW(monitor, &mi)) return 0;
     // 设备名形如 \\.\DISPLAY2，取最后的编号
     const wchar_t* digits = mi.szDevice + wcslen(mi.szDevice);
     while (digits > mi.szDevice && iswdigit(digits[-1])) --digits;
-    int number = *digits ? _wtoi(digits) : 0;
-    bool primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    return *digits ? std::max(0, _wtoi(digits)) : 0;
+}
+
+std::wstring MonitorLabel(HMONITOR monitor) {
+    MONITORINFO mi = {sizeof(mi)};
+    bool primary = GetMonitorInfoW(monitor, &mi) && (mi.dwFlags & MONITORINFOF_PRIMARY);
+    int number = MonitorNumber(monitor);
     if (number <= 0) return primary ? Tr(L"主屏幕") : Tr(L"屏幕");
     return primary ? TrF(L"屏幕 %d（主屏幕）", number) : TrF(L"屏幕 %d", number);
+}
+
+std::vector<HMONITOR> MonitorsInOrder() {
+    std::vector<std::pair<RECT, HMONITOR>> found;
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR m, HDC, LPRECT r, LPARAM param) -> BOOL {
+            reinterpret_cast<std::vector<std::pair<RECT, HMONITOR>>*>(param)->push_back({*r, m});
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&found));
+    std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) {
+        return a.first.left != b.first.left ? a.first.left < b.first.left : a.first.top < b.first.top;
+    });
+    std::vector<HMONITOR> list;
+    for (const auto& f : found) list.push_back(f.second);
+    return list;
+}
+
+HMONITOR NextMonitor(HMONITOR monitor) {
+    std::vector<HMONITOR> list = MonitorsInOrder();
+    if (list.empty()) return nullptr;
+    auto it = std::find(list.begin(), list.end(), monitor);
+    return it == list.end() || ++it == list.end() ? list.front() : *it;
+}
+
+namespace {
+
+// r 在 from 里的位置换到 to 里：中心在差不多的相对位置，大小不变（放不下就缩小），整个放进 to
+RECT MapRect(const RECT& r, const RECT& from, const RECT& to) {
+    LONG tw = to.right - to.left, th = to.bottom - to.top;
+    LONG w = std::min(r.right - r.left, tw), h = std::min(r.bottom - r.top, th);
+    double rx = ((r.left + r.right) / 2.0 - from.left) / std::max(1L, from.right - from.left);
+    double ry = ((r.top + r.bottom) / 2.0 - from.top) / std::max(1L, from.bottom - from.top);
+    LONG left = std::clamp(to.left + static_cast<LONG>(std::lround(rx * tw - w / 2.0)), to.left, to.right - w);
+    LONG top = std::clamp(to.top + static_cast<LONG>(std::lround(ry * th - h / 2.0)), to.top, to.bottom - h);
+    return {left, top, left + w, top + h};
+}
+
+// 挪过去的最大化窗口：过一会儿看看系统有没有照还原后的位置把它最大化到那块屏上
+struct PendingMove {
+    HWND hwnd;
+    HMONITOR to;
+};
+std::vector<PendingMove> s_moves;
+
+void CALLBACK OnMoveCheck(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    std::vector<PendingMove> moves;
+    moves.swap(s_moves);
+    for (const PendingMove& m : moves) {
+        if (!IsWindow(m.hwnd) || !IsZoomed(m.hwnd) || MonitorFromWindow(m.hwnd, MONITOR_DEFAULTTONEAREST) == m.to) continue;
+        // 还最大化在原来的屏上：先还原（还原后的位置已经在那块屏上了），再最大化
+        Log(L"最大化的窗口没跟着换屏幕，还原到那块屏上再最大化");
+        WINDOWPLACEMENT wp = {sizeof(wp)};
+        if (!GetWindowPlacement(m.hwnd, &wp)) continue;
+        wp.showCmd = SW_SHOWNOACTIVATE;
+        wp.flags = (wp.flags & ~WPF_RESTORETOMAXIMIZED) | WPF_ASYNCWINDOWPLACEMENT;
+        SetWindowPlacement(m.hwnd, &wp);
+        ShowWindowAsync(m.hwnd, SW_SHOWMAXIMIZED);
+    }
+}
+
+}  // namespace
+
+bool MoveWindowToMonitor(HWND hwnd, HMONITOR to) {
+    HMONITOR from = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO a = {sizeof(a)}, b = {sizeof(b)};
+    if (!IsWindow(hwnd) || !to || to == from || !GetMonitorInfoW(from, &a) || !GetMonitorInfoW(to, &b)) return false;
+    if (!IsIconic(hwnd) && !IsZoomed(hwnd)) {
+        RECT cur;
+        if (!GetWindowRect(hwnd, &cur)) return false;
+        RECT r = MapRect(cur, a.rcWork, b.rcWork);
+        Log(L"把窗口挪到%ls (%ld,%ld)", MonitorLabel(to).c_str(), r.left, r.top);
+        SetWindowRectAsync(hwnd, r);
+        return true;
+    }
+    // 最大化、最小化的窗口改还原后的位置。它是工作区坐标：原点是所在那块屏工作区的左上角（工具窗口除外）
+    WINDOWPLACEMENT wp = {sizeof(wp)};
+    if (!GetWindowPlacement(hwnd, &wp)) return false;
+    bool tool = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+    auto shift = [tool](const MONITORINFO& mi) {
+        return tool ? POINT{0, 0} : POINT{mi.rcWork.left - mi.rcMonitor.left, mi.rcWork.top - mi.rcMonitor.top};
+    };
+    POINT sa = shift(a), sb = shift(b);
+    RECT normal = wp.rcNormalPosition;
+    OffsetRect(&normal, sa.x, sa.y);
+    RECT r = MapRect(normal, a.rcWork, b.rcWork);
+    OffsetRect(&r, -sb.x, -sb.y);
+    wp.rcNormalPosition = r;
+    wp.flags |= WPF_ASYNCWINDOWPLACEMENT;
+    bool zoomed = IsZoomed(hwnd);
+    // 最小化的在那块屏上还原出来（本来还原成最大化的照样最大化）
+    wp.showCmd = zoomed || (wp.flags & WPF_RESTORETOMAXIMIZED) ? SW_SHOWMAXIMIZED : SW_RESTORE;
+    Log(L"把%ls窗口挪到%ls", zoomed ? L"最大化的" : L"最小化的", MonitorLabel(to).c_str());
+    if (!SetWindowPlacement(hwnd, &wp)) {
+        // 改不了还原后的位置（Wine 里别的程序的窗口就不行）：先还原、挪过去，本来要最大化的再最大化
+        Log(L"改不了还原后的位置（错误 %lu），还原了再挪", GetLastError());
+        OffsetRect(&r, sb.x, sb.y);
+        ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE);
+        SetWindowRectAsync(hwnd, r);
+        if (wp.showCmd == SW_SHOWMAXIMIZED) ShowWindowAsync(hwnd, SW_SHOWMAXIMIZED);
+        return true;
+    }
+    if (zoomed) {
+        if (s_moves.empty()) SetTimer(nullptr, 0, 300, OnMoveCheck);
+        s_moves.push_back({hwnd, to});
+    }
+    return true;
 }
 
 // HICON → 带 alpha 通道的 GDI+ 位图（Bitmap::FromHICON 会丢掉透明度）

@@ -101,8 +101,10 @@ std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx, HMONITOR 
     for (auto it = s_order.begin(); it != s_order.end();)
         it = alive.count(it->first) ? std::next(it) : s_order.erase(it);
 
-    // 最小化的窗口按它还原后的位置算
-    if (OnlyOwnScreen(monitor))
+    // 最小化的窗口按它还原后的位置算。设置里可以不跟着系统，列出所有屏幕上的，或者只列这块屏上的
+    int mode = g_settings.popupWindows;
+    bool ownScreen = mode == kWindowsOwnScreen ? monitor != nullptr : mode == kWindowsAll ? false : OnlyOwnScreen(monitor);
+    if (ownScreen)
         handles.erase(std::remove_if(handles.begin(), handles.end(),
                                      [&](HWND h) { return MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) != monitor; }),
                       handles.end());
