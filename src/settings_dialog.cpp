@@ -67,13 +67,13 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"一直隐藏任务栏", L"没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出"},
     {L"任务栏藏着时提醒新消息", L"程序闪烁时屏幕边亮起，迷你任务栏里的图标也变色"},
     {L"鼠标停在屏幕边上时弹出", L"任务栏藏着时，鼠标在迷你任务栏那条边上停一下"},
-    {L"显示正在播放的媒体", L"暂停、上一首、下一首"},
+    {L"显示正在播放的媒体", L"点封面展开上一首、下一首"},
     {L"显示输入法中英文", L"点一下切换中英文"},
     {L"显示电量", L"没有电池时不显示"},
     {L"显示时钟", nullptr},
-    {L"显示秒", nullptr},
-    {L"显示星期", nullptr},
-    {L"显示日期", nullptr},
+    {L"秒", nullptr},  // 时钟的这三项是“同时显示”那一排小胶囊，见 ClockPartsRow
+    {L"星期", nullptr},
+    {L"日期", nullptr},
     {L"显示标题行", L"关掉时名字显示在面板上方"},
 };
 
@@ -95,7 +95,7 @@ const SliderSpec kSliderSpec[kSliderCount] = {
 };
 
 // 几选一（分段按钮）
-enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegMonitor, kSegTint, kSegAccent, kSegCount };
+enum SegId { kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegMonitor, kSegTint, kSegAccent, kSegSide, kSegCount };
 struct SegSpec {
     const wchar_t* label;
     std::vector<const wchar_t*> options;  // 下标就是存进设置的值
@@ -110,6 +110,7 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"弹在", {L"鼠标所在屏幕", L"前台窗口所在屏幕"}},  // 下标是 PopupMonitor
     {L"底色", {L"跟随颜色", L"自定义"}},
     {L"强调色", {L"跟随系统", L"自定义"}},
+    {L"迷你任务栏在", {L"底部", L"侧边"}},  // 下标是 ModuleSide：“状态和控制”页的开关改的是哪一份（只是换着看，不存）
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -123,7 +124,7 @@ const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 
 // 能点的东西
 enum Kind {
     kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kOk,
-    kCancel, kClose, kNav, kSwatch, kPreset, kAddPreset, kFile
+    kCancel, kClose, kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip
 };
 struct Item {
     Kind kind = kNoItem;
@@ -134,7 +135,8 @@ struct Item {
 
 // 窗口里的各项值。确定时只改用户在窗口里动过的项：窗口开着的时候在迷你任务栏或托盘菜单里改的设置不会被盖掉
 struct Values {
-    bool on[kToggleCount] = {};
+    bool on[kToggleCount] = {};  // 底部、侧边各一份的那几个开关显示的是 seg[kSegSide] 那份，存的是 sides
+    ModuleSet sides[2];          // 只用里面显示哪些，顺序在迷你任务栏的编辑模式里排
     int slider[kSliderCount] = {};
     int seg[kSegCount] = {};  // 位置、对齐两项是窗口里显示的（分屏设置时是设置窗口所在屏幕的），存的是下面三项
     int edge = kEdgeBottom, align = kAlignSystem;  // 所有屏幕共用的位置和对齐
@@ -147,6 +149,30 @@ struct Values {
     std::vector<std::wstring> include;  // 最大化时隐藏任务栏的程序（关着“最大化或全屏时隐藏任务栏”时用）
 };
 Values s_v, s_initial;
+
+// 底部、侧边各一份的开关
+struct SideToggle {
+    int toggle;
+    bool ModuleSet::*item;
+};
+const SideToggle kSideToggles[] = {{kTray, &ModuleSet::tray},       {kLevels, &ModuleSet::levels},
+                                   {kRadios, &ModuleSet::radios},   {kMedia, &ModuleSet::media},
+                                   {kIme, &ModuleSet::ime},         {kBattery, &ModuleSet::battery},
+                                   {kClock, &ModuleSet::clock}};
+const SideToggle* FindSideToggle(int toggle) {
+    for (const SideToggle& t : kSideToggles)
+        if (t.toggle == toggle) return &t;
+    return nullptr;
+}
+
+// “迷你任务栏在”换到 side：开关显示那一份
+void ShowSide(int side) {
+    s_v.seg[kSegSide] = side;
+    for (const SideToggle& t : kSideToggles) {
+        s_v.on[t.toggle] = s_v.sides[side].*t.item;
+        s_initial.on[t.toggle] = s_initial.sides[side].*t.item;
+    }
+}
 
 // 窗口里现在显示的名单：跟着“最大化或全屏时隐藏任务栏”那个开关换
 std::vector<std::wstring>& ShownApps() { return s_v.on[kAutoHide] ? s_v.exclude : s_v.include; }
@@ -334,7 +360,6 @@ float SliderRow(int which, float x, float y, float w) {
 float SegRow(int which, float x, float y, float w) {
     float h = Px(50), bh = Px(30);
     const SegSpec& spec = kSegSpec[which];
-    s_texts.push_back({Tr(spec.label), RectF(x + Px(kRowPad), y, Px(80), h), 4});
     std::vector<int> options;  // 对齐的“自定义”只在选着时出现（在迷你任务栏的编辑模式里拖出来的）
     for (int i = 0; i < static_cast<int>(spec.options.size()); ++i)
         if (which != kSegAlign || i != kAlignCustom || s_v.seg[which] == kAlignCustom) options.push_back(i);
@@ -352,6 +377,7 @@ float SegRow(int which, float x, float y, float w) {
     total += extra * widths.size();
     RectF track(x + w - Px(kRowPad) - total - 2 * pad, y + (h - bh) / 2, total + 2 * pad, bh);
     s_segTrack[which] = track;
+    s_texts.push_back({Tr(spec.label), RectF(x + Px(kRowPad), y, track.X - x - Px(kRowPad) - Px(4), h), 4});
     float cx = track.X + pad;
     for (size_t i = 0; i < widths.size(); ++i) {
         s_items.push_back({kSegment, which * kSegStride + options[i], RectF(cx, track.Y + pad, widths[i], bh - 2 * pad)});
@@ -361,6 +387,24 @@ float SegRow(int which, float x, float y, float w) {
     if ((which == kSegTint || which == kSegAccent) && s_v.seg[which] == 1) {
         float d = Px(24);
         s_items.push_back({kSwatch, which == kSegTint ? 0 : 1, RectF(track.X - Px(10) - d, y + (h - d) / 2, d, d)});
+    }
+    return h;
+}
+
+// 时钟里还显示哪些：左边名字，右边一排小胶囊，点一下开关（开着的是强调色）
+float ClockPartsRow(float x, float y, float w) {
+    const int parts[] = {kClockDate, kClockWeekday, kClockSeconds};
+    float h = Px(50), ch = Px(kChipH), gap = Px(6);
+    float total = -gap, widths[ARRAYSIZE(parts)];
+    for (size_t i = 0; i < ARRAYSIZE(parts); ++i) {
+        widths[i] = MeasureWidth(Tr(kToggleText[parts[i]].label), Px(12.5f)) + Px(28);
+        total += widths[i] + gap;
+    }
+    float cx = x + w - Px(kRowPad) - total;
+    s_texts.push_back({Tr(L"同时显示"), RectF(x + Px(kRowPad), y, cx - x - Px(kRowPad) - Px(4), h), 4});
+    for (size_t i = 0; i < ARRAYSIZE(parts); ++i) {
+        s_items.push_back({kToggleChip, parts[i], RectF(cx, y + (h - ch) / 2, widths[i], ch)});
+        cx += widths[i] + gap;
     }
     return h;
 }
@@ -489,25 +533,23 @@ float BuildPage(int page, float x, float y) {
             if (MultiScreen() || s_v.seg[kSegMonitor] != kPopupAtCursor)
                 popup.push_back([](float x, float y, float w) { return SegRow(kSegMonitor, x, y, w); });
             y = AddGroup(x, y, L"弹出", popup);
-            std::vector<RowFn> show = {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
-                                       [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); }};
-            if (s_v.on[kTray]) show.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });  // 托盘图标关着时收起样式
-            return AddGroup(x, y, L"显示", show);
+            return AddGroup(x, y, L"显示",
+                            {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
+                             [](float x, float y, float w) { return SegRow(kSegTray, x, y, w); }});
         }
         case kPageControls: {
+            // 迷你任务栏在底部、侧边时各显示哪些：先选改哪一份
             y = AddGroup(x, y, L"显示",
-                         {[](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
+                         {[](float x, float y, float w) { return SegRow(kSegSide, x, y, w); },
+                          [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); },
+                          [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kMedia, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kIme, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kBattery, x, y, w); }});
             // 时钟关着时收起它的选项
             std::vector<RowFn> clock = {[](float x, float y, float w) { return ToggleRow(kClock, x, y, w); }};
-            if (s_v.on[kClock]) {
-                clock.push_back([](float x, float y, float w) { return ToggleRow(kClockDate, x, y, w); });
-                clock.push_back([](float x, float y, float w) { return ToggleRow(kClockWeekday, x, y, w); });
-                clock.push_back([](float x, float y, float w) { return ToggleRow(kClockSeconds, x, y, w); });
-            }
+            if (s_v.on[kClock]) clock.push_back(ClockPartsRow);
             return AddGroup(x, y, L"时钟", clock);
         }
         case kPageSize: {
@@ -878,6 +920,14 @@ void DrawChip(Graphics& g, const Item& it) {
         DrawText(g, PresetName(it.index), Px(12.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
         return;
     }
+    if (it.kind == kToggleChip) {
+        bool on = s_v.on[it.index];
+        if (on) FillRound(g, r, r.Height / 2, hot ? Mix(pal.accent, Color(255, 255, 255, 255), 0.15f) : pal.accent);
+        else DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
+        DrawText(g, Tr(kToggleText[it.index].label), Px(12.5f), FontStyleRegular, r, on ? pal.onAccent : pal.text,
+                 StringAlignmentCenter);
+        return;
+    }
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
     RectF textRect(r.X + Px(12), r.Y, r.Width - Px(12 + 6 + 14), r.Height);
     DrawText(g, ShownApps()[it.index], Px(12.5f), FontStyleRegular, textRect, pal.text);
@@ -993,7 +1043,8 @@ void DrawContent(Graphics& g) {
             case kChip:
             case kAddChip:
             case kPreset:
-            case kAddPreset: DrawChip(g, it); break;
+            case kAddPreset:
+            case kToggleChip: DrawChip(g, it); break;
             case kSwatch: DrawSwatch(g, it); break;
             case kNav: DrawNav(g, it); break;
             default: DrawButton(g, it); break;
@@ -1380,14 +1431,27 @@ void StartAnimation() { SetTimer(s_hwnd, kTimerAnim, 15, nullptr); }
 
 void PreviewPopup(bool hold);
 
+// 开关的值不是点着换的（换了底部 / 侧边、在别处改了设置）：滑钮从现在的位置滑过去
+void AnimateKnobs() {
+    for (int i = 0; i < kToggleCount; ++i) {
+        float target = s_v.on[i] ? 1.0f : 0.0f;
+        if (s_knob[i] != target) {
+            s_knobFrom[i] = s_knob[i];
+            s_knobStart[i] = NowMs();
+            StartAnimation();
+        }
+    }
+}
+
 void SetToggle(int which, bool on) {
     if (s_v.on[which] == on) return;
     s_v.on[which] = on;
+    if (const SideToggle* t = FindSideToggle(which)) s_v.sides[s_v.seg[kSegSide]].*t->item = on;
     s_knobFrom[which] = s_knob[which];
     s_knobStart[which] = NowMs();
     StartAnimation();
     // 跟着收起 / 放出来的行；“最大化或全屏时隐藏任务栏”换的是下面那个名单
-    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kTray || which == kClock) Relayout(true);
+    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kClock) Relayout(true);
     if (which == kShowTitle) PreviewPopup(false);
     if (which == kPerScreen) {  // 位置和对齐换成这块屏幕自己的（或者共用的）
         ShowPlace();
@@ -1706,15 +1770,12 @@ Values ValuesFromSettings() {
     v.on[kPinTopmost] = st.pinTopmost;
     v.on[kLongPress] = st.longPressPopup;
     v.on[kPinned] = st.showPinnedApps;
-    v.on[kLevels] = st.showLevels;
-    v.on[kRadios] = st.showRadios;
-    v.on[kTray] = st.trayIcons;
     v.on[kFlashAlert] = st.flashAlert;
     v.on[kEdgePopup] = st.edgePopup;
-    v.on[kMedia] = st.showMedia;
-    v.on[kIme] = st.showIme;
-    v.on[kBattery] = st.showBattery;
-    v.on[kClock] = st.showClock;
+    v.sides[kSideBottom] = st.modules[kSideBottom];
+    v.sides[kSideEdge] = st.modules[kSideEdge];
+    v.seg[kSegSide] = ModuleSideOf(st.popupEdge);
+    for (const SideToggle& t : kSideToggles) v.on[t.toggle] = v.sides[v.seg[kSegSide]].*t.item;
     v.on[kClockSeconds] = st.clockSeconds;
     v.on[kClockWeekday] = st.clockWeekday;
     v.on[kClockDate] = st.clockDate;
@@ -1763,21 +1824,19 @@ void Reload(ReloadMode mode) {
     Values fresh = ValuesFromSettings();
     bool all = mode == kForceAll, look = mode != kMerge;
     auto in = [](int i, std::initializer_list<int> list) { return std::find(list.begin(), list.end(), i) != list.end(); };
-    for (int i = 0; i < kToggleCount; ++i) {
-        bool force = all || (look && in(i, {kTray, kMedia, kIme, kBattery, kClock, kClockSeconds, kClockWeekday, kClockDate,
-                                             kLevels, kRadios, kShowTitle}));
-        Take(s_v.on[i], s_initial.on[i], fresh.on[i], force);
-        float target = s_v.on[i] ? 1.0f : 0.0f;
-        if (s_knob[i] != target) {
-            s_knobFrom[i] = s_knob[i];
-            s_knobStart[i] = NowMs();
-            StartAnimation();
-        }
-    }
+    for (int i = 0; i < kToggleCount; ++i)
+        if (!FindSideToggle(i))
+            Take(s_v.on[i], s_initial.on[i], fresh.on[i],
+                 all || (look && in(i, {kClockSeconds, kClockWeekday, kClockDate, kShowTitle})));
+    for (int side = 0; side < 2; ++side)  // 底部、侧边各一份的：外观方案里也有
+        for (const SideToggle& t : kSideToggles)
+            Take(s_v.sides[side].*t.item, s_initial.sides[side].*t.item, fresh.sides[side].*t.item, look);
+    ShowSide(s_v.seg[kSegSide]);
+    AnimateKnobs();
     for (int i = 0; i < kSliderCount; ++i)
         Take(s_v.slider[i], s_initial.slider[i], fresh.slider[i], all || (look && in(i, {kRadius, kGlassAlpha, kIconSize, kIconGap})));
     for (int i = 0; i < kSegCount; ++i)
-        if (i != kSegEdge && i != kSegAlign)  // 这两项是显示用的，见 ShowPlace
+        if (i != kSegEdge && i != kSegAlign && i != kSegSide)  // 这几项是显示用的，见 ShowPlace、ShowSide
             Take(s_v.seg[i], s_initial.seg[i], fresh.seg[i],
                  all || (look && in(i, {kSegStyle, kSegTheme, kSegTray, kSegTint, kSegAccent})));
     Take(s_v.tint, s_initial.tint, fresh.tint, look);
@@ -1915,15 +1974,12 @@ void Apply() {
     if (changed(kPinTopmost)) g_settings.pinTopmost = s_v.on[kPinTopmost];
     if (changed(kLongPress)) g_settings.longPressPopup = s_v.on[kLongPress];
     if (changed(kPinned)) g_settings.showPinnedApps = s_v.on[kPinned];
-    if (changed(kLevels)) g_settings.showLevels = s_v.on[kLevels];
-    if (changed(kRadios)) g_settings.showRadios = s_v.on[kRadios];
-    if (changed(kTray)) g_settings.trayIcons = s_v.on[kTray];
     if (changed(kFlashAlert)) g_settings.flashAlert = s_v.on[kFlashAlert];
     if (changed(kEdgePopup)) g_settings.edgePopup = s_v.on[kEdgePopup];
-    if (changed(kMedia)) g_settings.showMedia = s_v.on[kMedia];
-    if (changed(kIme)) g_settings.showIme = s_v.on[kIme];
-    if (changed(kBattery)) g_settings.showBattery = s_v.on[kBattery];
-    if (changed(kClock)) g_settings.showClock = s_v.on[kClock];
+    for (int side = 0; side < 2; ++side)
+        for (const SideToggle& t : kSideToggles)
+            if (s_v.sides[side].*t.item != s_initial.sides[side].*t.item)
+                g_settings.modules[side].*t.item = s_v.sides[side].*t.item;
     if (changed(kClockSeconds)) g_settings.clockSeconds = s_v.on[kClockSeconds];
     if (changed(kClockWeekday)) g_settings.clockWeekday = s_v.on[kClockWeekday];
     if (changed(kClockDate)) g_settings.clockDate = s_v.on[kClockDate];
@@ -1988,7 +2044,8 @@ void Activate(const Item& it) {
         if (!sameRow && s_capture != i) s_hotkeyError[i].clear();
     }
     switch (it.kind) {
-        case kToggleRow: SetToggle(it.index, !s_v.on[it.index]); break;
+        case kToggleRow:
+        case kToggleChip: SetToggle(it.index, !s_v.on[it.index]); break;
         case kSegment: {
             int group = it.index / kSegStride, old = s_v.seg[group];
             s_v.seg[group] = it.index % kSegStride;
@@ -1999,6 +2056,11 @@ void Activate(const Item& it) {
             if ((group == kSegTint || group == kSegAccent) && s_v.seg[group] == 1 && !PickColor(group == kSegAccent) && old == 0)
                 s_v.seg[group] = 0;
             if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) StorePlace();
+            // 换了底部、侧边（或者把位置换到了另一种）：开关换成那一份
+            if (group == kSegSide || (group == kSegEdge && ModuleSideOf(s_v.seg[kSegEdge]) != s_v.seg[kSegSide])) {
+                ShowSide(group == kSegSide ? s_v.seg[kSegSide] : ModuleSideOf(s_v.seg[kSegEdge]));
+                AnimateKnobs();
+            }
             ApplyLook();  // 马上换上看看效果，取消时不保存
             if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言看看，取消时换回去
                 SetUiEnglish(LanguageIsEnglish(s_v.seg[kSegLang]));
@@ -2006,7 +2068,7 @@ void Activate(const Item& it) {
             }
             // 竖排时收起对齐那一行；Win11 原版时收起透明度；换语言字的宽度变了；自定义颜色时多一个色块
             if (group == kSegEdge || group == kSegStyle || group == kSegLang || group == kSegTint || group == kSegAccent ||
-                group == kSegAlign)
+                group == kSegAlign || group == kSegSide)
                 Relayout(true);
             if (group == kSegEdge || group == kSegAlign || group == kSegStyle || group == kSegTheme || group == kSegTint ||
                 group == kSegAccent)
@@ -2423,7 +2485,6 @@ void SettingsDialog_Show() {
     s_presets = LookPresets();
     s_fileNote.clear();
     s_v = s_initial;
-    for (int i = 0; i < kToggleCount; ++i) s_knob[i] = s_v.on[i] ? 1.0f : 0.0f;
     s_hover = s_press = s_focus = {};
     s_showFocus = false;
     s_drag = -1;
@@ -2438,6 +2499,8 @@ void SettingsDialog_Show() {
     s_screen = mon;
     s_screenKey = MonitorKey(mon);
     ShowPlace();
+    ShowSide(ModuleSideOf(s_v.seg[kSegEdge]));  // 先显示现在弹的那条边的
+    for (int i = 0; i < kToggleCount; ++i) s_knob[i] = s_v.on[i] ? 1.0f : 0.0f;
     LayoutFor(mon);
     MONITORINFO mi = {sizeof(mi)};
     GetMonitorInfoW(mon, &mi);

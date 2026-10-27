@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find what's playing: its cover art and title above pause, previous and next; the input mode (中 / 英 for Chinese), which you can click to switch; and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings; the clock settings are there too, where you can add the weekday or seconds, or drop the date.
+Next to the clock you'll find what's playing: its cover art and title above pause / play; click the cover to show previous and next, and again to hide them. There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 
@@ -95,7 +95,7 @@ Choose liquid glass or the original Windows 11 look (the system's acrylic: a sol
 Press F2 while the mini taskbar is open to arrange it your way:
 
 - Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it.
-- Drag the tray icons, media, input mode, battery or clock to reorder them, or drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too.
+- Drag the tray icons, media, input mode, battery or clock to reorder them, or drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too. The bottom and the screen sides remember this separately.
 - Drag the window icons or empty space to slide the whole panel anywhere along the screen edge; it snaps to the center and the ends. Double-click to reset.
 - Right-click to choose what shows, or reset the order and position. Press Enter or Esc when you're done.
 
@@ -128,7 +128,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
 | Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the system's network list or Bluetooth device list (Bluetooth on Windows 10 opens Settings) |
-| Media buttons | Pause / play, previous, next |
+| Media | Click the cover to show / hide previous and next; the buttons pause / play and skip |
 | Input mode | Click to switch between native and English input |
 | Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
 | F2 | Enter or leave edit mode: drag edges to resize, items to reorder, empty space to move |

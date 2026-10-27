@@ -67,15 +67,26 @@ constexpr int kMaxPopupOffset = 1000;
 constexpr int kMinIconSize = 80, kMaxIconSize = 150;  // 图标大小，百分比
 constexpr int kMaxIconGap = 16;                       // 图标间距，像素（按 100% 大小算）
 constexpr int kDefaultIconGap = 4;
+// 迷你任务栏显示哪些、按什么顺序：放在底部和侧边时各一份（Settings::modules 的下标见 ModuleSide）
+struct ModuleSet {
+    bool tray = true;     // 系统托盘“隐藏的图标”里的那些
+    bool levels = true;   // 音量和亮度调节
+    bool radios = true;   // Wi-Fi 和蓝牙开关
+    bool media = true;    // 正在播放的媒体
+    bool ime = true;      // 输入法的中英文状态
+    bool battery = true;  // 电量（没有电池时不显示）
+    bool clock = true;    // 时钟
+    int order[kModuleCount] = {kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock};  // 模块的顺序，见 Module
+};
+enum ModuleSide { kSideBottom, kSideEdge };
+inline int ModuleSideOf(int edge) { return edge == kEdgeBottom ? kSideBottom : kSideEdge; }
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool alwaysHideTaskbar = false;    // 一直隐藏任务栏：没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出
     bool longPressPopup = true;
     int longPressMs = 1000;
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
-    bool showLevels = true;      // 迷你任务栏里显示音量和亮度调节
-    bool trayIcons = true;       // 迷你任务栏里显示系统托盘“隐藏的图标”里的那些
-    bool showRadios = true;      // 迷你任务栏里显示 Wi-Fi 和蓝牙开关
+    ModuleSet modules[2];        // 迷你任务栏放在底部、侧边时各显示哪些，见 ModuleSide
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘），编辑模式里拖面板的边改
     int popupRadius = 22;        // 迷你任务栏的圆角半径，像素（按 100% 大小算）
@@ -100,14 +111,9 @@ struct Settings {
     int glassTransparency = kDefaultGlassTransparency;  // 迷你任务栏液态玻璃的透明度，百分比，深浅色共用
     bool flashAlert = true;    // 任务栏藏着时提醒新消息：程序闪烁时屏幕边亮起，迷你任务栏里它的图标变色
     bool edgePopup = false;    // 任务栏藏着时，鼠标停在迷你任务栏那条屏幕边上就弹出
-    bool showMedia = true;     // 迷你任务栏里显示正在播放的媒体（暂停、上一首、下一首）
-    bool showIme = true;       // 迷你任务栏里显示输入法的中英文状态
-    bool showBattery = true;   // 迷你任务栏里显示电量（没有电池时不显示）
-    bool showClock = true;     // 迷你任务栏里显示时钟
     bool clockSeconds = false; // 时钟显示秒
     bool clockWeekday = false; // 时钟显示星期
     bool clockDate = true;     // 时钟显示日期
-    int moduleOrder[kModuleCount] = {kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock};  // 模块的顺序，见 Module
     int iconSize = 100;               // 迷你任务栏的图标（格子）大小，百分比，在“大小”的基础上再乘
     int iconGap = kDefaultIconGap;    // 格子之间的间距，像素（按 100% 大小算）
     bool showTitle = true;            // 横排时顶上有一行显示名字；关掉时名字显示在面板上方的小牌子里
@@ -145,6 +151,8 @@ inline int DefaultPopupRadius(int style) { return style == kGlassWin11 ? 8 : 22;
 extern HINSTANCE g_instance;
 extern HWND g_mainWnd;  // 隐藏的主消息窗口，托盘和计时器都挂在它上面
 extern Settings g_settings;
+// 底部、侧边随便哪一份开着这一项（托盘、媒体这些在后台读的，有一份要就得读）
+inline bool AnyModuleSet(bool ModuleSet::*item) { return g_settings.modules[0].*item || g_settings.modules[1].*item; }
 
 std::wstring SettingsDir();
 std::wstring SettingsFile();  // SettingsDir() 下的 settings.ini

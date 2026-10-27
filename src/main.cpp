@@ -378,6 +378,17 @@ void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
         if (!used[m]) order[n++] = m;
 }
 
+// 底部那份用原来的键，侧边那份在键前面加 Side；侧边没写过的跟着底部
+struct ModuleKey {
+    const wchar_t* key;
+    bool ModuleSet::*item;
+};
+const ModuleKey kModuleSetKeys[] = {{L"TrayIcons", &ModuleSet::tray},     {L"ShowLevels", &ModuleSet::levels},
+                                    {L"ShowRadios", &ModuleSet::radios},  {L"ShowMedia", &ModuleSet::media},
+                                    {L"ShowIme", &ModuleSet::ime},        {L"ShowBattery", &ModuleSet::battery},
+                                    {L"ShowClock", &ModuleSet::clock}};
+std::wstring SideKey(const wchar_t* key) { return std::wstring(L"Side") + key; }
+
 std::wstring ModuleOrderText(const int order[kModuleCount]) {
     std::wstring text;
     for (int i = 0; i < kModuleCount; ++i) text += (i ? L"," : L"") + std::wstring(kModuleKeys[order[i]]);
@@ -412,13 +423,11 @@ void LoadSettings() {
     int ms = static_cast<int>(GetPrivateProfileIntW(L"General", L"LongPressMs", kDefaultLongPressMs, f.c_str()));
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
-    g_settings.showLevels = GetPrivateProfileIntW(L"General", L"ShowLevels", 1, f.c_str()) != 0;
-    g_settings.trayIcons = GetPrivateProfileIntW(L"General", L"TrayIcons", 1, f.c_str()) != 0;
-    g_settings.showRadios = GetPrivateProfileIntW(L"General", L"ShowRadios", 1, f.c_str()) != 0;
-    g_settings.showMedia = GetPrivateProfileIntW(L"General", L"ShowMedia", 1, f.c_str()) != 0;
-    g_settings.showIme = GetPrivateProfileIntW(L"General", L"ShowIme", 1, f.c_str()) != 0;
-    g_settings.showBattery = GetPrivateProfileIntW(L"General", L"ShowBattery", 1, f.c_str()) != 0;
-    g_settings.showClock = GetPrivateProfileIntW(L"General", L"ShowClock", 1, f.c_str()) != 0;
+    for (const ModuleKey& k : kModuleSetKeys) {
+        bool bottom = GetPrivateProfileIntW(L"General", k.key, 1, f.c_str()) != 0;
+        g_settings.modules[kSideBottom].*k.item = bottom;
+        g_settings.modules[kSideEdge].*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), bottom, f.c_str()) != 0;
+    }
     g_settings.clockSeconds = GetPrivateProfileIntW(L"General", L"ClockSeconds", 0, f.c_str()) != 0;
     g_settings.clockWeekday = GetPrivateProfileIntW(L"General", L"ClockWeekday", 0, f.c_str()) != 0;
     g_settings.clockDate = GetPrivateProfileIntW(L"General", L"ClockDate", 1, f.c_str()) != 0;
@@ -472,7 +481,13 @@ void LoadSettings() {
         GetPrivateProfileStringW(L"General", key, L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
         return std::wstring(buf.data());
     };
-    ParseModuleOrder(text(L"ModuleOrder"), g_settings.moduleOrder);
+    int* bottomOrder = g_settings.modules[kSideBottom].order;
+    ParseModuleOrder(text(L"ModuleOrder"), bottomOrder);
+    std::wstring sideOrder = text(SideKey(L"ModuleOrder").c_str());
+    if (sideOrder.empty())
+        std::copy(bottomOrder, bottomOrder + kModuleCount, g_settings.modules[kSideEdge].order);
+    else
+        ParseModuleOrder(sideOrder, g_settings.modules[kSideEdge].order);
     g_settings.customTint = GetPrivateProfileIntW(L"General", L"CustomTint", 0, f.c_str()) != 0;
     g_settings.tintColor = ParseColor(text(L"TintColor"), RGB(32, 32, 36));
     g_settings.customAccent = GetPrivateProfileIntW(L"General", L"CustomAccent", 0, f.c_str()) != 0;
@@ -531,17 +546,18 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"LongPressPopup", g_settings.longPressPopup ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressMs", std::to_wstring(g_settings.longPressMs).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ShowLevels", g_settings.showLevels ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"TrayIcons", g_settings.trayIcons ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ShowRadios", g_settings.showRadios ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ShowMedia", g_settings.showMedia ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ShowIme", g_settings.showIme ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ShowBattery", g_settings.showBattery ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ShowClock", g_settings.showClock ? L"1" : L"0", f.c_str());
+    for (const ModuleKey& k : kModuleSetKeys) {
+        WritePrivateProfileStringW(L"General", k.key, g_settings.modules[kSideBottom].*k.item ? L"1" : L"0", f.c_str());
+        WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), g_settings.modules[kSideEdge].*k.item ? L"1" : L"0",
+                                   f.c_str());
+    }
     WritePrivateProfileStringW(L"General", L"ClockSeconds", g_settings.clockSeconds ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ClockWeekday", g_settings.clockWeekday ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ClockDate", g_settings.clockDate ? L"1" : L"0", f.c_str());
-    WritePrivateProfileStringW(L"General", L"ModuleOrder", ModuleOrderText(g_settings.moduleOrder).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"ModuleOrder", ModuleOrderText(g_settings.modules[kSideBottom].order).c_str(),
+                               f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), ModuleOrderText(g_settings.modules[kSideEdge].order).c_str(),
+                               f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowTitle", g_settings.showTitle ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"IconSize", std::to_wstring(g_settings.iconSize).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"IconGap", std::to_wstring(g_settings.iconGap).c_str(), f.c_str());
@@ -597,18 +613,20 @@ const wchar_t* const kLookKeys[] = {
     L"GlassStyle",  L"Theme",       L"GlassTransparency", L"PopupRadius", L"PopupScale",   L"PopupLength", L"IconSize",
     L"IconGap",     L"ShowTitle",   L"CustomTint",        L"TintColor",   L"CustomAccent", L"AccentColor", L"ModuleOrder",
     L"TrayIcons",   L"TrayStyle",   L"ShowMedia",         L"ShowIme",     L"ShowBattery",  L"ShowClock",   L"ClockSeconds",
-    L"ClockWeekday", L"ClockDate",  L"ShowLevels",        L"ShowRadios",  L"PopupEdge",    L"PopupAlign",  L"PopupOffset"};
+    L"ClockWeekday", L"ClockDate",  L"ShowLevels",        L"ShowRadios",  L"PopupEdge",    L"PopupAlign",  L"PopupOffset",
+    L"SideModuleOrder", L"SideTrayIcons", L"SideShowMedia", L"SideShowIme", L"SideShowBattery", L"SideShowClock",
+    L"SideShowLevels",  L"SideShowRadios"};
 
 std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 
-// 把外观方案的键从一节抄到另一节，没有的键跳过
+// 把外观方案的键从一节抄到另一节。没有的键（旧版本存的方案）在目标那节也删掉，读的时候用默认值（侧边的跟着底部）
 void CopyLookKeys(const wchar_t* fromSection, const wchar_t* toSection) {
     std::wstring f = SettingsFile();
     wchar_t value[512];
     for (const wchar_t* key : kLookKeys) {
         DWORD n = GetPrivateProfileStringW(fromSection, key, L"\x01", value, ARRAYSIZE(value), f.c_str());
-        if (n == 1 && value[0] == L'\x01') continue;
-        WritePrivateProfileStringW(toSection, key, value, f.c_str());
+        bool missing = n == 1 && value[0] == L'\x01';
+        WritePrivateProfileStringW(toSection, key, missing ? nullptr : value, f.c_str());
     }
 }
 
@@ -681,6 +699,9 @@ bool ImportSettings(const std::wstring& path) {
     if (n == 0) return false;  // 不是本程序的设置文件
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
+    // 旧版本导出的没有侧边那份：先删掉现在的，读的时候跟着导入的底部
+    for (const ModuleKey& k : kModuleSetKeys) WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), nullptr, f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), nullptr, f.c_str());
     for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
         std::wstring line = p;
         size_t eq = line.find(L'=');

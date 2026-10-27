@@ -248,6 +248,7 @@ constexpr float kSideTitleH = 26;
 bool s_showMedia = false;  // 这次弹出有没有这几样（弹出时定下来）
 bool s_showIme = false;
 bool s_showBattery = false;
+bool s_mediaOpen = false;  // 媒体展开了上一首、下一首（点封面切换，每次弹出都先收着，只留播放 / 暂停）
 MediaInfo s_media;
 ImeInfo s_ime;
 BatteryInfo s_battery;
@@ -326,6 +327,8 @@ bool BubbleTitle() { return s_edge == kEdgeBottom && !s_compact && !s_look.showT
 
 // 弹在屏幕左右两边：竖着排，从侧边滑出来
 bool Vertical() { return s_edge != kEdgeBottom; }
+// 这次弹出的那条边用哪份“显示哪些、什么顺序”（底部、侧边各一份）
+ModuleSet& Mods() { return g_settings.modules[ModuleSideOf(s_edge)]; }
 
 // 面板贴着的那条屏幕边有多长（横排是宽，竖排是高）
 float ScreenSide() { return static_cast<float>(Vertical() ? s_bounds.bottom - s_bounds.top : s_bounds.right - s_bounds.left); }
@@ -391,7 +394,7 @@ bool ModuleShown(int m) { return m == kModWindows || ModuleLen(s_L, m) > 0; }
 // 这次显示的模块按顺序排好，算出每个前面的间隔（第一个前面是和开始按钮之间的）
 int ModuleSequence(const Layout& L, int seq[kModuleCount], float sepBefore[kModuleCount]) {
     int count = 0;
-    for (int m : g_settings.moduleOrder)
+    for (int m : Mods().order)
         if (m == kModWindows || ModuleLen(L, m) > 0) seq[count++] = m;
     for (int i = 0; i < count; ++i)
         sepBefore[i] = i == 0 || !(StatusModule(seq[i - 1]) && StatusModule(seq[i])) ? L.sep : 0;
@@ -418,7 +421,7 @@ float PlaceModules(Layout& L, float start) {
 }
 
 // 编辑模式里开着却暂时没有内容的托盘（没有隐藏的图标）也占个位置，好拖着排顺序
-bool TrayHolder() { return s_editing && s_tray.empty() && g_settings.trayIcons && !s_compact; }
+bool TrayHolder() { return s_editing && s_tray.empty() && Mods().tray && !s_compact; }
 
 void ComputeLayout() {
     Layout& L = s_L;
@@ -431,7 +434,7 @@ void ComputeLayout() {
     L.topGap = BubbleTitle() ? Px(40) : 0;
     L.sep = Px(9);
     L.clockW = L.clockH = 0;
-    if (g_settings.showClock) ClockSize(L.clockW, L.clockH);
+    if (Mods().clock) ClockSize(L.clockW, L.clockH);
     L.emptyW = vertical ? Px(96) : Px(130);
     // Wi-Fi 和蓝牙按钮：横排时在调节条那一行的最右边（没有调节条时这一行只有它们，居中），竖排时在最下面一个个往下排
     L.radioW = Px(40);
@@ -463,7 +466,7 @@ void ComputeLayout() {
     int n = static_cast<int>(s_items.size());
     L.mediaTall = s_showMedia && !vertical && L.sliderH > 0;
     L.mediaW = !s_showMedia ? 0 : Px(L.mediaTall ? kMediaColW : kMediaRowW);
-    L.mediaH = s_showMedia ? Px(kSideCoverSize + 2 + kSideTitleH) + 3 * Px(28) : 0;
+    L.mediaH = s_showMedia ? Px(kSideCoverSize + 2 + kSideTitleH) + (s_mediaOpen ? 3 : 1) * Px(28) : 0;
     L.imeW = s_showIme ? Px(30) : 0;
     L.imeH = s_showIme ? Px(30) : 0;
     L.battW = s_showBattery ? Px(42) : 0;
@@ -716,10 +719,13 @@ int RadioAt(int x, int y) {
 // ---- 媒体按钮、输入法、电量 ----
 
 // 媒体那一段里各部分的位置：封面在上，下面是歌名，最下面三个按钮（kMediaPrevious 上一首、kMediaPlayPause 播放 / 暂停、
-// kMediaNext 下一首；竖排时三个按钮上下排）。横排只有一行时封面在左，歌名和按钮在右
+// kMediaNext 下一首；竖排时三个按钮上下排）。横排只有一行时封面在左，歌名和按钮在右。
+// 平时只有播放 / 暂停（居中），点封面才展开上一首、下一首
 struct MediaParts {
     RectF cover, title, button[3];
 };
+
+bool MediaButtonShown(int k) { return k == kMediaPlayPause || s_mediaOpen; }
 
 MediaParts MediaLayout() {
     const Layout& L = s_L;
@@ -730,7 +736,7 @@ MediaParts MediaLayout() {
         m.cover = RectF(L.colX + (L.tile - side) / 2, L.mediaY, side, side);
         m.title = RectF(L.panelX + Px(3), L.mediaY + side + Px(2), L.panelW - Px(6), Px(kSideTitleH));
         for (int k = 0; k < 3; ++k)
-            m.button[k] = RectF(L.colX + (L.tile - bw) / 2, m.title.GetBottom() + k * bh, bw, bh);
+            m.button[k] = RectF(L.colX + (L.tile - bw) / 2, m.title.GetBottom() + (s_mediaOpen ? k : 0) * bh, bw, bh);
         return m;
     }
     float side = Px(kCoverSize), bw = Px(30);
@@ -745,7 +751,8 @@ MediaParts MediaLayout() {
     m.cover = RectF(L.mediaX, L.tileY + (L.tile - side) / 2, side, side);
     float x = m.cover.GetRight() + Px(6);
     m.title = RectF(x, L.tileY + Px(2), L.mediaX + L.mediaW - x, Px(16));
-    for (int k = 0; k < 3; ++k) m.button[k] = RectF(x + k * bw, L.tileY + L.tile - bh - Px(1), bw, bh);
+    float x0 = s_mediaOpen ? x : m.title.X + (m.title.Width - bw) / 2 - bw;
+    for (int k = 0; k < 3; ++k) m.button[k] = RectF(x0 + k * bw, L.tileY + L.tile - bh - Px(1), bw, bh);
     return m;
 }
 
@@ -757,8 +764,9 @@ RectF ExtraRect(int extra) {
     if (extra == kExtraIme) return v ? RectF(L.panelX, L.imeY, L.panelW, L.imeH) : RectF(L.imeX, L.tileY, L.imeW, L.tile);
     if (extra == kExtraBattery)
         return v ? RectF(L.panelX, L.battY, L.panelW, L.battH) : RectF(L.battX, L.tileY, L.battW, L.tile);
-    if (extra == kExtraCover) {  // 封面和歌名
+    if (extra == kExtraCover) {  // 封面和歌名（横排只有一行时歌名在按钮上面，只算封面）
         MediaParts m = MediaLayout();
+        if (!v && !L.mediaTall) return m.cover;
         RectF r;
         RectF::Union(r, m.cover, m.title);
         return r;
@@ -769,13 +777,14 @@ RectF ExtraRect(int extra) {
 bool ExtraShown(int extra) {
     if (extra == kExtraIme) return s_showIme;
     if (extra == kExtraBattery) return s_showBattery;
-    return s_showMedia && ((extra >= kMediaPrevious && extra <= kMediaNext) || extra == kExtraCover);
+    if (extra >= kMediaPrevious && extra <= kMediaNext) return s_showMedia && MediaButtonShown(extra);
+    return s_showMedia && extra == kExtraCover;
 }
 
 // 鼠标下的媒体按钮、输入法或电量，没有为 kExtraNone
 int ExtraAt(int x, int y) {
-    for (int e : {static_cast<int>(kExtraCover), static_cast<int>(kMediaPrevious), static_cast<int>(kMediaPlayPause),
-                  static_cast<int>(kMediaNext), static_cast<int>(kExtraIme), static_cast<int>(kExtraBattery)})
+    for (int e : {static_cast<int>(kMediaPrevious), static_cast<int>(kMediaPlayPause), static_cast<int>(kMediaNext),
+                  static_cast<int>(kExtraCover), static_cast<int>(kExtraIme), static_cast<int>(kExtraBattery)})
         if (ExtraShown(e) && ExtraRect(e).Contains(static_cast<REAL>(x), static_cast<REAL>(y))) return e;
     return kExtraNone;
 }
@@ -1303,9 +1312,15 @@ void DrawMedia(Graphics& g) {
         FillRound(g, RectF(L.mediaX - Px(2), L.tileY, L.mediaW + Px(4), L.tile + L.rowGap + L.sliderH), PillRadius(),
                   pal.pillBottom);
     }
+    if (s_hoverExtra == kExtraCover) {  // 封面能点：点了展开、收起上一首和下一首
+        RectF r = ExtraRect(kExtraCover);
+        r.Inflate(Px(2), Px(2));
+        FillRound(g, r, PillRadius(), pal.pillTop);
+    }
     DrawCover(g, m.cover);
     DrawMediaTitle(g, m.title);
     for (int k = kMediaPrevious; k <= kMediaNext; ++k) {
+        if (!MediaButtonShown(k)) continue;
         RectF box = m.button[k];
         bool enabled = MediaEnabled(k);
         if (k == s_hoverExtra && enabled) {
@@ -1842,7 +1857,7 @@ void HideNow() {
     s_open = false;
     s_preview = false;
     KillTimer(s_hwnd, kTimerPreview);
-    if (g_settings.trayIcons) Tray_Refresh();  // 下次弹出时用新的
+    if (AnyModuleSet(&ModuleSet::tray)) Tray_Refresh();  // 下次弹出时用新的
     s_anim = Anim::None;
     s_drag = kNone;
     if (GetCapture() == s_hwnd) ReleaseCapture();
@@ -2034,8 +2049,16 @@ void OpenRadioPanel(int k) {
     Launch(wifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
 }
 
-// 点了媒体按钮、输入法：发命令或者切换中英文，马上按新的样子画
+void EditRelayout();
+
+// 点了媒体按钮、封面、输入法：发命令、展开收起上一首下一首或者切换中英文，马上按新的样子画
 void ClickExtra(int extra) {
+    if (extra == kExtraCover) {
+        s_mediaOpen = !s_mediaOpen;
+        if (Vertical()) EditRelayout();  // 竖排时媒体那段变高变矮；横排大小不变，按钮换个地方画
+        else Redraw();
+        return;
+    }
     if (extra == kExtraIme) {
         if (!s_ime.canToggle) return;
         if (!Ime_Toggle(s_imeTarget)) Log(L"输入法：切换中英文没成功");
@@ -2633,7 +2656,7 @@ void EditRelayout() {
 }
 
 // 编辑模式里开着却暂时没有内容的媒体（没在放）也显示出来，好拖着排顺序
-void SyncMediaShown() { s_showMedia = g_settings.showMedia && !s_compact && (s_editing || s_media.present); }
+void SyncMediaShown() { s_showMedia = Mods().media && !s_compact && (s_editing || s_media.present); }
 
 void SetEditing(bool on) {
     if (on && (!s_open || s_preview || s_compact)) return;
@@ -2760,7 +2783,7 @@ void BeginModuleDrag(int part, POINT screen) {
 
 // 把模块挪到第 k 个（这次显示着的里头，不算它自己）后面。没显示的模块在顺序里的位置不动
 void MoveModule(int part, int k) {
-    int* order = g_settings.moduleOrder;
+    int* order = Mods().order;
     std::vector<int> rest;
     for (int i = 0; i < kModuleCount; ++i)
         if (order[i] != part) rest.push_back(order[i]);
@@ -2790,7 +2813,7 @@ void DragModule(POINT screen) {
     float along = Vertical() ? pt.Y : pt.X, hysteresis = Px(6);
     std::vector<float> centers;
     int cur = -1;
-    for (int m : g_settings.moduleOrder) {
+    for (int m : Mods().order) {
         if (!ModuleShown(m)) continue;
         if (m == s_moveModule) {
             cur = static_cast<int>(centers.size());
@@ -2826,34 +2849,35 @@ void EndModuleDrag(bool drop) {
     Redraw();
 }
 
-// 编辑模式里隐藏、显示一个模块（调节条、Wi-Fi 蓝牙）：改设置、保存，这次弹出的也跟着变
+// 编辑模式里隐藏、显示一个模块（调节条、Wi-Fi 蓝牙）：改这条边那份设置、保存，这次弹出的也跟着变
 void ShowPart(int part, bool on) {
+    ModuleSet& mods = Mods();
     switch (part) {
         case kModTray:
-            g_settings.trayIcons = on;
+            mods.tray = on;
             s_tray = on ? Tray_Hidden() : std::vector<TrayApp>();
             s_trayPage = s_trayFirst = 0;
             if (on) Tray_Refresh();
             break;
         case kModMedia:
-            g_settings.showMedia = on;
-            Media_Configure(on, s_hwnd);
+            mods.media = on;
+            Media_Configure(AnyModuleSet(&ModuleSet::media), s_hwnd);
             s_media = on ? Media_Get() : MediaInfo();
             if (on) Media_Query();
             break;
         case kModIme:
-            g_settings.showIme = on;
+            mods.ime = on;
             s_showIme = on;
             if (on) s_ime = Ime_Get(s_imeTarget);
             break;
         case kModBattery:
-            g_settings.showBattery = on;
+            mods.battery = on;
             s_battery = Battery_Get();
             s_showBattery = on && s_battery.present;
             break;
-        case kModClock: g_settings.showClock = on; break;
+        case kModClock: mods.clock = on; break;
         case kPartLevels:
-            g_settings.showLevels = on;
+            mods.levels = on;
             s_levels = on;
             if (on) {
                 RefreshVolume();
@@ -2861,7 +2885,7 @@ void ShowPart(int part, bool on) {
             }
             break;
         case kPartRadios:
-            g_settings.showRadios = on;
+            mods.radios = on;
             s_radioCount = 0;
             for (int i = 0; on && i < kRadioCount; ++i) {
                 s_radio[i] = Radios_Get(i);
@@ -2971,7 +2995,7 @@ void ResetPlace() {
 }
 
 void ResetOrder() {
-    for (int i = 0; i < kModuleCount; ++i) g_settings.moduleOrder[i] = i;
+    for (int i = 0; i < kModuleCount; ++i) Mods().order[i] = i;
     Log(L"迷你任务栏恢复默认顺序");
     SaveSettings();
     SettingsDialog_SettingsChanged();
@@ -2983,13 +3007,13 @@ void ShowEditMenu(POINT client) {
     enum { kCmdOrder = 1, kCmdPlace, kCmdDone, kCmdPart = 100 };
     HMENU menu = CreatePopupMenu();
     const int parts[] = {kModTray, kModMedia, kModIme, kModBattery, kModClock, kPartLevels, kPartRadios};
-    const bool shown[] = {g_settings.trayIcons, g_settings.showMedia, g_settings.showIme, g_settings.showBattery,
-                          g_settings.showClock, g_settings.showLevels, g_settings.showRadios};
+    const ModuleSet& mods = Mods();
+    const bool shown[] = {mods.tray, mods.media, mods.ime, mods.battery, mods.clock, mods.levels, mods.radios};
     for (size_t i = 0; i < ARRAYSIZE(parts); ++i)
         AppendMenuW(menu, MF_STRING | (shown[i] ? MF_CHECKED : 0), kCmdPart + parts[i], PartName(parts[i]));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     bool defaultOrder = true;
-    for (int i = 0; i < kModuleCount; ++i) defaultOrder = defaultOrder && g_settings.moduleOrder[i] == i;
+    for (int i = 0; i < kModuleCount; ++i) defaultOrder = defaultOrder && mods.order[i] == i;
     AppendMenuW(menu, MF_STRING | (defaultOrder ? MF_GRAYED : 0), kCmdOrder, Tr(L"恢复默认顺序"));
     AppendMenuW(menu, MF_STRING | (s_align == kAlignSystem ? MF_GRAYED : 0), kCmdPlace, Tr(L"恢复默认位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -3237,7 +3261,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else if (wParam == kTimerTrayMenu) {
                 WatchTrayMenu();
             } else if (wParam == kTimerTray) {
-                if (g_settings.trayIcons && !s_open) Tray_Refresh();
+                if (AnyModuleSet(&ModuleSet::tray) && !s_open) Tray_Refresh();
             } else if (wParam == kTimerEdge) {
                 WatchEdge();
             } else if (wParam == kTimerHoverLeave) {
@@ -3616,9 +3640,9 @@ void Popup_Init() {
     if (!s_fontFamily) s_fontFamily.reset(FontFamily::GenericSansSerif()->Clone());
 
     // 托盘图标在后台读，之后每隔一会儿再读一遍
-    if (g_settings.trayIcons) Tray_Refresh();
+    if (AnyModuleSet(&ModuleSet::tray)) Tray_Refresh();
     // Wi-Fi 和蓝牙也先读一遍：第一次弹出时就知道这台电脑上有没有
-    if (g_settings.showRadios && s_hwnd) Radios_Query(s_hwnd);
+    if (AnyModuleSet(&ModuleSet::radios) && s_hwnd) Radios_Query(s_hwnd);
     if (s_hwnd) SetTimer(s_hwnd, kTimerTray, kTrayRefreshMs, nullptr);
 
     // 提前读一遍固定的应用和图标，第一次弹出时就不卡
@@ -3694,7 +3718,8 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_scale = PopupScale(mon);
 
     // 音量马上就能读到；亮度在后台读，读到之前先显示上次的值
-    s_levels = g_settings.showLevels && !s_compact;
+    const ModuleSet& mods = Mods();
+    s_levels = mods.levels && !s_compact;
     s_monitor = mon;
     s_brightness = -2;
     for (const auto& known : s_knownBrightness)
@@ -3710,7 +3735,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
 
     // Wi-Fi 和蓝牙先用上次读到的（启动时就读过一遍），这台电脑上没有的、还没读到的不放按钮；弹出以后再读一遍
     s_radioCount = 0;
-    if (g_settings.showRadios && !s_compact) {
+    if (mods.radios && !s_compact) {
         for (int i = 0; i < kRadioCount; ++i) {
             s_radio[i] = Radios_Get(i);
             if (s_radio[i].status != kRadioMissing && s_radio[i].status != kRadioReading) s_radioIds[s_radioCount++] = i;
@@ -3723,18 +3748,19 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
 
     // 媒体按钮看后台最近读到的有没有在放（面板宽度弹出时就定了），弹出以后再读一遍；
     // 输入法看弹出前的前台窗口；没有电池不显示电量
-    s_media = g_settings.showMedia ? Media_Get() : MediaInfo();
+    s_media = mods.media ? Media_Get() : MediaInfo();
+    s_mediaOpen = false;
     SyncMediaShown();
-    if (g_settings.showMedia && !preview) Media_Query();
+    if (mods.media && !preview) Media_Query();
     s_imeTarget = s_prevForeground;
-    s_showIme = g_settings.showIme && !s_compact;
+    s_showIme = mods.ime && !s_compact;
     if (s_showIme) s_ime = Ime_Get(s_imeTarget);
     s_battery = Battery_Get();
-    s_showBattery = g_settings.showBattery && !s_compact && s_battery.present;
+    s_showBattery = mods.battery && !s_compact && s_battery.present;
     s_hoverExtra = kExtraNone;
 
     // 托盘图标用后台读好的（面板宽度弹出时就定了，弹出期间读到的新结果留到下次）
-    s_tray = g_settings.trayIcons ? Tray_Hidden() : std::vector<TrayApp>();
+    s_tray = mods.tray ? Tray_Hidden() : std::vector<TrayApp>();
     s_trayStyle = g_settings.trayStyle;
     s_hoverTray = -1;
     s_overTray = false;
@@ -3742,7 +3768,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_trayFirst = 0;
     s_flipFrom = -1;
     EndTrayMode();
-    if (g_settings.trayIcons && !preview) Tray_Refresh();
+    if (mods.tray && !preview) Tray_Refresh();
 
     s_allItems = BuildTiles(EnumerateWindows(s_prevForeground, IconPx(), s_monitor));
     s_items = s_allItems;
@@ -3889,7 +3915,7 @@ void Popup_Configure() {
         KillTimer(s_hwnd, kTimerEdge);
         s_edgeSince = 0;
     }
-    Media_Configure(g_settings.showMedia, s_hwnd);
+    Media_Configure(AnyModuleSet(&ModuleSet::media), s_hwnd);
 }
 
 void Popup_Refresh() { Redraw(); }
