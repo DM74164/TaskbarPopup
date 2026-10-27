@@ -148,8 +148,6 @@ const wchar_t* const kEnglish[][2] = {
      L"You can also add or remove an app by right-clicking it in the mini taskbar"},
     {L"立即检查", L"Check now"},
     {L"版本", L"Version"},
-    {L"确定", L"OK"},
-    {L"取消", L"Cancel"},
     {L"程序 (*.exe)", L"Programs (*.exe)"},
     {L"选择最大化时不隐藏任务栏的程序", L"Choose an app that keeps the taskbar"},
     {L"选择最大化时隐藏任务栏的程序", L"Choose an app that hides the taskbar"},

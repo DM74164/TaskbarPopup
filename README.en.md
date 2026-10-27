@@ -136,7 +136,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 
 ## Settings
 
-Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Size & position, Appearance, Presets & backup, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
+Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini taskbar, Status & controls, Size & position, Appearance, Presets & backup, Hotkeys, and Startup & updates; switch with the navigation on the left (or Ctrl+Tab). Tab, arrow keys and Space work too. Changes take effect right away; there is no OK button. Settings are stored in `%APPDATA%\TaskbarPopup\settings.ini`.
 
 ![Settings grouped by page, with the language switching instantly](docs/demo/en/settings.webp)
 

@@ -21,6 +21,8 @@ namespace {
 constexpr wchar_t kClassName[] = L"TaskbarPopupSettings";
 constexpr UINT_PTR kTimerAnim = 1;  // 淡入、开关滑块的动画
 constexpr UINT_PTR kTimerLive = 2;  // 定时刷新玻璃后面的背景
+constexpr UINT_PTR kTimerSave = 3;  // 改了设置过一小会儿存下、生效（按住方向键调滑块时不用每下都存）
+constexpr UINT kSaveDelayMs = 150;
 constexpr UINT WM_APP_SHOT = WM_APP + 40;  // 后台截好背景了，lParam 是 ShotJob*
 constexpr double kFadeMs = 180.0 * TP_ANIM_SCALE;
 constexpr double kKnobMs = 150.0 * TP_ANIM_SCALE;
@@ -123,8 +125,8 @@ const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 
 
 // 能点的东西
 enum Kind {
-    kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kOk,
-    kCancel, kClose, kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip
+    kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kClose,
+    kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip
 };
 struct Item {
     Kind kind = kNoItem;
@@ -133,7 +135,7 @@ struct Item {
     bool operator==(const Item& o) const { return kind == o.kind && index == o.index; }
 };
 
-// 窗口里的各项值。确定时只改用户在窗口里动过的项：窗口开着的时候在迷你任务栏或托盘菜单里改的设置不会被盖掉
+// 窗口里的各项值。改了马上存（见 ScheduleSave），只改用户在窗口里动过的项：在迷你任务栏或托盘菜单里改的设置不会被盖掉
 struct Values {
     bool on[kToggleCount] = {};  // 底部、侧边各一份的那几个开关显示的是 seg[kSegSide] 那份，存的是 sides
     ModuleSet sides[2];          // 只用里面显示哪些，顺序在迷你任务栏的编辑模式里排
@@ -637,17 +639,14 @@ void BuildLayout() {
             break;
         }
 
-    float contentBottom = std::max(navBottom, pageBottom - Px(kGroupGap));
-    float buttonsY = contentBottom + Px(16);
-    float bw = Px(92), bh = Px(34);
-    float panelRight = margin + panelW - Px(kPad);
-    s_items.push_back({kOk, 0, RectF(panelRight - bw, buttonsY, bw, bh)});
-    s_items.push_back({kCancel, 0, RectF(panelRight - 2 * bw - Px(10), buttonsY, bw, bh)});
+    // 版本号在导航下面，和右边最后一组的底边对齐
+    float versionH = Px(20);
+    float contentBottom = std::max(navBottom + Px(16) + versionH, pageBottom - Px(kGroupGap));
     const char* version = TP_VERSION_STR;
     s_texts.push_back({std::wstring(Tr(L"版本")) + L" " + std::wstring(version, version + strlen(version)),
-                       RectF(margin + Px(kPad) + Px(4), buttonsY, Px(200), bh), 3});
+                       RectF(navX + Px(4), contentBottom - versionH, navW, versionH), 3});
 
-    float panelH = buttonsY + bh + Px(kPad) - margin;
+    float panelH = contentBottom + Px(kPad) - margin;
     s_panel = RectF(margin, margin, panelW, panelH);
     s_width = static_cast<int>(std::ceil(panelW + 2 * margin));
     s_height = static_cast<int>(std::ceil(panelH + 2 * margin));
@@ -988,24 +987,9 @@ void DrawButton(Graphics& g, const Item& it) {
         DrawText(g, Tr(L"立即检查"), Px(12.5f), FontStyleRegular, r, pal.accent, StringAlignmentCenter);
         return;
     }
-    if (it.kind == kFile) {
-        DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
-        DrawText(g, Tr(it.index ? L"导出…" : L"导入…"), Px(12.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
-        return;
-    }
-    if (it.kind == kOk) {
-        Color fill = pal.accent;
-        if (hot) fill = Mix(fill, Color(255, 255, 255, 255), 0.15f);
-        GraphicsPath path;
-        AddRoundRect(path, r, r.Height / 2);
-        PointF top(0, r.Y), bottom(0, r.Y + r.Height);
-        LinearGradientBrush brush(top, bottom, Mix(fill, Color(255, 255, 255, 255), 0.12f), fill);
-        g.FillPath(&brush, &path);
-        DrawText(g, Tr(L"确定"), Px(13.5f), FontStyleRegular, r, pal.onAccent, StringAlignmentCenter);
-        return;
-    }
+    // 导入、导出
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
-    DrawText(g, Tr(L"取消"), Px(13.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
+    DrawText(g, Tr(it.index ? L"导出…" : L"导入…"), Px(12.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
 }
 
 void DrawContent(Graphics& g) {
@@ -1468,7 +1452,7 @@ void EndCapture();
 bool PreviewsPopup(int which);
 void PreviewPopup(bool hold);
 
-// 换一页（窗口大小不变）。焦点跟到导航上新的这一项，确定、取消上的不动
+// 换一页（窗口大小不变）。焦点跟到导航上新的这一项
 void SetPage(int page) {
     page = (page % kPageCount + kPageCount) % kPageCount;
     if (page == s_page) return;
@@ -1477,7 +1461,7 @@ void SetPage(int page) {
     s_page = page;
     s_hover = s_press = {};
     s_drag = -1;
-    if (s_focus.kind != kOk && s_focus.kind != kCancel) s_focus = {kNav, page, {}};
+    s_focus = {kNav, page, {}};
     Relayout(true);
 }
 
@@ -1885,10 +1869,36 @@ void Reload(ReloadMode mode) {
 
 void Apply();
 
-// 存外观方案、导出之前：先把窗口里改的设上（存的是设置文件里的）
+// 把窗口里改的存下、生效（存外观方案、导出之前也先存，存的是设置文件里的）
 void Commit() {
     Apply();
     s_initial = s_v;
+}
+
+// 窗口里有没有改了还没存的（只看存进设置的，位置、对齐的分段按钮和“迷你任务栏在”是显示用的）
+bool Dirty() {
+    const Values &a = s_v, &b = s_initial;
+    for (int i = 0; i < kToggleCount; ++i)
+        if (!FindSideToggle(i) && a.on[i] != b.on[i]) return true;
+    for (int side = 0; side < 2; ++side)
+        for (const SideToggle& t : kSideToggles)
+            if (a.sides[side].*t.item != b.sides[side].*t.item) return true;
+    if (!std::equal(a.slider, a.slider + kSliderCount, b.slider)) return true;
+    for (int i = 0; i < kSegCount; ++i)
+        if (i != kSegEdge && i != kSegAlign && i != kSegSide && a.seg[i] != b.seg[i]) return true;
+    return a.edge != b.edge || a.align != b.align || a.offset != b.offset || !(a.screens == b.screens) ||
+           a.tint != b.tint || a.accent != b.accent || !std::equal(a.hotkey, a.hotkey + kHotkeyCount, b.hotkey) ||
+           !std::equal(a.hold, a.hold + kHotkeyCount, b.hold) || a.exclude != b.exclude || a.include != b.include;
+}
+
+// 改了什么过一小会儿就存下、生效；拖着滑块时等松开
+void ScheduleSave() {
+    if (s_hwnd && s_drag < 0 && Dirty()) SetTimer(s_hwnd, kTimerSave, kSaveDelayMs, nullptr);
+}
+
+void SaveNow() {
+    if (s_hwnd) KillTimer(s_hwnd, kTimerSave);
+    if (Dirty()) Commit();
 }
 
 // 把现在的外观存成第 slot 个方案（0 = 新的一个）
@@ -2079,8 +2089,8 @@ void Activate(const Item& it) {
                 ShowSide(group == kSegSide ? s_v.seg[kSegSide] : ModuleSideOf(s_v.seg[kSegEdge]));
                 AnimateKnobs();
             }
-            ApplyLook();  // 马上换上看看效果，取消时不保存
-            if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言看看，取消时换回去
+            ApplyLook();  // 马上换上
+            if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言
                 SetUiEnglish(LanguageIsEnglish(s_v.seg[kSegLang]));
                 SetWindowTextW(s_hwnd, Tr(L"TaskbarPopup 设置"));
             }
@@ -2112,11 +2122,6 @@ void Activate(const Item& it) {
         case kNav: SetPage(it.index); return;
         case kChip: RemoveExclude(it.index); return;
         case kAddChip: ShowAddMenu(it.rect); return;
-        case kOk:
-            Apply();
-            DestroyWindow(s_hwnd);
-            return;
-        case kCancel:
         case kClose: DestroyWindow(s_hwnd); return;
         default: break;
     }
@@ -2128,10 +2133,6 @@ std::vector<Item> FocusOrder() {
     std::vector<Item> list;
     for (const Item& it : s_items)
         if (it.kind != kClose && it.kind != kHotkeyClear && Enabled(it)) list.push_back(it);
-    // 确定、取消在布局里是先确定后取消，Tab 时先取消再确定
-    auto ok = std::find_if(list.begin(), list.end(), [](const Item& i) { return i.kind == kOk; });
-    auto cancel = std::find_if(list.begin(), list.end(), [](const Item& i) { return i.kind == kCancel; });
-    if (ok != list.end() && cancel != list.end() && ok < cancel) std::iter_swap(ok, cancel);
     // “立即检查”排在“自动检查更新”后面
     auto check = std::find_if(list.begin(), list.end(), [](const Item& i) { return i.kind == kCheckNow; });
     auto isUpdates = [](const Item& i) { return i.kind == kToggleRow && i.index == kUpdates; };
@@ -2187,9 +2188,9 @@ void OnKey(WPARAM vk) {
             if (f && f->kind != kSliderRow) Activate(*f);
             return;
         case VK_RETURN:
-            // 焦点在按钮、开关这类上时按它；否则等于“确定”
+            // 焦点在按钮、开关这类上时按它；否则关掉窗口（改的都已经存了）
             if (f && f->kind != kSliderRow) Activate(*f);
-            else Activate({kOk, 0, {}});
+            else DestroyWindow(s_hwnd);
             return;
     }
 }
@@ -2223,7 +2224,7 @@ void ReleaseAll() {
     s_fontFamily.reset();
 }
 
-LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         // 标题栏拖动窗口自己做（不用系统的 HTCAPTION）：新位置和按新位置画好的玻璃用同一次
         // UpdateLayeredWindow 贴上去，不会先挪窗口、下一帧玻璃才跟上
@@ -2429,6 +2430,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case WM_TIMER:
             if (wParam == kTimerAnim) StepAnimation();
             else if (wParam == kTimerLive) LiveTick();
+            else if (wParam == kTimerSave && s_drag < 0) SaveNow();
             return 0;
 
         case WM_APP_SHOT:
@@ -2446,8 +2448,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         case WM_COMMAND:
-            if (LOWORD(wParam) == IDOK) Activate({kOk, 0, {}});
-            else if (LOWORD(wParam) == IDCANCEL) DestroyWindow(hwnd);
+            if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) DestroyWindow(hwnd);
             return 0;
 
         case WM_CLOSE:
@@ -2455,12 +2456,23 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case WM_DESTROY:
-            SetUiEnglish(LanguageIsEnglish(g_settings.language));  // 选了语言却没按确定：换回去
+            s_drag = -1;
+            SaveNow();  // 还没到时候存的（比如拖着滑块关了窗口）
+            SetUiEnglish(LanguageIsEnglish(g_settings.language));
             ReleaseAll();
             s_hwnd = nullptr;
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// 点了、按了键以后看看改了什么，改了就存
+LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LRESULT result = HandleMessage(hwnd, msg, wParam, lParam);
+    bool input = (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
+                 msg == WM_COMMAND || msg == WM_CAPTURECHANGED;
+    if (input) ScheduleSave();
+    return result;
 }
 
 }  // namespace
