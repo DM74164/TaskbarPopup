@@ -933,7 +933,7 @@ std::wstring TrayTitle(int i) {
     return TrF(L"%ls（第 %d/%d 页）", name.c_str(), s_trayPage + 1, TrayPages());
 }
 
-double TrayFlipT() { return s_flipFrom < 0 ? 1.0 : std::min(1.0, (NowMs() - s_flipStart) / kFlipMs); }
+double TrayFlipT() { return s_flipFrom < 0 || !AnimationsOn() ? 1.0 : std::min(1.0, (NowMs() - s_flipStart) / kFlipMs); }
 bool TrayFlipping() { return TrayFlipT() < 1.0; }
 
 void EnsureVisible(int index) {
@@ -967,7 +967,7 @@ bool PillMoving() { return s_pillIndex >= 0 && s_pillX != s_pillTo; }
 
 void AdvancePill(double now) {
     if (!PillMoving()) return;
-    double t = std::min(1.0, (now - s_pillStart) / kPillMs);
+    double t = AnimationsOn() ? std::min(1.0, (now - s_pillStart) / kPillMs) : 1.0;
     double e = 1 - std::pow(1 - t, 3.0);
     s_pillX = t >= 1 ? s_pillTo : static_cast<float>(s_pillFrom + (s_pillTo - s_pillFrom) * e);
 }
@@ -1623,12 +1623,11 @@ std::wstring EditText();
 bool EditPartShown(int part);
 RectF EditPartRect(int part);
 
+// 面板上的内容（高亮块另外画，见 Render）
 void DrawContent(Graphics& g) {
     const Layout& L = s_L;
     const Palette& pal = Colors();
     bool vertical = Vertical();
-
-    DrawPill(g);
 
     Font titleFont(s_fontFamily.get(), Px(12), FontStyleRegular, UnitPixel);
     Font smallFont(s_fontFamily.get(), Px(11.5f), FontStyleRegular, UnitPixel);
@@ -1796,7 +1795,42 @@ bool EnsureCanvas() {
     return true;
 }
 
-// 先画玻璃（静止时用缓存），再用 GDI+ 画上面的内容，最后用 UpdateLayeredWindow 带逐像素透明度贴到屏幕。
+// 内容图层：面板上的文字、图标等画在一张透明的图上（预乘透明度）。弹出、收起时滑动、高亮块滑动时内容不变，
+// 不用每帧都重画（大屏幕、高缩放时 GDI+ 画一遍要十几毫秒，比一帧还长）。内容变了（Redraw、弹出）就作废
+std::vector<DWORD> s_layer;
+bool s_layerValid = false;
+
+void SetupGraphics(Graphics& g) {
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    // Win11 原版的字贴着像素画，小字更清楚
+    g.SetTextRenderingHint(Win11Style() ? TextRenderingHintAntiAliasGridFit : TextRenderingHintAntiAlias);
+    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+}
+
+// 把内容图层往 (dx, dy) 挪着叠到画布上
+void BlendLayer(int dx, int dy) {
+    const int w = s_width, h = s_height;
+    for (int y = std::max(0, dy); y < std::min(h, h + dy); ++y) {
+        const DWORD* src = s_layer.data() + static_cast<size_t>(y - dy) * w;
+        DWORD* dst = s_bits + static_cast<size_t>(y) * w;
+        for (int x = std::max(0, dx); x < std::min(w, w + dx); ++x) {
+            DWORD p = src[x - dx];
+            DWORD a = p >> 24;
+            if (a == 0) continue;
+            if (a == 255) {
+                dst[x] = p;
+                continue;
+            }
+            DWORD d = dst[x], out = 0, keep = 255 - a;
+            for (int shift = 0; shift < 32; shift += 8)
+                out |= std::min<DWORD>(255, ((p >> shift) & 0xFF) + (((d >> shift) & 0xFF) * keep + 127) / 255) << shift;
+            dst[x] = out;
+        }
+    }
+}
+
+// 先画玻璃（静止时用缓存），再画高亮块，叠上内容图层，最后用 UpdateLayeredWindow 带逐像素透明度贴到屏幕。
 // slide：面板往下挪的距离（弹出 / 收起动画），按整像素挪，玻璃和上面的内容才能严丝合缝
 // ---- 缩略图 ----
 
@@ -1876,17 +1910,24 @@ void Render(float slide, BYTE alpha) {
         }
     }
 
-    {
+    // 托盘翻页时内容每帧都在动，照常每帧重画
+    bool flipping = TrayFlipping();
+    if (!s_layerValid || s_layer.size() != count || flipping) {
+        s_layer.assign(count, 0);
+        Bitmap layer(s_width, s_height, s_width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(s_layer.data()));
+        Graphics g(&layer);
+        SetupGraphics(g);
+        DrawContent(g);
+        s_layerValid = !flipping;
+    }
+    if (s_pillIndex >= 0) {
         Bitmap canvas(s_width, s_height, s_width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(s_bits));
         Graphics g(&canvas);
-        g.SetSmoothingMode(SmoothingModeAntiAlias);
-        // Win11 原版的字贴着像素画，小字更清楚
-        g.SetTextRenderingHint(Win11Style() ? TextRenderingHintAntiAliasGridFit : TextRenderingHintAntiAlias);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        g.SetPixelOffsetMode(PixelOffsetModeHalf);
+        SetupGraphics(g);
         g.TranslateTransform(static_cast<REAL>(dx), static_cast<REAL>(dy));
-        DrawContent(g);
+        DrawPill(g);
     }
+    BlendLayer(dx, dy);
 
     SIZE size = {s_width, s_height};
     POINT src = {0, 0};
@@ -1965,15 +2006,16 @@ void Frame() {
     float slide = 0;
     BYTE alpha = 255;
     bool more = false, start = false;
+    bool on = AnimationsOn();  // 系统里关了动画效果：一下子出来、收起
     if (s_anim == Anim::Showing) {
-        double t = std::min(1.0, (now - s_animStart) / (s_compact ? kStartShowMs : kShowMs));
+        double t = on ? std::min(1.0, (now - s_animStart) / (s_compact ? kStartShowMs : kShowMs)) : 1.0;
         slide = static_cast<float>((1 - EaseOutBack(t)) * SlideDistance());
         alpha = static_cast<BYTE>(std::lround(255 * std::min(1.0, t * 3)));
         start = s_startPending && t >= kStartAt;  // 第二段：画完这一帧打开开始菜单
         if (t >= 1) s_anim = Anim::None;
         else more = true;
     } else if (s_anim == Anim::Hiding) {
-        double t = std::min(1.0, (now - s_animStart) / kHideMs);
+        double t = on ? std::min(1.0, (now - s_animStart) / kHideMs) : 1.0;
         if (t >= 1) {
             HideNow();
             return;
@@ -1999,6 +2041,7 @@ void Frame() {
 
 void Redraw() {
     if (!s_open) return;
+    s_layerValid = false;
     SyncPill();
     if (s_anim != Anim::None || PillMoving() || TrayFlipping()) RequestFrame();  // 交给动画帧去画
     else Render(0, 255);
@@ -3947,6 +3990,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_refocused = false;
     s_anim = Anim::Showing;
     s_animStart = s_shownAt;
+    s_layerValid = false;
     Render(SlideDistance(), 0);
     if (preview || hover) {
         ShowWindow(s_hwnd, SW_SHOWNOACTIVATE);

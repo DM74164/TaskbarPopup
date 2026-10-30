@@ -665,6 +665,7 @@ const wchar_t* Tr(const wchar_t* zh);
 std::wstring TrF(const wchar_t* zhFormat, ...);  // Tr 以后按格式填进参数
 std::wstring LogFile();
 void WaitForVBlank();  // 等到下一次屏幕刷新，让动画按显示器的节奏走
+bool AnimationsOn();   // Windows 设置“辅助功能 → 视觉效果 → 动画效果”开着
 bool CaptureScreen(const RECT& area, std::vector<DWORD>& pixels);  // 截屏，BGRA，不透明
 void SetWindowRectAsync(HWND hwnd, const RECT& rect);  // 挪别的程序的窗口：异步、不激活、不改层次
 

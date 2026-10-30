@@ -19,11 +19,11 @@ namespace app {
 namespace {
 
 constexpr wchar_t kClassName[] = L"TaskbarPopupSettings";
-constexpr UINT_PTR kTimerAnim = 1;  // 淡入、开关滑块的动画
 constexpr UINT_PTR kTimerLive = 2;  // 定时刷新玻璃后面的背景
 constexpr UINT_PTR kTimerSave = 3;  // 改了设置过一小会儿存下、生效（按住方向键调滑块时不用每下都存）
 constexpr UINT kSaveDelayMs = 150;
-constexpr UINT WM_APP_SHOT = WM_APP + 40;  // 后台截好背景了，lParam 是 ShotJob*
+constexpr UINT WM_APP_SHOT = WM_APP + 40;   // 后台截好背景了，lParam 是 ShotJob*
+constexpr UINT WM_APP_FRAME = WM_APP + 41;  // 淡入、开关滑块动画的下一帧
 constexpr double kFadeMs = 180.0 * TP_ANIM_SCALE;
 constexpr double kKnobMs = 150.0 * TP_ANIM_SCALE;
 
@@ -1453,23 +1453,39 @@ bool Animating(double now) {
     return false;
 }
 
+bool s_framePosted = false;
+
+// 动画的一帧。只是淡入时内容不用重画，只改整体透明度；放完之前等屏幕刷新再画下一帧，不跟着 15 毫秒的定时器走（不匀）
 void StepAnimation() {
+    s_framePosted = false;
+    if (!s_hwnd) return;
     double now = NowMs();
-    double fade = std::min(1.0, (now - s_openedAt) / kFadeMs);
+    bool on = AnimationsOn();
+    double fade = on ? std::min(1.0, (now - s_openedAt) / kFadeMs) : 1.0;
     s_alpha = static_cast<BYTE>(std::lround(255 * fade));
+    bool knobs = false;
     for (int i = 0; i < kToggleCount; ++i) {
         float target = s_v.on[i] ? 1.0f : 0.0f;
         if (s_knob[i] == target) continue;
-        double t = std::min(1.0, (now - s_knobStart[i]) / kKnobMs);
+        knobs = true;
+        double t = on ? std::min(1.0, (now - s_knobStart[i]) / kKnobMs) : 1.0;
         double e = 1 - (1 - t) * (1 - t) * (1 - t);
         s_knob[i] = static_cast<float>(s_knobFrom[i] + (target - s_knobFrom[i]) * e);
         if (t >= 1) s_knob[i] = target;
     }
-    Render();
-    if (!Animating(now)) KillTimer(s_hwnd, kTimerAnim);
+    Render(knobs);
+    if (on && Animating(now)) {
+        WaitForVBlank();
+        s_framePosted = true;
+        PostMessageW(s_hwnd, WM_APP_FRAME, 0, 0);
+    }
 }
 
-void StartAnimation() { SetTimer(s_hwnd, kTimerAnim, 15, nullptr); }
+void StartAnimation() {
+    if (s_framePosted || !s_hwnd) return;
+    s_framePosted = true;
+    PostMessageW(s_hwnd, WM_APP_FRAME, 0, 0);
+}
 
 // ---- 操作 ----
 
@@ -2283,8 +2299,8 @@ void SetHover(const Item& it) {
 void ReleaseAll() {
     EndCapture();
     Popup_EndPreview();
-    KillTimer(s_hwnd, kTimerAnim);
     KillTimer(s_hwnd, kTimerLive);
+    s_framePosted = false;  // 排着的下一帧窗口关了就收不到了
     StopShot();
     s_excluded = false;
     s_moving = false;
@@ -2506,9 +2522,12 @@ LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_APP_FRAME:
+            StepAnimation();
+            return 0;
+
         case WM_TIMER:
-            if (wParam == kTimerAnim) StepAnimation();
-            else if (wParam == kTimerLive) LiveTick();
+            if (wParam == kTimerLive) LiveTick();
             else if (wParam == kTimerSave && s_drag < 0) SaveNow();
             return 0;
 

@@ -462,6 +462,11 @@ void Log(const wchar_t* format, ...) {
 }
 
 // DwmFlush 会一直等到 DWM 合成下一帧；不可用（或者直接返回）时退回到睡 8 毫秒，免得空转
+bool AnimationsOn() {
+    BOOL on = TRUE;
+    return !SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &on, 0) || on;
+}
+
 void WaitForVBlank() {
     double start = NowMs();
     if (FAILED(DwmFlush()) || NowMs() - start < 0.3) Sleep(8);
