@@ -61,14 +61,17 @@ wchar_t CharAt(const std::vector<BYTE>& blob, size_t offset) {
     return static_cast<wchar_t>(blob[offset] | (blob[offset + 1] << 8));
 }
 
-// 在二进制数据里找 UTF-16 字符串（不区分大小写，不要求两字节对齐），返回第一次出现的位置
-size_t FindUtf16(const std::vector<BYTE>& blob, const std::wstring& needle) {
+// 在二进制数据里找 UTF-16 字符串（不区分大小写，不要求两字节对齐），返回第一次出现的位置。
+// wholeName：前面得是开头、NUL 或路径分隔符（“Code.lnk”不算在“Visual Studio Code.lnk”里）
+size_t FindUtf16(const std::vector<BYTE>& blob, const std::wstring& needle, bool wholeName = false) {
     size_t n = needle.size();
     if (n == 0 || blob.size() < n * 2) return kNotFound;
     for (size_t o = 0; o + n * 2 <= blob.size(); ++o) {
         size_t i = 0;
         while (i < n && std::towlower(CharAt(blob, o + 2 * i)) == std::towlower(needle[i])) ++i;
-        if (i == n) return o;
+        if (i < n) continue;
+        wchar_t before = o >= 2 ? CharAt(blob, o - 2) : 0;
+        if (!wholeName || before == 0 || before == L'\\' || before == L'/') return o;
     }
     return kNotFound;
 }
@@ -223,7 +226,7 @@ std::vector<PinnedApp> Load(const std::wstring& folder, const std::vector<BYTE>&
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             Entry e;
             e.sortName = ToLower(fd.cFileName);
-            e.order = FindUtf16(favorites, fd.cFileName);
+            e.order = FindUtf16(favorites, fd.cFileName, true);
             e.app.launch = folder + L"\\" + fd.cFileName;
             ReadShortcut(e.app.launch, e.app.exePath, e.app.aumid);
             e.app.exePath = ToLower(e.app.exePath);
@@ -246,8 +249,10 @@ std::vector<PinnedApp> Load(const std::wstring& folder, const std::vector<BYTE>&
         e.sortName = id;
         e.app.aumid = id;
         e.app.launch = L"shell:AppsFolder\\" + id;
-        // 拿不到名称说明这个应用已经卸载了
-        if (!DescribeItem(e.app.launch, iconPx, e.app.name, e.app.icon) || e.app.name.empty()) continue;
+        // 拿不到名称说明这个应用已经卸载了；名称就是 ID 本身的是外壳给认不出的 ID 临时建的项
+        if (!DescribeItem(e.app.launch, iconPx, e.app.name, e.app.icon) || e.app.name.empty() ||
+            _wcsicmp(e.app.name.c_str(), id.c_str()) == 0)
+            continue;
         entries.push_back(std::move(e));
     }
 

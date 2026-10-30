@@ -4,6 +4,9 @@
 // 封面换歌时才读一次，在后台解码、裁成正方形缩小好
 #include <inspectable.h>
 
+#include <atomic>
+#include <deque>
+
 #include "common.h"
 
 namespace app {
@@ -106,6 +109,8 @@ constexpr DWORD kPollMs = 4000;      // 打开着这个功能时多久读一遍
 constexpr DWORD kWaitMs = 3000;      // 等一个异步操作最多等这么久
 constexpr DWORD kSettleMs = 250;     // 发完命令等播放器改好状态再读
 constexpr DWORD kStopWaitMs = 2000;
+constexpr DWORD kRetryMs = 30000;    // 拿不到媒体会话管理器（刚登录时系统还没准备好）隔这么久再试
+constexpr int kRetries = 20;
 constexpr int kCoverPx = 128;        // 封面缩成这么大（迷你任务栏上再按缩放缩小）
 constexpr int kCoverTries = 3;       // 有的播放器换歌以后过一会儿才给封面：没读到的再读几遍
 
@@ -124,13 +129,14 @@ struct Shared {
     bool quit = false;
     bool poll = false;     // 每隔 kPollMs 读一遍
     bool query = false;    // 要马上读一遍
-    int command = -1;      // 要发的命令（MediaCommand），-1 = 没有
+    std::deque<int> commands;  // 要发的命令（MediaCommand），按顺序一个个发
     HWND notify = nullptr;
     MediaInfo info;
 };
 
 Shared* s_shared = nullptr;
 HANDLE s_thread = nullptr;
+std::atomic<bool> s_stopping{false};  // 要退出了：读到一半的不再解封面（GDI+ 可能已经关了）
 
 bool SameInfo(const MediaInfo& a, const MediaInfo& b) {
     return a.present == b.present && a.playing == b.playing && a.canPrevious == b.canPrevious && a.canNext == b.canNext &&
@@ -162,13 +168,17 @@ void SafeRelease(T*& p) {
     p = nullptr;
 }
 
-bool Await(IInspectable* operation, DWORD timeoutMs) {
+bool Await(IInspectable* operation, DWORD timeoutMs, bool* timedOut = nullptr) {
+    if (timedOut) *timedOut = false;
     IAsyncInfoAbi* info = nullptr;
     if (FAILED(operation->QueryInterface(kIidAsyncInfo, reinterpret_cast<void**>(&info)))) return false;
     DWORD start = GetTickCount();
     int status = kAsyncStarted;
     while (SUCCEEDED(info->get_Status(&status)) && status == kAsyncStarted && GetTickCount() - start < timeoutMs) Sleep(10);
-    if (status == kAsyncStarted) info->Cancel();
+    if (status == kAsyncStarted) {
+        info->Cancel();
+        if (timedOut) *timedOut = true;
+    }
     info->Release();
     return status == kAsyncCompleted;
 }
@@ -189,7 +199,7 @@ void SendMediaKey(int command) {
 // 上一首、下一首换一首，播放 / 暂停跟着切换，第一首没有上一首
 class Backend {
 public:
-    explicit Backend(bool) {}
+    void Init() {}
     bool Ready() const { return true; }
     MediaInfo Read() {
         MediaInfo info;
@@ -208,10 +218,11 @@ public:
         info.cover = m_cover;
         return info;
     }
-    bool Command(int command, bool playing) {
+    // 返回 false 表示没发出去，要按媒体键
+    bool Command(int command) {
         if (command == kMediaPrevious && m_song > 1) --m_song;
         else if (command == kMediaNext) ++m_song;
-        else if (command == kMediaPlayPause) m_playing = !playing;
+        else if (command == kMediaPlayPause) m_playing = !m_playing;
         return true;
     }
 
@@ -224,8 +235,9 @@ private:
 #else
 class Backend {
 public:
-    explicit Backend(bool comReady) {
-        if (!comReady) return;
+    // 拿媒体会话管理器；没拿到的话线程过一会儿再调
+    void Init() {
+        if (m_manager) return;
         HMODULE combase = LoadLibraryExW(L"combase.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!combase) return;
         using GetFactoryFn = HRESULT(WINAPI*)(HSTRING, REFIID, void**);
@@ -264,6 +276,7 @@ public:
             Log(L"媒体：拿不到媒体会话管理器（0x%08X）", static_cast<unsigned>(hr));
         }
     }
+    Backend() = default;
     ~Backend() { SafeRelease(m_manager); }
     Backend(const Backend&) = delete;
     Backend& operator=(const Backend&) = delete;
@@ -293,7 +306,7 @@ public:
         }
         IAsyncOperationAbi<IMediaPropertiesAbi*>* op = nullptr;
         IMediaPropertiesAbi* props = nullptr;
-        if (SUCCEEDED(session->TryGetMediaPropertiesAsync(&op)) && op && Await(op, kWaitMs) &&
+        if (SUCCEEDED(session->TryGetMediaPropertiesAsync(&op)) && op && Await(op, kWaitMs) && !s_stopping &&
             SUCCEEDED(op->GetResults(&props)) && props) {
             HSTRING text = nullptr;
             std::wstring album, app;
@@ -326,30 +339,44 @@ public:
         return info;
     }
 
-    bool Command(int command, bool playing) {
+    // 返回 false 表示没发出去（没有会话、播放器不接这个命令），要按媒体键；
+    // 等超时了不算：播放器可能只是慢，再按媒体键就做了两遍
+    bool Command(int command) {
         ISessionAbi* session = Current();
         if (!session) return false;
-        BoolOperation* op = nullptr;
+        bool timedOut = false;
         HRESULT hr = E_FAIL;
+        unsigned char done = 0;
+        auto run = [&](HRESULT (STDMETHODCALLTYPE ISessionAbi::*call)(BoolOperation**)) {
+            BoolOperation* op = nullptr;
+            done = 0;
+            hr = (session->*call)(&op);
+            if (SUCCEEDED(hr) && op && Await(op, kWaitMs, &timedOut)) op->GetResults(&done);
+            SafeRelease(op);
+        };
         if (command == kMediaPrevious) {
-            hr = session->TrySkipPreviousAsync(&op);
+            run(&ISessionAbi::TrySkipPreviousAsync);
         } else if (command == kMediaNext) {
-            hr = session->TrySkipNextAsync(&op);
+            run(&ISessionAbi::TrySkipNextAsync);
         } else {
-            hr = session->TryTogglePlayPauseAsync(&op);
-            unsigned char done = 0;
-            // 有的播放器不支持“切换”，那就按现在的状态播放或暂停
-            if (SUCCEEDED(hr) && op && Await(op, kWaitMs) && SUCCEEDED(op->GetResults(&done)) && !done) {
-                SafeRelease(op);
-                hr = playing ? session->TryPauseAsync(&op) : session->TryPlayAsync(&op);
+            run(&ISessionAbi::TryTogglePlayPauseAsync);
+            // 有的播放器不支持“切换”，那就按它现在的状态播放或暂停
+            if (!done && !timedOut) {
+                int status = kStatusClosed;
+                IPlaybackInfoAbi* playback = nullptr;
+                if (SUCCEEDED(session->GetPlaybackInfo(&playback)) && playback) playback->get_PlaybackStatus(&status);
+                SafeRelease(playback);
+                run(status == kStatusPlaying ? &ISessionAbi::TryPauseAsync : &ISessionAbi::TryPlayAsync);
             }
         }
-        unsigned char done = 0;
-        bool ok = SUCCEEDED(hr) && op && Await(op, kWaitMs) && SUCCEEDED(op->GetResults(&done)) && done;
-        SafeRelease(op);
         session->Release();
-        if (!ok) Log(L"媒体：命令 %d 没成功（0x%08X），改按媒体键", command, static_cast<unsigned>(hr));
-        return ok;
+        if (done) return true;
+        if (timedOut) {
+            Log(L"媒体：命令 %d 等超时了", command);
+            return true;
+        }
+        Log(L"媒体：命令 %d 没成功（0x%08X），改按媒体键", command, static_cast<unsigned>(hr));
+        return false;
     }
 
 private:
@@ -365,7 +392,8 @@ private:
         IStream* stream = nullptr;
         std::shared_ptr<Gdiplus::Bitmap> cover;
         if (SUCCEEDED(ref->OpenReadAsync(&op)) && op && Await(op, kWaitMs) && SUCCEEDED(op->GetResults(&random)) &&
-            random && SUCCEEDED(m_streamOver(random, IID_IStream, reinterpret_cast<void**>(&stream))) && stream) {
+            random && !s_stopping && SUCCEEDED(m_streamOver(random, IID_IStream, reinterpret_cast<void**>(&stream))) &&
+            stream) {
             Gdiplus::Bitmap decoded(stream);
             cover = CoverFrom(decoded);
         }
@@ -406,10 +434,12 @@ DWORD WINAPI MediaThread(LPVOID param) {
     auto* shared = static_cast<Shared*>(param);
     HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     {
-        Backend backend(SUCCEEDED(com));
+        Backend backend;
+        int tries = 0;
+        DWORD lastTry = 0;
         for (;;) {
             AcquireSRWLockExclusive(&shared->lock);
-            while (!shared->quit && !shared->query && shared->command < 0) {
+            while (!shared->quit && !shared->query && shared->commands.empty()) {
                 if (!SleepConditionVariableSRW(&shared->wake, &shared->lock, shared->poll ? kPollMs : INFINITE, 0) &&
                     shared->poll)
                     break;  // 到时间了，读一遍
@@ -418,22 +448,29 @@ DWORD WINAPI MediaThread(LPVOID param) {
                 ReleaseSRWLockExclusive(&shared->lock);
                 break;
             }
-            bool asked = shared->query || shared->command >= 0;
-            int command = shared->command;
-            bool playing = shared->info.playing;
+            bool asked = shared->query || !shared->commands.empty();
+            int command = -1;
+            if (!shared->commands.empty()) {
+                command = shared->commands.front();
+                shared->commands.pop_front();
+            }
             shared->query = false;
-            shared->command = -1;
             ReleaseSRWLockExclusive(&shared->lock);
 
+            if (SUCCEEDED(com) && !backend.Ready() && tries < kRetries && (!tries || GetTickCount() - lastTry >= kRetryMs)) {
+                ++tries;
+                lastTry = GetTickCount();
+                backend.Init();
+            }
             if (command >= 0) {
-                if (!backend.Ready() || !backend.Command(command, !playing)) SendMediaKey(command);
+                if (!backend.Ready() || !backend.Command(command)) SendMediaKey(command);
                 Sleep(kSettleMs);
             }
             MediaInfo info = backend.Ready() ? backend.Read() : MediaInfo();
 
             AcquireSRWLockExclusive(&shared->lock);
             bool changed = !SameInfo(info, shared->info);
-            if (shared->command < 0) shared->info = info;  // 又按了一下：等那次做完再更新
+            if (shared->commands.empty()) shared->info = info;  // 又按了一下：等那次做完再更新
             HWND notify = shared->notify;
             ReleaseSRWLockExclusive(&shared->lock);
             if ((changed || asked) && notify && IsWindow(notify)) PostMessageW(notify, WM_APP_MEDIA, 0, 0);
@@ -484,8 +521,8 @@ void Media_Query() {
 void Media_Command(int command) {
     if (!s_shared) return;
     AcquireSRWLockExclusive(&s_shared->lock);
-    if (command == kMediaPlayPause && s_shared->command < 0) s_shared->info.playing = !s_shared->info.playing;
-    s_shared->command = command;
+    if (command == kMediaPlayPause) s_shared->info.playing = !s_shared->info.playing;
+    s_shared->commands.push_back(command);
     ReleaseSRWLockExclusive(&s_shared->lock);
     WakeConditionVariable(&s_shared->wake);
 }
@@ -501,6 +538,7 @@ MediaInfo Media_Get() {
 
 void Media_Stop() {
     if (!s_thread) return;
+    s_stopping = true;
     AcquireSRWLockExclusive(&s_shared->lock);
     s_shared->quit = true;
     ReleaseSRWLockExclusive(&s_shared->lock);

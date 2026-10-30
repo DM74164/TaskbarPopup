@@ -136,9 +136,8 @@ bool s_hinted = false;
 void CALLBACK OnForeground(HWINEVENTHOOK, DWORD, HWND hwnd, LONG, LONG, DWORD, DWORD) {
     if (s_hinted || IsElevated() || !g_settings.longPressPopup || !hwnd) return;
     if (!RunsAboveUs(hwnd)) return;
-    s_hinted = true;
     Log(L"前台程序 %ls 的权限比本程序高，长按 Win 在它里面收不到", GetProcessPath(hwnd).c_str());
-    ShowTrayBalloon(Tr(L"这个程序里长按 Win 不起作用"),
+    s_hinted = ShowTrayBalloon(Tr(L"这个程序里长按 Win 不起作用"),
                     Tr(L"前台程序以管理员身份运行（不少游戏是这样），普通权限的 TaskbarPopup 收不到它里面的按键。"
                        L"在托盘菜单里勾选“以管理员身份运行”即可。"));
 }
@@ -224,7 +223,14 @@ void LaunchAsUser(const std::wstring& target, const std::wstring& args, const st
     ShellExecuteExW(&sei);
 }
 
-bool AdminTask_Exists() { return RunSchtasks(std::wstring(L"/Query /TN \"") + kTaskName + L"\"") == 0; }
+namespace {
+int s_taskExists = -1;  // 查过一次就记下（托盘菜单每次弹出都要问，schtasks 慢）；本程序建、删时跟着改
+}  // namespace
+
+bool AdminTask_Exists() {
+    if (s_taskExists < 0) s_taskExists = RunSchtasks(std::wstring(L"/Query /TN \"") + kTaskName + L"\"") == 0;
+    return s_taskExists == 1;
+}
 
 bool AdminTask_Run() { return RunSchtasks(std::wstring(L"/Run /TN \"") + kTaskName + L"\"") == 0; }
 
@@ -245,7 +251,10 @@ void RememberTaskExe(const wchar_t* path) {
 bool AdminTask_Set(bool enabled) {
     if (!enabled) {
         bool gone = !AdminTask_Exists() || RunSchtasks(std::wstring(L"/Delete /TN \"") + kTaskName + L"\" /F") == 0;
-        if (gone) RememberTaskExe(nullptr);
+        if (gone) {
+            RememberTaskExe(nullptr);
+            s_taskExists = 0;
+        }
         return gone;
     }
     wchar_t domain[256] = {}, user[256] = {};
@@ -282,8 +291,35 @@ bool AdminTask_Set(bool enabled) {
     int code = RunSchtasks(std::wstring(L"/Create /TN \"") + kTaskName + L"\" /XML \"" + file + L"\" /F");
     DeleteFileW(file);
     if (code != 0) Log(L"创建开机自启的计划任务失败（%d）", code);
-    if (code == 0) RememberTaskExe(ExePath().c_str());
+    if (code == 0) {
+        RememberTaskExe(ExePath().c_str());
+        s_taskExists = 1;
+    }
     return code == 0;
+}
+
+// 普通权限时删不了最高权限的计划任务：弹 UAC 让 schtasks 去删
+bool AdminTask_DeleteElevated() {
+    wchar_t sys[MAX_PATH] = {};
+    GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring exe = std::wstring(sys) + L"\\schtasks.exe";
+    std::wstring args = std::wstring(L"/Delete /TN \"") + kTaskName + L"\" /F";
+    SHELLEXECUTEINFOW sei = {sizeof(sei)};
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = exe.c_str();
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        Log(L"删除开机自启的计划任务失败（%lu）", GetLastError());
+        return false;
+    }
+    WaitForSingleObject(sei.hProcess, 15000);
+    CloseHandle(sei.hProcess);
+    s_taskExists = -1;
+    bool gone = !AdminTask_Exists();
+    if (gone) RememberTaskExe(nullptr);
+    return gone;
 }
 
 }  // namespace app

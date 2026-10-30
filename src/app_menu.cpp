@@ -251,7 +251,9 @@ AppTarget ResolveAppTarget(HWND hwnd, const std::wstring& launch, const std::wst
     if (t.name.empty() && !exe.empty()) t.name = FileStem(exe);
     if (t.name.empty() && hwnd) t.name = GetWindowTitle(hwnd);
 
-    t.launch = !launch.empty() ? launch : packaged ? kAppsFolderPrefix + id : exe;
+    // 窗口自己带 ID、开始菜单里也有的（网页应用、javaw 之类托管的程序）照开始菜单那样启动，直接开程序只会开个空的宿主
+    bool hosted = listed && !windowId.empty();
+    t.launch = !launch.empty() ? launch : packaged || hosted ? kAppsFolderPrefix + id : exe;
     if (!packaged) {
         t.runAs = !lnk.empty() ? lnk : exe;
         t.location = FileExists(exe) ? exe : lnk;

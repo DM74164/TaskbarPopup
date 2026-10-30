@@ -224,7 +224,7 @@ void Fullscreen_DisplayChanged();                    // 接上、拔掉屏幕，
 // 否则把它藏回去。都不放动画。tb 不是本程序藏着的返回 false
 bool Fullscreen_PeekTaskbar(HWND tb, bool show);
 void Taskbar_RestoreAll();        // 启动、退出时：显示所有任务栏，关掉本程序打开的自动隐藏，窗口和桌面图标还原
-void Taskbar_EmergencyRestore();  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
+void Taskbar_EmergencyRestore(bool crash = true);  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
 bool Taskbar_IsShownOn(HMONITOR monitor);  // 这块屏幕上的任务栏现在是否显示着（没被本程序藏起来）
 void Fullscreen_LogState();                // 把系统版本、各屏幕的工作区、任务栏位置写进诊断日志
 // 系统的“自动隐藏任务栏”设置（对所有屏幕上的任务栏都生效）。可以在任何线程上调用。
@@ -315,6 +315,7 @@ bool RelaunchUnelevated();    // 通过资源管理器以普通权限启动一�
 void LaunchAsUser(const std::wstring& target, const std::wstring& args = L"", const std::wstring& dir = L"");
 bool AdminTask_Exists();      // 以管理员身份开机自启的计划任务
 bool AdminTask_Set(bool enabled);
+bool AdminTask_DeleteElevated();  // 普通权限时弹 UAC 删掉它
 bool AdminTask_Run();
 bool AdminTask_MatchesExe();  // 计划任务是用现在这个 exe 的路径建的
 // 资源管理器没在运行时显示不了，返回 false。clickUrl 不为空：点气泡时以普通权限打开这个网址
@@ -375,6 +376,7 @@ struct TrayApp {
     std::wstring name, exe;
     std::shared_ptr<Gdiplus::Bitmap> icon;
     bool promoted = false;  // 用户设成在任务栏上一直显示
+    DWORD pid = 0;          // 图标属于的进程（Win10 读得到；Win11 只有程序路径，为 0）
 };
 void Tray_Refresh();                    // 在后台重新读一遍（已经在读就不管）
 std::vector<TrayApp> Tray_Hidden();     // 最近读到的、正在运行、收在“隐藏的图标”里的

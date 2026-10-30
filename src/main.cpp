@@ -328,6 +328,16 @@ std::wstring SettingsFile() { return SettingsDir() + L"\\settings.ini"; }
 // 会存成“?”。先建好一个带 UTF-16 BOM 的文件，之后的读写就都按 Unicode；旧版本留下的 ANSI 文件转换一次
 void EnsureUnicodeIni() {
     CreateDirectoryW(SettingsDir().c_str(), nullptr);
+    // 已经是 Unicode 的（几乎每次）只读开头两个字节，别独占打开：别的线程可能正在写它
+    HANDLE peek = CreateFileW(SettingsFile().c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (peek != INVALID_HANDLE_VALUE) {
+        unsigned char bom[2] = {};
+        DWORD got = 0;
+        bool unicode = ReadFile(peek, bom, 2, &got, nullptr) && got == 2 && bom[0] == 0xFF && bom[1] == 0xFE;
+        CloseHandle(peek);
+        if (unicode) return;
+    }
     HANDLE h = CreateFileW(SettingsFile().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -651,9 +661,10 @@ std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 // 把外观方案的键从一节抄到另一节。没有的键（旧版本存的方案）在目标那节也删掉，读的时候用默认值（侧边的跟着底部）
 void CopyLookKeys(const wchar_t* fromSection, const wchar_t* toSection) {
     std::wstring f = SettingsFile();
-    wchar_t value[512];
+    std::vector<wchar_t> buf(32768);  // 每块屏幕的位置一条八十多个字，见过的屏幕多了很长
+    wchar_t* value = buf.data();
     for (const wchar_t* key : kLookKeys) {
-        DWORD n = GetPrivateProfileStringW(fromSection, key, L"\x01", value, ARRAYSIZE(value), f.c_str());
+        DWORD n = GetPrivateProfileStringW(fromSection, key, L"\x01", value, static_cast<DWORD>(buf.size()), f.c_str());
         bool missing = n == 1 && value[0] == L'\x01';
         // 每块屏幕的位置是后来加进方案的：旧方案里没有就留着现在的
         if (missing && (!wcscmp(key, L"PopupPerScreen") || !wcscmp(key, L"ScreenPlaces"))) continue;
@@ -777,13 +788,17 @@ bool RunKeyExists() {
 }
 }  // namespace
 
-// 开机自启有两种：普通权限写注册表的 Run；以管理员身份运行时用最高权限的计划任务（开机不弹 UAC）
-bool IsAutoStartEnabled() { return RunKeyExists() || (g_settings.runAsAdmin && AdminTask_Exists()); }
+// 开机自启有两种：普通权限写注册表的 Run；以管理员身份运行时用最高权限的计划任务（开机不弹 UAC）。
+// 计划任务不管现在设没设以管理员身份运行都算：在的话开机照样会启动
+bool IsAutoStartEnabled() { return RunKeyExists() || AdminTask_Exists(); }
 
 void SetAutoStart(bool enabled) {
     // 管理员才能建、删最高权限的计划任务
     bool useTask = enabled && g_settings.runAsAdmin && IsElevated() && AdminTask_Set(true);
-    if (IsElevated() && !useTask) AdminTask_Set(false);
+    if (!useTask) {
+        if (IsElevated()) AdminTask_Set(false);
+        else if (AdminTask_Exists()) AdminTask_DeleteElevated();
+    }
     HKEY key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
         return;
@@ -834,7 +849,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         if (mutex && err != ERROR_ALREADY_EXISTS) break;
         if (mutex) CloseHandle(mutex);
         mutex = nullptr;
-        if (!restart || i >= 100) return 0;
+        if (!restart || i >= 250) return 0;  // 旧实例退出时最多拖 15 秒（kExitDeadlineMs），多等一会儿
         Sleep(100);
     }
 
@@ -856,6 +871,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     SetUnhandledExceptionFilter(OnCrash);
     std::set_terminate([] {  // 未捕获的 C++ 异常不经过上面的过滤器
         Taskbar_EmergencyRestore();
+        DesktopIcons_EmergencyShow();
         std::abort();
     });
     LoadSettings();

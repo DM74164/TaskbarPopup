@@ -3,6 +3,7 @@
 #include "common.h"
 
 #include <atomic>
+#include <cwctype>
 #include <mutex>
 #include <thread>
 
@@ -45,10 +46,10 @@ std::vector<InstalledApp> Enumerate() {
             std::wstring id = TakeName(item, SIGDN_PARENTRELATIVEPARSING);  // AppUserModelID，或者 {已知文件夹}\程序路径
             item->Release();
             std::wstring lower = ToLower(app.name);
-            // 卸载程序、说明文档之类的条目搜出来也没用
-            if (app.name.empty() || id.empty() || lower.find(L"uninstall") != std::wstring::npos ||
-                lower.find(L"卸载") != std::wstring::npos)
-                continue;
+            // 卸载程序之类的条目搜出来也没用（“Uninstall X”“卸载 X”，不算“Revo Uninstaller”这种卸载工具）
+            size_t un = lower.find(L"uninstall");
+            bool uninstall = un != std::wstring::npos && (un + 9 >= lower.size() || !std::iswalpha(lower[un + 9]));
+            if (app.name.empty() || id.empty() || uninstall || lower.find(L"卸载") != std::wstring::npos) continue;
             app.launch = L"shell:AppsFolder\\" + id;
             app.search = lower + L"\n" + ToLower(id);
             apps.push_back(std::move(app));

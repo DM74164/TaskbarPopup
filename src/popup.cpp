@@ -150,6 +150,7 @@ HWND s_thumbWant = nullptr;    // 想显示缩略图的窗口
 HWND s_thumbShown = nullptr;   // 正显示着缩略图的窗口
 int s_thumbIdx = -1;
 HWND s_prevForeground = nullptr;
+HWND s_keepPrevForeground = nullptr;  // 换到下一块屏幕重新弹出：收起时前台换了，还用原来的
 RECT s_bounds = {};  // 弹窗摆放的范围：任务栏露着时是工作区，藏起来时是整块屏幕
 int s_trayRowMax = 8;  // 一行大图标时托盘图标最多同时显示几个（竖排时屏幕放不下就少显示几个）
 float s_scale = 1.0f;
@@ -674,6 +675,17 @@ void FitTiles() {
     }
 }
 
+// 放不下屏幕（小屏幕、图标调得很大、竖排模块多）：整体按比例缩小到放得下
+void FitScreen() {
+    int sw = s_bounds.right - s_bounds.left, sh = s_bounds.bottom - s_bounds.top;
+    for (int i = 0; i < 6 && sw > 0 && sh > 0 && (s_width > sw || s_height > sh); ++i) {
+        float k = std::min(static_cast<float>(sw) / s_width, static_cast<float>(sh) / s_height) * 0.98f;
+        s_scale *= k;
+        s_lockedItemsW *= k;
+        FitTiles();
+    }
+}
+
 bool IsWindows11() {
     DWORD build = WindowsBuild();
     return !build || build >= 22000;  // 取不到版本时按 Win11 算
@@ -800,6 +812,8 @@ MediaParts MediaLayout() {
     float side = Px(kCoverSize), bw = Px(30);
     if (L.mediaTall) {
         float bottom = L.tileY + L.tile + L.rowGap + L.sliderH;
+        // 图标调小了、上下放不下时封面跟着变小，歌名和按钮不重叠
+        side = std::clamp(bottom - bh - L.tileY - Px(2 + 1 + 16), Px(16), side);
         m.cover = RectF(L.mediaX + (L.mediaW - side) / 2, L.tileY + Px(2), side, side);
         m.title = RectF(L.mediaX, m.cover.GetBottom() + Px(1), L.mediaW, Px(16));
         float x0 = L.mediaX + (L.mediaW - 3 * bw) / 2;
@@ -810,6 +824,7 @@ MediaParts MediaLayout() {
     float x = m.cover.GetRight() + Px(6);
     m.title = RectF(x, L.tileY + Px(2), L.mediaX + L.mediaW - x, Px(16));
     float x0 = s_mediaOpen ? x : m.title.X + (m.title.Width - bw) / 2 - bw;
+    bh = std::max(Px(16), std::min(bh, L.tile - Px(2 + 16 + 1 + 1)));  // 图标调小了：按钮变矮，不压着歌名
     for (int k = 0; k < 3; ++k) m.button[k] = RectF(x0 + k * bw, L.tileY + L.tile - bh - Px(1), bw, bh);
     return m;
 }
@@ -2109,9 +2124,17 @@ int DefaultSelection() {
 }
 
 // 打了字：只留下标题、应用名或程序名里有这些字的格子，后面再补上开始菜单里匹配的应用。
-// 面板宽度保持不变（玻璃背景是弹出时按这个大小截的），放不下就左右滚动
-void ApplyFilter() {
+// 面板宽度保持不变（玻璃背景是弹出时按这个大小截的），放不下就左右滚动。
+// keep：字没变、只是后台读完了应用列表，选着的、滚到的位置不动
+void ApplyFilter(bool keep = false) {
     if (s_lockedItemsW <= 0) s_lockedItemsW = s_L.itemsW;
+    HWND keepHwnd = nullptr;
+    std::wstring keepLaunch;
+    int keepFirst = s_first;
+    if (keep && s_sel >= 1 && s_sel <= static_cast<int>(s_items.size())) {
+        keepHwnd = s_items[s_sel - 1].hwnd;
+        keepLaunch = s_items[s_sel - 1].launch;
+    }
     std::wstring f = ToLower(s_filter);
     if (f.empty()) {
         s_items = s_allItems;
@@ -2140,6 +2163,13 @@ void ApplyFilter() {
     s_pillIndex = -1;
     s_sel = f.empty() ? DefaultSelection() : (s_items.empty() ? -1 : 1);  // 没有匹配的就什么都不选
     s_keyNav = !f.empty();
+    if (keep && (keepHwnd || !keepLaunch.empty()))
+        for (size_t i = 0; i < s_items.size(); ++i)
+            if (keepHwnd ? s_items[i].hwnd == keepHwnd : !s_items[i].hwnd && s_items[i].launch == keepLaunch) {
+                s_sel = static_cast<int>(i) + 1;
+                s_first = std::max(0, std::min(keepFirst, ItemCount() - s_visible));
+                break;
+            }
     s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
     EnsureVisible(s_sel);
     Redraw();
@@ -2223,6 +2253,13 @@ void ActivateIndex(int idx, bool newInstance = false) {
         Launch(item.launch);
         return;
     }
+    if (newInstance && IsWindow(item.hwnd)) {  // 没固定的窗口：和右键菜单里“再开一个”一样找它的程序
+        AppTarget app = ResolveAppTarget(item.hwnd, L"", L"");
+        if (!app.launch.empty()) {
+            Launch(app.launch);
+            return;
+        }
+    }
     HWND h = item.hwnd;
     if (!IsWindow(h)) {
         HideNow();
@@ -2283,7 +2320,7 @@ void CloseItem(int idx) {
         Redraw();
         return;
     }
-    ComputeLayout();
+    FitTiles();  // 格子少了：有空的话放大补上
     UpdatePlacement();  // 面板变窄了，重新居中（玻璃背景也跟着重算）
     s_first = std::max(0, std::min(s_first, ItemCount() - s_visible));
     s_sel = std::min(s_sel, ItemCount());
@@ -3452,7 +3489,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_APP_APPS:
-            if (s_open && !s_filter.empty()) ApplyFilter();  // 应用列表刚读完：把匹配的应用补上
+            if (s_open && !s_filter.empty()) ApplyFilter(true);  // 应用列表刚读完：把匹配的应用补上
             return 0;
 
         case WM_APP_MEDIA:
@@ -3944,7 +3981,9 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     EndStartMode();
     s_compact = startMenu;
     s_startPending = startMenu;
-    if (fg != s_hwnd) s_prevForeground = fg;
+    if (s_keepPrevForeground) s_prevForeground = s_keepPrevForeground;
+    else if (fg != s_hwnd) s_prevForeground = fg;
+    s_keepPrevForeground = nullptr;
 
     // 任务栏露着时弹在它上面，藏起来时贴着屏幕底边
     MONITORINFO mi = {sizeof(mi)};
@@ -3964,6 +4003,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_lastMouse = {INT_MIN, INT_MIN};
     if (!preview) Apps_Refresh(s_hwnd);  // 打字筛选时要搜的所有应用，在后台先读好
     FitTiles();
+    FitScreen();
     UpdatePlacement();
 
     // 截下玻璃后面的屏幕内容：这时弹窗自己不能在屏幕上
@@ -3991,6 +4031,8 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_anim = Anim::Showing;
     s_animStart = s_shownAt;
     s_layerValid = false;
+    s_lastSlide = SlideDistance();  // 还没出现就收起的话从这里收
+    s_lastAlpha = 0;
     Render(SlideDistance(), 0);
     if (preview || hover) {
         ShowWindow(s_hwnd, SW_SHOWNOACTIVATE);
@@ -4119,6 +4161,7 @@ void Popup_NextScreen() {
     if (!to) return;
     Log(L"按了在下一块屏幕弹出的快捷键：弹在%ls", MonitorLabel(to).c_str());
     if (s_open) {
+        if (!s_preview && IsWindow(s_prevForeground)) s_keepPrevForeground = s_prevForeground;
         HideNow();
         WaitForVBlank();  // 等屏幕上没了它再截背景
     }
@@ -4180,7 +4223,10 @@ void Popup_PreviewLook(const PopupLook& look) {
     s_glass.SetTransparency(look.transparency);
     s_glass.SetTint(look.customTint, look.tint);
     if (reload) LoadModules(true);  // 改了显示哪些：重新定下这次显示的模块
+    s_scale = PopupScale(s_monitor);  // 之前放不下屏幕缩小过的话，换了样子重新算
     FitTiles();
+    FitScreen();
+    s_glass.SetScale(s_scale);
     s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
     UpdatePlacement();
     s_baseValid = false;
@@ -4207,6 +4253,7 @@ void Popup_Preview(int percent, int edge, int align, bool hold) {
         s_align = align;
         s_scale = PopupScale(s_monitor);
         FitTiles();
+        FitScreen();
         s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
         UpdatePlacement();
         s_glass.SetScale(s_scale);
@@ -4245,7 +4292,7 @@ void Popup_Hide() {
 }
 
 void Popup_Toggle() {
-    if (s_open) Popup_Hide();
+    if (s_open && !s_preview) Popup_Hide();  // 设置里的预览不算弹出着
     else Popup_Show();
 }
 

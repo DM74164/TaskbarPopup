@@ -122,6 +122,9 @@ UINT_PTR s_timer = 0;
 std::vector<HWND> CoveredFloats(HWND big) {
     s_floats.erase(std::remove_if(s_floats.begin(), s_floats.end(), [](HWND h) { return !IsWindow(h); }),
                    s_floats.end());
+    // 在前台时最大化的不一定有事件：这时候发现了也不再算小窗口
+    for (HWND h : std::vector<HWND>(s_floats))
+        if (IsBigWindow(h)) Forget(h);
     std::vector<HWND> covered;
     for (HWND h = GetWindow(big, GW_HWNDNEXT); h; h = GetWindow(h, GW_HWNDNEXT))
         if (std::find(s_floats.begin(), s_floats.end(), h) != s_floats.end() && IsFloatOver(h, big)) covered.push_back(h);
@@ -254,12 +257,27 @@ bool IsDoubleClick(HWND root, const MSLLHOOKSTRUCT& m) {
     return twice;
 }
 
+// 双击后过一会儿再固定：双击的是标题栏的话窗口会最大化（或者还原），那就不算
+HWND s_pinLater = nullptr;
+UINT_PTR s_pinTimer = 0;
+void CALLBACK OnPinLater(HWND, UINT, UINT_PTR, DWORD) {
+    KillTimer(nullptr, s_pinTimer);
+    s_pinTimer = 0;
+    HWND h = s_pinLater;
+    s_pinLater = nullptr;
+    if (IsWindow(h) && !IsIconic(h)) Pin(h, L"双击");
+}
+
 LRESULT CALLBACK MouseProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION &&
         (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN || wParam == WM_XBUTTONDOWN)) {
         const auto& m = *reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
         if (HWND root = GetAncestor(WindowFromPoint(m.pt), GA_ROOT)) {
-            if (wParam == WM_LBUTTONDOWN && IsDoubleClick(root, m)) Pin(root, L"双击");
+            if (wParam == WM_LBUTTONDOWN && IsDoubleClick(root, m) && !IsBigWindow(root)) {
+                s_pinLater = root;
+                if (s_pinTimer) KillTimer(nullptr, s_pinTimer);
+                s_pinTimer = SetTimer(nullptr, 0, 300, OnPinLater);
+            }
             BeforeClick(root);
         }
     }
@@ -491,6 +509,9 @@ DWORD WINAPI FloatThread(LPVOID ready) {
     s_raisedTimer = 0;
     if (s_timer) KillTimer(nullptr, s_timer);
     s_timer = 0;
+    if (s_pinTimer) KillTimer(nullptr, s_pinTimer);
+    s_pinTimer = 0;
+    s_pinLater = nullptr;
     if (s_mouseHook) UnhookWindowsHookEx(s_mouseHook);
     s_mouseHook = nullptr;
     if (s_hook) UnhookWinEvent(s_hook);

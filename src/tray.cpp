@@ -167,11 +167,11 @@ std::vector<TrayApp> LoadFromSettings() {
         TrayApp app;
         app.exe = ResolvePath(RegString(key, L"ExecutablePath"));
         std::wstring lower = Lower(app.exe);
-        if (!app.exe.empty() && running.count(lower) && !seen.count(lower)) {
-            seen.insert(lower);
+        DWORD promoted = 0, size = sizeof(promoted);
+        RegGetValueW(key, nullptr, L"IsPromoted", RRF_RT_REG_DWORD, nullptr, &promoted, &size);
+        // 同一个程序常有好几条（旧版本留下的）：一直显示的和收起来的各留一条，有收起来的就算在隐藏的图标里
+        if (!app.exe.empty() && running.count(lower) && seen.insert(lower + (promoted ? L"|1" : L"|0")).second) {
             app.name = FirstLine(RegString(key, L"InitialTooltip"));
-            DWORD promoted = 0, size = sizeof(promoted);
-            RegGetValueW(key, nullptr, L"IsPromoted", RRF_RT_REG_DWORD, nullptr, &promoted, &size);
             app.promoted = promoted != 0;
             std::vector<BYTE> png;
             DWORD bytes = 0;
@@ -248,7 +248,8 @@ bool LoadFromToolbar(std::vector<TrayApp>& apps) {
             continue;
         TrayApp app;
         app.exe = GetProcessPath(data.hwnd);
-        if (app.exe.empty()) continue;  // 受保护的进程（杀毒软件之类）拿不到程序路径，菜单、找不到时再启动都用不了
+        if (app.exe.empty()) continue;
+        GetWindowThreadProcessId(data.hwnd, &app.pid);  // 受保护的进程（杀毒软件之类）拿不到程序路径，菜单、找不到时再启动都用不了
         // 先问长度，放得下才让它写（它不管缓冲区多大）
         DWORD_PTR length = 0;
         std::wstring tip;
@@ -677,7 +678,8 @@ DWORD WINAPI ClickThread(LPVOID param) {
     s_clicking = false;
     // 任务栏本来藏着：为了点隐藏的图标临时显示了，或者资源管理器展开隐藏的图标时自己把它显示了出来。
     // 点了的话等隐藏的图标和程序的菜单都关了，没点成就马上，让主线程藏回去（不是本程序藏的、已经不用藏了的主线程不管）
-    if (trayHidden || s_hideOwed.exchange(false)) {
+    bool owed = s_hideOwed.exchange(false);
+    if (trayHidden || owed) {
         for (int i = 0; clicked && i < 600 && (OverflowShowing() || MenuShowing()); ++i) Sleep(100);  // 最多等 1 分钟
         if (s_clicking) s_hideOwed = true;
         else if (IsWindowVisible(tray)) PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
@@ -720,13 +722,14 @@ std::vector<DWORD> ProcessesOf(const std::wstring& exe) {
 }
 
 struct EndJob {
-    std::wstring exe, name;
+    std::wstring name;
+    std::vector<DWORD> pids;
 };
 
 // 结束程序：先给它的窗口发关闭（藏着的也发，多数托盘程序收到会自己退出），3 秒后还在的强行结束
 DWORD WINAPI EndThread(LPVOID param) {
     std::unique_ptr<EndJob> job(static_cast<EndJob*>(param));
-    std::vector<DWORD> pids = ProcessesOf(job->exe);
+    const std::vector<DWORD>& pids = job->pids;
     std::vector<HANDLE> handles;
     for (DWORD pid : pids)
         if (HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid)) handles.push_back(h);
@@ -757,11 +760,16 @@ DWORD WINAPI EndThread(LPVOID param) {
 }
 
 void EndApp(const TrayApp& app) {
-    std::wstring text = TrF(L"结束“%ls”？\n它没保存的内容会丢失。", app.name.c_str());
+    // 知道是哪个进程（Win10）就只结束它；不知道的话同一个程序的进程都结束，有好几个时先说清楚
+    std::vector<DWORD> pids = ProcessesOf(app.exe);
+    if (app.pid && std::find(pids.begin(), pids.end(), app.pid) != pids.end()) pids = {app.pid};
+    std::wstring text = pids.size() > 1 ? TrF(L"结束“%ls”的全部 %d 个进程？\n它们没保存的内容会丢失。", app.name.c_str(),
+                                              static_cast<int>(pids.size()))
+                                        : TrF(L"结束“%ls”？\n它没保存的内容会丢失。", app.name.c_str());
     if (MessageBoxW(nullptr, text.c_str(), L"TaskbarPopup", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST |
                                                          MB_SETFOREGROUND) != IDOK)
         return;
-    if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.exe, app.name}, 0, nullptr)) CloseHandle(h);
+    if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.name, std::move(pids)}, 0, nullptr)) CloseHandle(h);
 }
 
 enum TrayCmd : UINT { kTrayOpen = 1, kTrayAppMenu, kTrayLocation, kTrayEnd };

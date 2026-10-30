@@ -47,7 +47,7 @@ float RoundRectDistance(float x, float y, float hx, float hy, float r) {
 
 // 横向盒式模糊一行，越界取边缘像素
 void BoxBlurRow(const DWORD* src, DWORD* dst, int n, int r) {
-    const int window = 2 * r + 1, inv = 65536 / window;  // 除法换成乘法
+    const int window = 2 * r + 1, inv = (65536 + window / 2) / window;  // 除法换成乘法（四舍五入，白的不会越模糊越灰）
     int sb = 0, sg = 0, sr = 0;
     for (int i = -r; i <= r; ++i) {
         DWORD p = src[std::clamp(i, 0, n - 1)];
@@ -56,7 +56,7 @@ void BoxBlurRow(const DWORD* src, DWORD* dst, int n, int r) {
         sr += (p >> 16) & 0xFF;
     }
     for (int i = 0; i < n; ++i) {
-        dst[i] = 0xFF000000 | (((sr * inv) >> 16) << 16) | (((sg * inv) >> 16) << 8) | ((sb * inv) >> 16);
+        dst[i] = 0xFF000000 | (((sr * inv + 0x8000) >> 16) << 16) | (((sg * inv + 0x8000) >> 16) << 8) | ((sb * inv + 0x8000) >> 16);
         DWORD add = src[std::min(i + r + 1, n - 1)], sub = src[std::max(i - r, 0)];
         sb += static_cast<int>(add & 0xFF) - static_cast<int>(sub & 0xFF);
         sg += static_cast<int>((add >> 8) & 0xFF) - static_cast<int>((sub >> 8) & 0xFF);
@@ -66,7 +66,7 @@ void BoxBlurRow(const DWORD* src, DWORD* dst, int n, int r) {
 
 // 纵向盒式模糊整张图：每列一组累加和，一行一行往下推，按内存顺序访问
 void BoxBlurColumns(const DWORD* src, DWORD* dst, int w, int h, int r, std::vector<int>& sums) {
-    const int window = 2 * r + 1, inv = 65536 / window;
+    const int window = 2 * r + 1, inv = (65536 + window / 2) / window;
     sums.assign(static_cast<size_t>(w) * 3, 0);
     int* s = sums.data();
     auto row = [&](int y) { return src + static_cast<size_t>(std::clamp(y, 0, h - 1)) * w; };
@@ -84,7 +84,8 @@ void BoxBlurColumns(const DWORD* src, DWORD* dst, int w, int h, int r, std::vect
         const DWORD* sub = row(y - r);
         for (int x = 0; x < w; ++x) {
             int* c = s + 3 * x;
-            out[x] = 0xFF000000 | (((c[2] * inv) >> 16) << 16) | (((c[1] * inv) >> 16) << 8) | ((c[0] * inv) >> 16);
+            out[x] = 0xFF000000 | (((c[2] * inv + 0x8000) >> 16) << 16) | (((c[1] * inv + 0x8000) >> 16) << 8) |
+                     ((c[0] * inv + 0x8000) >> 16);
             c[0] += static_cast<int>(add[x] & 0xFF) - static_cast<int>(sub[x] & 0xFF);
             c[1] += static_cast<int>((add[x] >> 8) & 0xFF) - static_cast<int>((sub[x] >> 8) & 0xFF);
             c[2] += static_cast<int>((add[x] >> 16) & 0xFF) - static_cast<int>((sub[x] >> 16) & 0xFF);

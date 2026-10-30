@@ -309,6 +309,18 @@ int BindKey(bool down, const KBDLLHOOKSTRUCT& k) {
     return -1;
 }
 
+// 等 Win 松开时松开没收到（Win+L 以后在锁屏上松开的）：放过去了的 Win 看系统记的按键状态，
+// 拦下来的 Win 按住不放会自动重复，很久没来就是已经松开了
+DWORD s_lastWinTime = 0;
+void ForgetLostWin(bool keyDown, DWORD time) {
+    if (s_state == State::Passthrough && !(GetAsyncKeyState(static_cast<int>(s_winVk)) & 0x8000)) {
+        s_state = State::Idle;
+    } else if (keyDown && s_state == State::Pending && time - s_lastWinTime > std::max<DWORD>(1500, RepeatGapLimit())) {
+        StopTimer();
+        s_state = State::Idle;
+    }
+}
+
 // 鼠标事件：返回 true 表示吞掉
 bool HandleMouse(WPARAM msg, const MSLLHOOKSTRUCT& m) {
     if (m.dwExtraInfo == kInjectMarker) return false;
@@ -348,6 +360,7 @@ bool HandleMouse(WPARAM msg, const MSLLHOOKSTRUCT& m) {
     bool mine = vk == s_press.vk;
     switch (s_press.state) {
         case Press::Idle: {
+            if (down) ForgetLostWin(false, m.time);
             if (!down || (m.flags & LLMHF_INJECTED) || s_state != State::Idle) return false;
             const KeyBinding* b = Match(vk);
             if (!b) return false;
@@ -412,11 +425,12 @@ bool HandleKey(WPARAM msg, const KBDLLHOOKSTRUCT& k) {
     if (isWin) {
         // 等 Win 松开的状态下，隔了很久又来一个 Win 按下：不是按住时的自动重复（最慢也几百毫秒一次），
         // 是上次松开没收到（松开时前台是管理员权限的程序、或者切到了锁屏 / UAC 界面）。从头开始，这次照常处理
-        static DWORD lastWinTime = 0;
         if (down && k.vkCode == s_winVk && (s_state == State::Triggered || s_state == State::Passthrough) &&
-            k.time - lastWinTime > 1500 && k.time - lastWinTime > RepeatGapLimit())
+            k.time - s_lastWinTime > 1500 && k.time - s_lastWinTime > RepeatGapLimit())
             s_state = State::Idle;
-        lastWinTime = k.time;
+        s_lastWinTime = k.time;
+    } else if (down) {
+        ForgetLostWin(true, k.time);
     }
 
     // 快捷键：正在处理的那次按下要看所有按键（按了别的键就补发回去）；没有的话 Win 键的事不归它管

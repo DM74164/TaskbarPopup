@@ -979,7 +979,9 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
         if (h && !IsWindowVisible(tb)) {
             // 已经藏好了。要重新打开自动隐藏，或者自动隐藏被别人关掉了（比如在设置里，窗口会缩回去）：让动画线程去开。
             // 刚让它去开的不算（它可能正在开），过一会儿再查。由前台那块屏的任务栏去开
-            if (own && autoHide && (reissue || (now - s_autoHideAskedAt > 1500 && !Taskbar_AutoHideOn()))) {
+            // 连续开不了（被组策略锁住之类）的话一分钟才再试一次
+            DWORD wait = s_onFailures >= 2 ? 60000 : 1500;
+            if (own && autoHide && (reissue || (now - s_autoHideAskedAt > wait && !Taskbar_AutoHideOn()))) {
                 if (!reissue) Log(L"自动隐藏任务栏被关掉了，重新打开");
                 s_autoHideConfirmed = false;
                 s_autoHideAskedAt = now;
@@ -1459,14 +1461,15 @@ void Taskbar_RestoreAll() {
         KillTimer(g_mainWnd, kTimerRetryOff);
         KillTimer(g_mainWnd, kTimerAfterShow);
     }
-    bool wasOn = s_ownAutoHide || GetRestoreAutoHideFlag();
+    // 刚关掉自动隐藏、还没等到缩回窗口就退出的，s_before 还在
+    bool wasOn = s_ownAutoHide || GetRestoreAutoHideFlag() || !s_before.empty();
     if (s_ownAutoHide && !s_offRequested) SampleWorkAreas();
     // 退出时还在桌面上：用户挪过的图标先按新位置记。前面 Fullscreen_SetEnabled(false) 可能已经发出了这次读取，
     // 而动画线程已经停了、不会替我们等，这里等它读完再关自动隐藏
     FlushDesktopMark();
     DesktopIcons_WaitUpdated(1000);
     DesktopIcons_AbandonUpdates();
-    Taskbar_EmergencyRestore();  // 显示任务栏，关掉本程序打开的自动隐藏
+    Taskbar_EmergencyRestore(false);  // 显示任务栏，关掉本程序打开的自动隐藏
     UndoSavedAutoHide();         // 上次异常退出时没来得及关的
     s_ownAutoHide = false;
     s_offRequested = false;
@@ -1491,18 +1494,28 @@ void Taskbar_RestoreAll() {
     DesktopIcons_Finish(2500);
 }
 
-void Taskbar_EmergencyRestore() {
+void Taskbar_EmergencyRestore(bool crash) {
     TaskbarAnim_Abort();  // 动画线程上排着的“藏起来、打开自动隐藏”不要再做了
     // 先关自动隐藏，任务栏回来以后最大化的窗口才不会钻到它下面。
     // 崩溃可能发生在别的线程上，再看一眼设置文件里的记号
-    if (s_ownAutoHide || GetRestoreAutoHideFlag()) Taskbar_SetAutoHide(false);
+    bool autoHide = s_ownAutoHide || GetRestoreAutoHideFlag();
+    if (autoHide) Taskbar_SetAutoHide(false);
     // 本程序藏过的不管现在看上去是否可见都发一次：藏的请求可能还排在资源管理器的队列里
     for (HWND h : FindTaskbars())
         if (!IsWindowVisible(h) || std::find(s_everHidden.begin(), s_everHidden.end(), h) != s_everHidden.end())
             ShowWindowAsync(h, SW_SHOWNA);
-    // 直接拉伸过的窗口：工作区没变过，不会有程序自己缩回去
-    if (!s_ownAutoHide)
+    // 直接拉伸过的窗口：工作区没变过，不会有程序自己缩回去。
+    // 开着自动隐藏时拉伸的，正常退出由 Taskbar_RestoreAll 等工作区变回来再缩；崩溃时不等别的，最多等半秒工作区变回来就缩
+    if (!autoHide) {
         for (const Stretched& st : s_stretched) ShrinkBack(st);
+    } else if (crash) {
+        for (const Stretched& st : s_stretched) {
+            MONITORINFO mi = {sizeof(mi)};
+            for (int i = 0; i < 10 && GetMonitorInfoW(st.monitor, &mi) && EqualRect(&mi.rcWork, &mi.rcMonitor); ++i)
+                Sleep(50);
+            ShrinkBack(st);
+        }
+    }
 }
 
 bool Fullscreen_TaskbarHidden() { return !s_hidden.empty(); }

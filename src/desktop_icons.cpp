@@ -44,6 +44,7 @@ struct IconPos {
 };
 
 HANDLE s_thread = nullptr;
+HANDLE s_orphan = nullptr;  // 退出时没等到的线程：它还用着下面这些全局的东西，退出前不能开新的
 DWORD s_threadId = 0;
 HANDLE s_savedEvent = nullptr;  // 手动重置；记图标位置期间不发信号
 HANDLE s_updatedEvent = nullptr;  // 手动重置；最后发出的那次 Update 还没读完时不发信号。关自动隐藏之前等它
@@ -366,6 +367,9 @@ void LogCoverOnScreen() {
 // 没有照片、没盖成时返回 false
 bool ShowCover() {
     if (!s_shot || !IsWindow(s_desktopRoot)) return false;
+    // 改了分辨率、缩放以后照片对不上了
+    RECT root;
+    if (!GetWindowRect(s_desktopRoot, &root) || !EqualRect(&root, &s_shotWindow)) return false;
     if (!s_cover) {
         WNDCLASSEXW wc = {sizeof(wc)};
         wc.lpfnWndProc = CoverProc;
@@ -957,21 +961,21 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
                 Save(static_cast<UINT>(msg.wParam));
                 // 照片现在就垫上：回到桌面时不管多快都不会先露出没有图标的桌面。藏好了再让动画线程去开自动隐藏，
                 // 免得资源管理器在图标还露着时就挪它们。已经要退出（会话变了）就不藏
-                if (Current(static_cast<UINT>(msg.wParam))) CoverAndHide();
+                if (Current(static_cast<UINT>(msg.wParam)) && !Discarded(static_cast<UINT>(msg.wParam))) CoverAndHide();
                 SetEvent(s_savedEvent);
                 MaskCover();  // 自动隐藏可以去开了，这时图标已经藏好、照片盖着，再把照片改成只盖图标
                 break;
             }
             case kCmdRehide:
                 Reshoot(static_cast<UINT>(msg.wParam));
-                if (Current(static_cast<UINT>(msg.wParam))) CoverAndHide();
+                if (Current(static_cast<UINT>(msg.wParam)) && !Discarded(static_cast<UINT>(msg.wParam))) CoverAndHide();
                 SetEvent(s_savedEvent);
                 MaskCover();
                 break;
             case kCmdDisplay:
                 if (s_hiddenList && (GetSystemMetrics(SM_CMONITORS) > 1 || s_keepShown)) {
                     Log(s_keepShown ? L"一直隐藏任务栏，藏着的桌面图标现在显示" : L"接上了另一块屏幕，藏着的桌面图标现在显示");
-                    ShowIcons();  // 位置照常等关掉自动隐藏以后摆
+                    ShowIcons(AtSaved(Read()));  // 位置照常等关掉自动隐藏以后摆（资源管理器可能已经挪过了）
                 }
                 break;
             case kCmdCover:
@@ -1048,6 +1052,11 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
 
 bool EnsureThread() {
     if (s_thread) return true;
+    if (s_orphan) {
+        if (WaitForSingleObject(s_orphan, 0) != WAIT_OBJECT_0) return false;
+        CloseHandle(s_orphan);
+        s_orphan = nullptr;
+    }
     if (!s_savedEvent) s_savedEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
     if (!s_updatedEvent) s_updatedEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1155,10 +1164,11 @@ void DesktopIcons_Finish(DWORD ms) {
         s_quit = true;  // 资源管理器卡住了，不等了；线程读完这次就退出
         DesktopIcons_EmergencyShow();  // 图标还藏着的话先显示出来，不摆位置了
         Log(L"摆桌面图标超时，不等了");
+        s_orphan = s_thread;
     } else {
         s_quit = false;
+        CloseHandle(s_thread);
     }
-    CloseHandle(s_thread);
     s_thread = nullptr;
     s_threadId = 0;
     if (s_savedEvent) SetEvent(s_savedEvent);

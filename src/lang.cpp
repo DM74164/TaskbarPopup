@@ -268,6 +268,8 @@ const wchar_t* const kEnglish[][2] = {
     {L"程序菜单", L"App menu"},
     {L"结束程序", L"End task"},
     {L"结束“%ls”？\n它没保存的内容会丢失。", L"End \"%ls\"?\nAnything it hasn't saved will be lost."},
+    {L"结束“%ls”的全部 %d 个进程？\n它们没保存的内容会丢失。",
+     L"End \"%ls\" (all %d processes)?\nAnything they haven't saved will be lost."},
 
     // 固定小窗口的提示
     {L"已取消固定", L"Unpinned"},

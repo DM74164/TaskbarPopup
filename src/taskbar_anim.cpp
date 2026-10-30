@@ -237,7 +237,7 @@ DWORD WINAPI OffThread(LPVOID param) {
     return 0;
 }
 
-// 这块屏上有最大化的窗口（看得见的）
+// 这块屏上有最大化的窗口（看得见的），monitor 为空时看所有屏幕
 bool MaximizedOn(HMONITOR monitor) {
     struct Ctx {
         HMONITOR monitor;
@@ -247,7 +247,7 @@ bool MaximizedOn(HMONITOR monitor) {
         [](HWND hwnd, LPARAM param) -> BOOL {
             auto& c = *reinterpret_cast<Ctx*>(param);
             if (!IsWindowVisible(hwnd) || !IsZoomed(hwnd) || IsCloaked(hwnd)) return TRUE;
-            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != c.monitor) return TRUE;
+            if (c.monitor && MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != c.monitor) return TRUE;
             c.found = true;
             return FALSE;
         },
@@ -255,11 +255,13 @@ bool MaximizedOn(HMONITOR monitor) {
     return ctx.found;
 }
 
-// 截图开始滑回来时：这块屏上没有最大化的窗口（回到了桌面、或者窗口都还原了），关自动隐藏时没有窗口要在截图后面缩回去，
+// 截图开始滑回来时：没有最大化的窗口（回到了桌面、或者窗口都还原了。自动隐藏管所有屏幕，所以每块屏都要看），
+// 关自动隐藏时没有窗口要在截图后面缩回去，
 // 就不等滑到原位，现在关，桌面图标也能早点排回原位显示出来。在另一个线程上关：关的时候要等资源管理器广播完，
 // 在这里关会卡住正在滑的截图
 bool OffEarly(const Slide& s) {
-    if (!s_offSeq || MaximizedOn(MonitorFromRect(&s.rect, MONITOR_DEFAULTTONEAREST))) return false;
+    (void)s;
+    if (!s_offSeq || MaximizedOn(nullptr)) return false;
     JoinOff();
     auto* job = new OffJob{s_offSeq, t_generation};
     HANDLE thread = CreateThread(nullptr, 0, OffThread, job, 0, nullptr);
@@ -395,17 +397,17 @@ void OnShow(HWND taskbar, UINT offSeq) {
     RECT r;
     bool sameRect = s && GetWindowRect(taskbar, &r) && EqualRect(&r, &s->rect);
     // 没有截图（上次没做动画），或者藏起来以后任务栏换了位置、大小：直接显示。
-    // 本程序打开的自动隐藏还开着时任务栏缩在屏幕外，位置对不上是正常的，关掉以后它会回原位
-    if (!s || !s->bitmap || (!sameRect && !s_offSeq)) {
+    // 本程序打开的自动隐藏还开着（或者正在关）时任务栏缩在屏幕外，位置对不上是正常的，关掉以后它会回原位
+    if (!s || !s->bitmap || (!sameRect && !s_offSeq && !Taskbar_AutoHideOn())) {
         if (s && s->overlay) ShowWindow(s->overlay, SW_HIDE);
         if (s) ReleaseImage(*s);
-        ApplyPendingOff();
+        if (!SlidingIn()) ApplyPendingOff();  // 别的任务栏的截图还在滑回来的话，等它滑到原位（Step）再关
         // 不管现在看上去是否可见都发：藏的请求可能还排在资源管理器的队列里，显示的请求排在它后面
         if (IsWindow(taskbar)) ShowWindowAsync(taskbar, SW_SHOWNA);
         return;
     }
     if (s->docking || s->settling) {  // 已经滑回原位了
-        ApplyPendingOff();
+        if (!SlidingIn()) ApplyPendingOff();
         return;
     }
     if (s->moving && s->to == 0) {  // 正在滑回来，滑到原位时关自动隐藏（能提前关的话现在关）
@@ -413,7 +415,7 @@ void OnShow(HWND taskbar, UINT offSeq) {
         return;
     }
     if (!s->moving && s->pos == 0) {  // 本来就在原位
-        ApplyPendingOff();
+        if (!SlidingIn()) ApplyPendingOff();
         ShowWindowAsync(taskbar, SW_SHOWNA);
         return;
     }
@@ -422,7 +424,7 @@ void OnShow(HWND taskbar, UINT offSeq) {
         ShowWindow(s->overlay, SW_HIDE);
         ReleaseImage(*s);
         s->pos = 0;
-        ApplyPendingOff();
+        if (!SlidingIn()) ApplyPendingOff();
         ShowWindowAsync(taskbar, SW_SHOWNA);
         return;
     }

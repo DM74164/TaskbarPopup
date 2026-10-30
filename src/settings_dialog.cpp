@@ -289,6 +289,7 @@ std::vector<DWORD> s_content;  // 玻璃上面的内容（透明底），拖动�
 bool s_contentValid = false;
 bool s_winDrag = false;  // 正在按住标题栏拖窗口
 POINT s_dragOffset = {};  // 鼠标相对窗口左上角的位置
+bool s_layoutLater = false;  // 最小化着时布局要变（换了显示器之类）：还原时再排
 HDC s_canvasDC = nullptr;
 HBITMAP s_canvas = nullptr;
 HGDIOBJ s_canvasOld = nullptr;
@@ -1247,15 +1248,30 @@ bool ExcludeWorks() {
     int x0 = static_cast<int>(s_panel.X + s_panel.Width / 2) - size / 2;
     int y0 = static_cast<int>(s_panel.Y + s_panel.Height / 2) - size / 2;
     RECT r = {s_pos.x + x0, s_pos.y + y0, s_pos.x + x0 + size, s_pos.y + y0 + size};
-    std::vector<DWORD> shot;
-    if (!CaptureScreen(r, shot)) return true;
-    int same = 0;
-    for (int y = 0; y < size; ++y)
-        for (int x = 0; x < size; ++x)
-            if ((shot[static_cast<size_t>(y) * size + x] & 0xFFFFFF) ==
-                (s_bits[static_cast<size_t>(y0 + y) * s_width + x0 + x] & 0xFFFFFF))
-                ++same;
-    s_excludeWorks = same * 10 >= size * size * 9 ? -1 : 1;
+    // 截到的和本窗口画的几乎一样：排除没生效
+    auto seesSelf = [&](bool& failed) {
+        std::vector<DWORD> shot;
+        if (!CaptureScreen(r, shot)) {
+            failed = true;
+            return false;
+        }
+        int same = 0;
+        for (int y = 0; y < size; ++y)
+            for (int x = 0; x < size; ++x)
+                if ((shot[static_cast<size_t>(y) * size + x] & 0xFFFFFF) ==
+                    (s_bits[static_cast<size_t>(y0 + y) * s_width + x0 + x] & 0xFFFFFF))
+                    ++same;
+        return same * 10 >= size * size * 9;
+    };
+    bool failed = false;
+    bool self = seesSelf(failed);
+    if (self) {  // 显示器刷新慢、合成器忙的时候可能只是还没生效：等两帧再看一次，这次的结果一直用
+        DwmFlush();
+        DwmFlush();
+        self = seesSelf(failed);
+    }
+    if (failed) return true;
+    s_excludeWorks = self ? -1 : 1;
     if (s_excludeWorks < 0) Log(L"设置窗口：截图时排除本窗口不管用，玻璃背景不再实时刷新");
     return s_excludeWorks > 0;
 }
@@ -1264,8 +1280,15 @@ bool ExcludeWorks() {
 void CaptureBehind() {
     ++s_shotSeq;  // 后台截到一半的作废
     bool visible = IsWindowVisible(s_hwnd) && !IsIconic(s_hwnd);
+    RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
+    // 截不了（排除本窗口不管用）：沿用原来的背景，换了缩放就换边缘尺寸，变大了的地方用原来截的补上
+    auto keepOld = [&] {
+        s_glass.SetScale(s_scale);
+        s_glass.Extend(window);
+        s_baseValid = false;
+    };
     if (visible) {
-        if (!SetExclude(true)) return;
+        if (!SetExclude(true)) return keepOld();
         if (ExcludeWait() > 0) {
             DwmFlush();
             DwmFlush();
@@ -1273,10 +1296,9 @@ void CaptureBehind() {
         }
         if (!ExcludeWorks()) {
             SetExclude(false);
-            return;
+            return keepOld();
         }
     }
-    RECT window = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
     s_glass.Capture(window, s_scale);
     s_baseValid = false;
     s_still = 0;
@@ -1415,6 +1437,10 @@ void ApplyLook() {
 
 // 布局变了（名单增删、换了显示器）：上边缘不动，大小跟着变，背景重新截
 void Relayout(bool keepTop) {
+    if (IsIconic(s_hwnd)) {  // 最小化着时窗口不在屏幕上，挪它、截背景都不对
+        s_layoutLater = true;
+        return;
+    }
     int oldW = s_width, oldH = s_height;
     POINT center = {s_pos.x + s_width / 2, s_pos.y + s_height / 2};
     LayoutFor(MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTONEAREST));  // 变高了也要缩到屏幕放得下
@@ -1702,6 +1728,11 @@ void CaptureKey(UINT vk, LPARAM lParam) {
 
 // 录的时候松开了键：刚才只按了一个 Ctrl / Shift / Alt 就录它
 void CaptureKeyUp(UINT vk, LPARAM lParam) {
+    if (vk == VK_SNAPSHOT && s_capture >= 0) {  // PrintScreen 只有松开的消息
+        s_captureLone = 0;
+        TryHotkey(MakeHotkey(CaptureMods(), VK_SNAPSHOT));
+        return;
+    }
     UINT specific = SpecificModifier(vk, lParam);
     if (specific && specific == s_captureLone) TryHotkey(MakeHotkey(0, specific));
     s_captureLone = 0;
@@ -2163,22 +2194,25 @@ void Activate(const Item& it) {
         case kToggleRow:
         case kToggleChip: SetToggle(it.index, !s_v.on[it.index]); break;
         case kSegment: {
-            int group = it.index / kSegStride, old = s_v.seg[group];
-            s_v.seg[group] = it.index % kSegStride;
+            int group = it.index / kSegStride, old = s_v.seg[group], pick = it.index % kSegStride;
+            // 点了自定义颜色：先选一个（选色框开着时可能存设置，别先存成自定义）；原来跟随着、又没选的话还是跟随
+            if ((group == kSegTint || group == kSegAccent) && pick == 1) {
+                bool picked = PickColor(group == kSegAccent);
+                if (!s_hwnd) return;  // 选色时窗口被关了（比如从托盘菜单退出）
+                if (!picked && old == 0) pick = 0;
+            }
+            s_v.seg[group] = pick;
             // 换材质时圆角还是原来那种的默认值：跟着换成新材质的（Win11 原版是 8）
             if (group == kSegStyle && s_v.slider[kRadius] == DefaultPopupRadius(old))
                 s_v.slider[kRadius] = DefaultPopupRadius(s_v.seg[group]);
-            // 点了自定义颜色：选一个；原来跟随着、又没选的话还是跟随
-            if ((group == kSegTint || group == kSegAccent) && s_v.seg[group] == 1 && !PickColor(group == kSegAccent) && old == 0)
-                s_v.seg[group] = 0;
-            if (it.index / kSegStride == kSegEdge || it.index / kSegStride == kSegAlign) StorePlace();
+            if (group == kSegEdge || group == kSegAlign) StorePlace();
             // 换了底部、侧边（或者把位置换到了另一种）：开关换成那一份
             if (group == kSegSide || (group == kSegEdge && ModuleSideOf(s_v.seg[kSegEdge]) != s_v.seg[kSegSide])) {
                 ShowSide(group == kSegSide ? s_v.seg[kSegSide] : ModuleSideOf(s_v.seg[kSegEdge]));
                 AnimateKnobs();
             }
             ApplyLook();  // 马上换上
-            if (it.index / kSegStride == kSegLang) {  // 马上换成选的语言
+            if (group == kSegLang) {  // 马上换成选的语言
                 SetUiEnglish(LanguageIsEnglish(s_v.seg[kSegLang]));
                 SetWindowTextW(s_hwnd, Tr(L"TaskbarPopup 设置"));
             }
@@ -2199,7 +2233,7 @@ void Activate(const Item& it) {
         case kHotkeyMode: SetHotkeyMode(it.index / kSegStride, it.index % kSegStride == 1); break;
         case kCheckNow: Update_CheckNow(true); break;
         case kSwatch:
-            if (PickColor(it.index == 1)) PreviewPopup(false);
+            if (PickColor(it.index == 1) && s_hwnd) PreviewPopup(false);
             break;
         case kPreset: ShowPresetMenu(it); return;
         case kAddPreset: SavePreset(0); return;
@@ -2333,7 +2367,15 @@ LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             EndMove();
             return 0;
 
+        case WM_SIZE:
+            if (wParam == SIZE_RESTORED && s_layoutLater) {
+                s_layoutLater = false;
+                SettingsDialog_DisplayChanged();
+            }
+            return 0;
+
         case WM_MOVE: {
+            if (IsIconic(hwnd)) return 0;  // 最小化时停到屏幕外的位置不算
             RECT r;
             GetWindowRect(hwnd, &r);
             POINT pos = {r.left, r.top};
@@ -2538,7 +2580,13 @@ LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DPICHANGED: {
             const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
             s_pos = {suggested->left, suggested->top};
+            float oldScale = s_scale;
             LayoutFor(MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST));
+            if (s_winDrag && oldScale > 0) {  // 拖着标题栏换了缩放：鼠标还抓着窗口上同一处
+                float k = s_scale / oldScale;
+                s_dragOffset = {static_cast<LONG>(std::lround(s_dragOffset.x * k)),
+                                static_cast<LONG>(std::lround(s_dragOffset.y * k))};
+            }
             SetWindowPos(hwnd, nullptr, s_pos.x, s_pos.y, s_width, s_height, SWP_NOZORDER | SWP_NOACTIVATE);
             CaptureBehind();
             Render();
@@ -2584,6 +2632,10 @@ void SettingsDialog_SettingsChanged() {
 // 插拔了显示器、改了分辨率或缩放：系统可能把窗口挪到了别的屏幕上，按它现在所在的屏幕重新排，别跑出屏幕
 void SettingsDialog_DisplayChanged() {
     if (!s_hwnd) return;
+    if (IsIconic(s_hwnd)) {
+        s_layoutLater = true;
+        return;
+    }
     RECT r;
     if (GetWindowRect(s_hwnd, &r)) s_pos = {r.left, r.top};
     HMONITOR monitor = MonitorFromWindow(s_hwnd, MONITOR_DEFAULTTONEAREST);
