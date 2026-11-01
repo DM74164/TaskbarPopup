@@ -142,7 +142,7 @@ std::vector<Tile> s_allItems;  // 弹出时列出的全部格子
 std::wstring s_filter;         // 打的字
 float s_lockedItemsW = 0;      // 筛选期间格子区宽度不变（面板不跟着变窄变宽）；0 = 没锁
 float s_tileGrow = 1;          // 格子那段有空时格子放大补位的倍数，见 FitTiles
-float s_holderRoom = 0;        // 拖过长度时，预览给没在放的媒体多留的长度，见 FitTiles
+float s_holderRoom = 0;        // 拖过长度时给媒体多留的长度（拖的长度不算媒体），见 FitTiles
 bool s_keyNav = false;         // 最近是用键盘选的（选中项也显示缩略图）
 bool s_menuOpen = false;
 POINT s_lastMouse = {INT_MIN, INT_MIN};  // 上一次 WM_MOUSEMOVE 的位置：窗口出现、移动时系统会补发一条位置没变的
@@ -338,7 +338,7 @@ ModuleSet& Mods() { return (s_preview ? s_look.modules : g_settings.modules)[Mod
 // 面板贴着的那条屏幕边有多长（横排是宽，竖排是高）
 float ScreenSide() { return static_cast<float>(Vertical() ? s_bounds.bottom - s_bounds.top : s_bounds.right - s_bounds.left); }
 
-// 编辑模式里拖出来的面板长度（像素），0 = 跟着内容
+// 编辑模式里拖出来的面板长度（像素，不算媒体，再加上给媒体留的），0 = 跟着内容
 float CustomLength() {
     return g_settings.popupLength > 0 ? ScreenSide() * g_settings.popupLength / kMaxPopupLength + s_holderRoom : 0;
 }
@@ -629,20 +629,30 @@ void ComputeLayout() {
 
 // 排好布局。格子那段有空（关掉了一些模块，面板按调节条那行的最小长度来，或者拖过长度）时，格子按比例放大补上：
 // 面板长度不变、格子都放得下，最多放大到图标大小 150%。筛选时格子大小不变；开始菜单上面那一行不放大。
-// 预览、编辑模式里没在放也显示出来的媒体先不算，格子和真弹出时一样大
+// 媒体先不算：格子大小、拖过的长度都按没有媒体时来，媒体加在上面，面板跟着变长（放没放歌，原来的布局都一样大）
 void FitTiles() {
     s_holderRoom = 0;
-    if (s_lockedItemsW > 0) {
+    bool media = s_showMedia;
+    auto length = [] { return Vertical() ? s_L.panelH : s_L.panelW; };
+    // 拖过长度时把媒体占的长度加到长度上，格子那段和没有媒体时一样长
+    auto addMediaRoom = [&](float others) {
+        s_showMedia = media;
         ComputeLayout();
+        if (!media || CustomLength() <= 0) return;
+        s_holderRoom = std::max(0.0f, length() - s_L.itemsW - others);
+        ComputeLayout();
+    };
+    if (s_lockedItemsW > 0) {
+        s_showMedia = false;
+        ComputeLayout();
+        addMediaRoom(length() - s_L.itemsW);
         return;
     }
-    bool holder = s_showMedia && !s_media.present;
-    s_showMedia = s_showMedia && !holder;
+    s_showMedia = false;
     s_tileGrow = 1;
     ComputeLayout();
     int n = static_cast<int>(s_items.size());
     float grow = 1, maxGrow = static_cast<float>(kMaxIconSize) / std::max(1, s_look.iconSize);
-    auto length = [] { return Vertical() ? s_L.panelH : s_L.panelW; };
     // 1 到 hi 之间 fits() 还成立的最大倍数
     auto largest = [](float hi, auto fits) {
         float lo = 1;
@@ -660,16 +670,9 @@ void FitTiles() {
     }
     s_tileGrow = grow;
     ComputeLayout();
-    float others = length() - s_L.itemsW;
-    s_showMedia = s_showMedia || holder;
-    ComputeLayout();
-    // 拖过长度时预览把媒体占的地方加到长度上，格子那段和真弹出时一样长
-    if (holder && s_preview && CustomLength() > 0) {
-        s_holderRoom = std::max(0.0f, length() - s_L.itemsW - others);
-        ComputeLayout();
-    }
-    // 加上媒体后放大的格子还是放不下（编辑模式里拖过长度、或者到了屏幕边）：缩到都放得下
-    if (holder && grow > 1 && s_visible < n) {
+    addMediaRoom(length() - s_L.itemsW);
+    // 加上媒体后放大的格子放不下了（到了屏幕边）：缩到都放得下
+    if (media && grow > 1 && s_visible < n) {
         s_tileGrow = largest(grow, [&] { return s_visible == n; });
         ComputeLayout();
     }
@@ -2826,7 +2829,7 @@ void SetPopupSize(int percent, int length, bool fit = false) {
             break;
     }
     if (fit && length > 0) {
-        float actual = Vertical() ? s_L.panelH : s_L.panelW;
+        float actual = (Vertical() ? s_L.panelH : s_L.panelW) - s_holderRoom;  // 媒体占的不算
         g_settings.popupLength = std::clamp(static_cast<int>(std::lround(actual / ScreenSide() * kMaxPopupLength)), 1,
                                             kMaxPopupLength);
     }
@@ -3298,8 +3301,9 @@ void DragResize(POINT screen) {
     if (s_resize & ScaleEdges()) percent = static_cast<int>(std::lround(s_resizeFrom * ScaleDistance(screen) / s_resizeDist));
     bool fit = (s_resize & LengthEdges()) != 0;
     if (fit)
-        length = std::clamp(static_cast<int>(std::lround(LengthAt(screen) / ScreenSide() * kMaxPopupLength)), 1,
-                            kMaxPopupLength);
+        length = std::clamp(  // 媒体占的不算：拖的是没有媒体时的长度
+            static_cast<int>(std::lround((LengthAt(screen) - s_holderRoom) / ScreenSide() * kMaxPopupLength)), 1,
+            kMaxPopupLength);
     SetPopupSize(percent, length, fit);
 }
 
