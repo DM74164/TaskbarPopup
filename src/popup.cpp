@@ -58,6 +58,9 @@ constexpr UINT kEdgeWatchMs = 80;
 constexpr DWORD kEdgeDwellMs = 350;     // 在边上停这么久才弹
 constexpr UINT_PTR kTimerHoverLeave = 10;  // 鼠标停在边上弹出的：看鼠标走开了没有
 constexpr UINT kHoverWatchMs = 100;
+constexpr double kMediaMs = 240.0 * TP_ANIM_SCALE;  // 点封面弹出 / 收起媒体按钮
+constexpr UINT_PTR kTimerMediaClose = 11;           // 鼠标离开封面一会儿后收起媒体按钮
+constexpr UINT kMediaCloseMs = 600;
 constexpr DWORD kHoverLeaveMs = 600;    // 走开这么久就收起
 
 enum class Anim { None, Showing, Hiding };
@@ -244,16 +247,14 @@ int s_radioFailed = 0;             // 切换失败的开关（1 << RadioId）：
 int s_radioPolls = 0;              // 弹出以后为了等 Wi-Fi 连上网络又读了几遍
 
 // 媒体按钮、输入法、电量。媒体按钮的编号就是 MediaCommand
-enum Extra { kExtraNone = -1, kExtraIme = 3, kExtraBattery, kExtraCover };  // kExtraCover：封面和歌名
-constexpr float kCoverSize = 36;      // 横排时封面的边长
-constexpr float kMediaColW = 112;     // 横排占两行时媒体那一列的宽
-constexpr float kMediaRowW = 142;     // 横排只有一行时：封面在左，歌名和按钮在右
-constexpr float kSideCoverSize = 40;  // 竖排时封面的边长，下面两行小字的歌名
-constexpr float kSideTitleH = 26;
+enum Extra { kExtraNone = -1, kExtraIme = 3, kExtraBattery, kExtraCover };
 bool s_showMedia = false;  // 这次弹出有没有这几样（弹出时定下来）
 bool s_showIme = false;
 bool s_showBattery = false;
-bool s_mediaOpen = false;  // 媒体展开了上一首、下一首（点封面切换，每次弹出都先收着，只留播放 / 暂停）
+bool s_mediaOpen = false;  // 点了封面，上一首、播放 / 暂停、下一首弹出来了（每次弹出都先收着，只有封面）
+float s_mediaFrom = 0;     // 弹出 / 收起动画开始时的进度
+double s_mediaStart = 0;
+bool s_mediaLeaving = false;  // 按钮弹出着、鼠标离开了封面：等 kTimerMediaClose 收起
 MediaInfo s_media;
 ImeInfo s_ime;
 BatteryInfo s_battery;
@@ -471,9 +472,10 @@ void ComputeLayout() {
     }
     if (TrayHolder()) L.trayW = s_trayStyle == kTrayRow ? (vertical ? L.cellH : L.cellW) : L.tile;
     int n = static_cast<int>(s_items.size());
+    // 媒体只有一张正方形的封面：和格子一样大，横排有调节条那一行时占两行
     L.mediaTall = s_showMedia && !vertical && L.sliderH > 0;
-    L.mediaW = !s_showMedia ? 0 : Px(L.mediaTall ? kMediaColW : kMediaRowW);
-    L.mediaH = s_showMedia ? Px(kSideCoverSize + 2 + kSideTitleH) + (s_mediaOpen ? 3 : 1) * Px(28) : 0;
+    L.mediaW = !s_showMedia ? 0 : L.mediaTall ? L.tile + L.rowGap + L.sliderH : L.tile;
+    L.mediaH = s_showMedia ? L.tile : 0;
     L.imeW = s_showIme ? Px(30) : 0;
     L.imeH = s_showIme ? Px(30) : 0;
     L.battW = s_showBattery ? Px(42) : 0;
@@ -791,45 +793,55 @@ int RadioAt(int x, int y) {
 
 // ---- 媒体按钮、输入法、电量 ----
 
-// 媒体那一段里各部分的位置：封面在上，下面是歌名，最下面三个按钮（kMediaPrevious 上一首、kMediaPlayPause 播放 / 暂停、
-// kMediaNext 下一首；竖排时三个按钮上下排）。横排只有一行时封面在左，歌名和按钮在右。
-// 平时只有播放 / 暂停（居中），点封面才展开上一首、下一首
-struct MediaParts {
-    RectF cover, title, button[3];
-};
+// 先冲过头一点再回弹，像液体一样有点弹性
+double EaseOutBack(double t) {
+    const double c1 = 1.1, c3 = c1 + 1;
+    double u = t - 1;
+    return 1 + c3 * u * u * u + c1 * u * u;
+}
 
-bool MediaButtonShown(int k) { return k == kMediaPlayPause || s_mediaOpen; }
+// 媒体：平时只有封面；点了封面，上一首（kMediaPrevious）、播放 / 暂停（kMediaPlayPause）、下一首（kMediaNext）
+// 从封面中间弹出来，盖在变暗的封面上，各占三分之一（竖排时也是左右排）。鼠标离开封面一会儿后收回去
+struct MediaParts {
+    RectF cover, button[3];
+};
 
 MediaParts MediaLayout() {
     const Layout& L = s_L;
     MediaParts m;
-    float bh = Px(28);
-    if (Vertical()) {
-        float side = Px(kSideCoverSize), bw = Px(36);
-        m.cover = RectF(L.colX + (L.tile - side) / 2, L.mediaY, side, side);
-        m.title = RectF(L.panelX + Px(3), L.mediaY + side + Px(2), L.panelW - Px(6), Px(kSideTitleH));
-        for (int k = 0; k < 3; ++k)
-            m.button[k] = RectF(L.colX + (L.tile - bw) / 2, m.title.GetBottom() + (s_mediaOpen ? k : 0) * bh, bw, bh);
-        return m;
-    }
-    float side = Px(kCoverSize), bw = Px(30);
-    if (L.mediaTall) {
-        float bottom = L.tileY + L.tile + L.rowGap + L.sliderH;
-        // 图标调小了、上下放不下时封面跟着变小，歌名和按钮不重叠
-        side = std::clamp(bottom - bh - L.tileY - Px(2 + 1 + 16), Px(16), side);
-        m.cover = RectF(L.mediaX + (L.mediaW - side) / 2, L.tileY + Px(2), side, side);
-        m.title = RectF(L.mediaX, m.cover.GetBottom() + Px(1), L.mediaW, Px(16));
-        float x0 = L.mediaX + (L.mediaW - 3 * bw) / 2;
-        for (int k = 0; k < 3; ++k) m.button[k] = RectF(x0 + k * bw, bottom - bh, bw, bh);
-        return m;
-    }
-    m.cover = RectF(L.mediaX, L.tileY + (L.tile - side) / 2, side, side);
-    float x = m.cover.GetRight() + Px(6);
-    m.title = RectF(x, L.tileY + Px(2), L.mediaX + L.mediaW - x, Px(16));
-    float x0 = s_mediaOpen ? x : m.title.X + (m.title.Width - bw) / 2 - bw;
-    bh = std::max(Px(16), std::min(bh, L.tile - Px(2 + 16 + 1 + 1)));  // 图标调小了：按钮变矮，不压着歌名
-    for (int k = 0; k < 3; ++k) m.button[k] = RectF(x0 + k * bw, L.tileY + L.tile - bh - Px(1), bw, bh);
+    float side = L.mediaTall ? L.tile + L.rowGap + L.sliderH : L.tile;
+    m.cover = Vertical() ? RectF(L.colX, L.mediaY, side, side) : RectF(L.mediaX, L.tileY, side, side);
+    for (int k = 0; k < 3; ++k) m.button[k] = RectF(m.cover.X + k * side / 3, m.cover.Y, side / 3, side);
     return m;
+}
+
+bool IsMediaPart(int extra) { return extra == kExtraCover || (extra >= kMediaPrevious && extra <= kMediaNext); }
+
+// 按钮弹出的进度：0 只有封面，1 三个按钮都出来了（系统里关了动画效果时一下子到位）
+float MediaOpenness() {
+    float to = s_mediaOpen ? 1.0f : 0.0f;
+    float span = std::fabs(to - s_mediaFrom);
+    if (!AnimationsOn() || span <= 0) return to;
+    double t = (NowMs() - s_mediaStart) / (kMediaMs * span);
+    return t >= 1 ? to : static_cast<float>(s_mediaFrom + (to - s_mediaFrom) * std::max(0.0, t));
+}
+
+bool MediaAnimating() { return s_showMedia && MediaOpenness() != (s_mediaOpen ? 1.0f : 0.0f); }
+
+void StopMediaLeave() {
+    KillTimer(s_hwnd, kTimerMediaClose);
+    s_mediaLeaving = false;
+}
+
+// 按钮弹出着时鼠标离开封面：过一会儿收起（一直在别处动也照样收），回来了就不收
+void MediaHover(bool over) {
+    if (!s_mediaOpen) return;
+    if (over) {
+        StopMediaLeave();
+    } else if (!s_mediaLeaving) {
+        SetTimer(s_hwnd, kTimerMediaClose, kMediaCloseMs, nullptr);
+        s_mediaLeaving = true;
+    }
 }
 
 RectF MediaRect(int k) { return MediaLayout().button[k]; }
@@ -840,20 +852,14 @@ RectF ExtraRect(int extra) {
     if (extra == kExtraIme) return v ? RectF(L.panelX, L.imeY, L.panelW, L.imeH) : RectF(L.imeX, L.tileY, L.imeW, L.tile);
     if (extra == kExtraBattery)
         return v ? RectF(L.panelX, L.battY, L.panelW, L.battH) : RectF(L.battX, L.tileY, L.battW, L.tile);
-    if (extra == kExtraCover) {  // 封面和歌名（横排只有一行时歌名在按钮上面，只算封面）
-        MediaParts m = MediaLayout();
-        if (!v && !L.mediaTall) return m.cover;
-        RectF r;
-        RectF::Union(r, m.cover, m.title);
-        return r;
-    }
+    if (extra == kExtraCover) return MediaLayout().cover;
     return MediaRect(extra);
 }
 
 bool ExtraShown(int extra) {
     if (extra == kExtraIme) return s_showIme;
     if (extra == kExtraBattery) return s_showBattery;
-    if (extra >= kMediaPrevious && extra <= kMediaNext) return s_showMedia && MediaButtonShown(extra);
+    if (extra >= kMediaPrevious && extra <= kMediaNext) return s_showMedia && s_mediaOpen;
     return s_showMedia && extra == kExtraCover;
 }
 
@@ -1340,9 +1346,9 @@ void DrawRadios(Graphics& g) {
     }
 }
 
-// 媒体按钮的图标：上一首、播放 / 暂停、下一首
-void DrawMediaGlyph(Graphics& g, int k, const RectF& box, const Color& c) {
-    float u = Px(1);
+// 媒体按钮的图标：上一首、播放 / 暂停、下一首，以 box 中间为中心放大 scale 倍
+void DrawMediaGlyph(Graphics& g, int k, const RectF& box, const Color& c, float scale) {
+    float u = Px(1) * scale;
     float cx = box.X + box.Width / 2, cy = box.Y + box.Height / 2;
     SolidBrush brush(c);
     if (k == kMediaPlayPause) {
@@ -1363,11 +1369,13 @@ void DrawMediaGlyph(Graphics& g, int k, const RectF& box, const Color& c) {
     FillRound(g, RectF(d > 0 ? cx + 3.5f * u : cx - 5.5f * u, cy - 5 * u, 2 * u, 10 * u), u, c);
 }
 
+float CoverRadius(const RectF& r) { return Win11Style() ? Px(4) : std::min(r.Width * 0.16f, Px(12)); }
+
 // 封面：圆角方块，播放器没给封面时画个音符
 void DrawCover(Graphics& g, const RectF& r) {
     const Palette& pal = Colors();
     GraphicsPath path;
-    AddRoundRect(path, r, Px(7));
+    AddRoundRect(path, r, CoverRadius(r));
     int side = static_cast<int>(std::lround(r.Width));
     if (s_media.cover && (s_media.cover != s_coverFrom || !s_coverScaled ||
                           static_cast<int>(s_coverScaled->GetWidth()) != side)) {
@@ -1398,45 +1406,39 @@ void DrawCover(Graphics& g, const RectF& r) {
     g.FillPolygon(&ink, flag, 4);
 }
 
-// 歌名：没有就写在放还是暂停了；横排一行，竖排最多两行小字，放不下的后面省略
-void DrawMediaTitle(Graphics& g, const RectF& r) {
-    std::wstring text = s_media.title;
-    if (text.empty()) text = s_media.present ? Tr(s_media.playing ? L"正在播放" : L"已暂停") : Tr(L"没有在播放的媒体");
-    bool vertical = Vertical();
-    Font font(s_fontFamily.get(), vertical ? Px(9.5f) : Px(11), FontStyleRegular, UnitPixel);
-    StringFormat format(vertical ? StringFormatFlagsLineLimit : StringFormatFlagsNoWrap);
-    format.SetAlignment(StringAlignmentCenter);
-    format.SetLineAlignment(vertical ? StringAlignmentNear : StringAlignmentCenter);
-    format.SetTrimming(StringTrimmingEllipsisCharacter);
-    DrawLabel(g, text.c_str(), font, r, format, Colors().text);
-}
-
-// 没有在放的东西、播放器不支持的按钮画暗的，点了没反应
+// 平时只画封面（鼠标指着时垫一块淡淡的底，看得出能点）。弹出时封面暗下去，播放 / 暂停先从中间冒出来，
+// 上一首、下一首稍晚一点从中间往两边滑开，冲过头一点再回弹；收起时倒着来。没有在放的东西、播放器不支持的按钮画暗的
 void DrawMedia(Graphics& g) {
     if (!s_showMedia) return;
     const Palette& pal = Colors();
     MediaParts m = MediaLayout();
-    if (s_L.mediaTall) {  // 占两行时垫一块淡淡的底，看得出是一组
-        const Layout& L = s_L;
-        FillRound(g, RectF(L.mediaX - Px(2), L.tileY, L.mediaW + Px(4), L.tile + L.rowGap + L.sliderH), PillRadius(),
-                  pal.pillBottom);
-    }
-    if (s_hoverExtra == kExtraCover) {  // 封面能点：点了展开、收起上一首和下一首
-        RectF r = ExtraRect(kExtraCover);
+    float p = MediaOpenness();
+    if (s_hoverExtra == kExtraCover && !s_mediaOpen) {
+        RectF r = m.cover;
         r.Inflate(Px(2), Px(2));
-        FillRound(g, r, PillRadius(), pal.pillTop);
+        FillRound(g, r, CoverRadius(m.cover) + Px(2), pal.pillTop);
     }
     DrawCover(g, m.cover);
-    DrawMediaTitle(g, m.title);
+    if (p <= 0) return;
+    FillRound(g, m.cover, CoverRadius(m.cover), Color(static_cast<BYTE>(std::lround(150 * p)), 0, 0, 0));
+    float w = m.button[0].Width, size = std::clamp(w / Px(24), 0.75f, 1.5f);
+    PointF center(m.cover.X + m.cover.Width / 2, m.cover.Y + m.cover.Height / 2);
     for (int k = kMediaPrevious; k <= kMediaNext; ++k) {
-        if (!MediaButtonShown(k)) continue;
+        float delay = k == kMediaPlayPause ? 0.0f : 0.3f;
+        float q = std::clamp((p - delay) / (1 - delay), 0.0f, 1.0f);
+        if (q <= 0) continue;
+        float e = static_cast<float>(EaseOutBack(q));
         RectF box = m.button[k];
+        box.X = center.X - w / 2 + (box.X + w / 2 - center.X) * e;  // 从中间滑到自己那一格
         bool enabled = MediaEnabled(k);
-        if (k == s_hoverExtra && enabled) {
-            float d = std::min(box.Width, box.Height) - Px(2);
-            FillRound(g, RectF(box.X + (box.Width - d) / 2, box.Y + (box.Height - d) / 2, d, d), d / 2, pal.pillTop);
+        BYTE alpha = static_cast<BYTE>(std::lround(255 * q * (enabled ? 1.0f : 0.45f)));
+        if (k == s_hoverExtra && enabled && s_mediaOpen) {
+            float hw = w - Px(2), hh = std::min(box.Height - Px(4), w * 1.15f);
+            FillRound(g, RectF(box.X + (w - hw) / 2, box.Y + (box.Height - hh) / 2, hw, hh), std::min(hw, hh) / 2,
+                      Color(static_cast<BYTE>(std::lround(50 * q)), 255, 255, 255));
         }
-        DrawMediaGlyph(g, k, box, enabled ? pal.text : pal.subtle);
+        float scale = size * (k == kMediaPlayPause ? 1.2f : 1.0f) * std::max(0.0f, e);
+        DrawMediaGlyph(g, k, box, Color(alpha, 255, 255, 255), scale);
     }
 }
 
@@ -1928,8 +1930,8 @@ void Render(float slide, BYTE alpha) {
         }
     }
 
-    // 托盘翻页时内容每帧都在动，照常每帧重画
-    bool flipping = TrayFlipping();
+    // 托盘翻页、媒体按钮弹出时内容每帧都在动，照常每帧重画
+    bool flipping = TrayFlipping() || MediaAnimating();
     if (!s_layerValid || s_layer.size() != count || flipping) {
         s_layer.assign(count, 0);
         Bitmap layer(s_width, s_height, s_width * 4, PixelFormat32bppPARGB, reinterpret_cast<BYTE*>(s_layer.data()));
@@ -1958,13 +1960,6 @@ void RequestFrame() {
     if (s_framePosted || !s_hwnd) return;
     s_framePosted = true;
     PostMessageW(s_hwnd, WM_APP_FRAME, 0, 0);
-}
-
-// 先冲过头一点再回弹，像液体一样有点弹性
-double EaseOutBack(double t) {
-    const double c1 = 1.1, c3 = c1 + 1;
-    double u = t - 1;
-    return 1 + c3 * u * u * u + c1 * u * u;
 }
 
 bool MouseButtonDown() {
@@ -2012,6 +2007,7 @@ void HideNow() {
     s_drag = kNone;
     if (GetCapture() == s_hwnd) ReleaseCapture();
     KillTimer(s_hwnd, kTimerClock);
+    StopMediaLeave();
     ShowWindow(s_hwnd, SW_HIDE);
     Attention_Update();
 }
@@ -2046,7 +2042,7 @@ void Frame() {
     }
     SyncPill();
     AdvancePill(now);
-    more = more || PillMoving() || TrayFlipping();
+    more = more || PillMoving() || TrayFlipping() || MediaAnimating();
     s_lastSlide = slide;
     s_lastAlpha = alpha;
     Render(slide, alpha);
@@ -2061,7 +2057,7 @@ void Redraw() {
     if (!s_open) return;
     s_layerValid = false;
     SyncPill();
-    if (s_anim != Anim::None || PillMoving() || TrayFlipping()) RequestFrame();  // 交给动画帧去画
+    if (s_anim != Anim::None || PillMoving() || TrayFlipping() || MediaAnimating()) RequestFrame();  // 交给动画帧去画
     else Render(0, 255);
 }
 
@@ -2218,12 +2214,20 @@ void OpenRadioPanel(int k) {
 
 void EditRelayout();
 
+// 弹出 / 收起媒体按钮（大小不变，按钮在封面上面画），从现在的进度接着播动画
+void SetMediaOpen(bool open) {
+    StopMediaLeave();
+    if (open == s_mediaOpen) return;
+    s_mediaFrom = MediaOpenness();
+    s_mediaStart = NowMs();
+    s_mediaOpen = open;
+    Redraw();
+}
+
 // 点了媒体按钮、封面、输入法：发命令、展开收起上一首下一首或者切换中英文，马上按新的样子画
 void ClickExtra(int extra) {
     if (extra == kExtraCover) {
-        s_mediaOpen = !s_mediaOpen;
-        if (Vertical()) EditRelayout();  // 竖排时媒体那段变高变矮；横排大小不变，按钮换个地方画
-        else Redraw();
+        SetMediaOpen(!s_mediaOpen);
         return;
     }
     if (extra == kExtraIme) {
@@ -2873,6 +2877,9 @@ void SetEditing(bool on) {
     }
     s_editing = on;
     s_editHover = kPartNone;
+    s_mediaOpen = false;  // 编辑模式里媒体只有封面
+    s_mediaFrom = 0;
+    StopMediaLeave();
     if (on) {
         HideThumb();
         s_hover = -1;
@@ -3469,6 +3476,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else if (wParam == kTimerPreview) {
                 KillTimer(hwnd, kTimerPreview);
                 if (s_preview) Popup_Hide();
+            } else if (wParam == kTimerMediaClose) {
+                SetMediaOpen(false);
             } else if (wParam == kTimerThumb) {
                 if (s_thumbWant) ShowThumbNow();
                 else HideThumb();
@@ -3565,6 +3574,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bool free = hit < 0 && control == kNone && radio < 0 && extra == kExtraNone;
             int tray = free ? TrayAt(x, y) : -1;
             bool overTray = free && OverTray(x, y);
+            MediaHover(IsMediaPart(extra));
             if (hit != s_hover || control != s_hoverControl || radio != s_hoverRadio || extra != s_hoverExtra ||
                 tray != s_hoverTray || overTray != s_overTray) {
                 if (radio != s_hoverRadio && s_hoverRadio >= 0) s_radioFailed &= ~(1 << s_radioIds[s_hoverRadio]);
@@ -3592,6 +3602,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_hoverExtra = kExtraNone;
             s_hoverTray = -1;
             s_overTray = false;
+            MediaHover(false);
             Redraw();
             return 0;
 
@@ -3946,6 +3957,8 @@ void LoadModules(bool preview) {
     // 输入法看弹出前的前台窗口；没有电池不显示电量
     s_media = mods.media ? Media_Get() : MediaInfo();
     s_mediaOpen = false;
+    s_mediaFrom = 0;
+    StopMediaLeave();
     SyncMediaShown();
     if (mods.media && !preview) Media_Query();
     s_imeTarget = s_prevForeground;

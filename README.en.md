@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find what's playing: its cover art and title above pause / play; click the cover to show previous and next, and again to hide them. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size. There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first), and the mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
+Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size. There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first), and the mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 
@@ -128,7 +128,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
 | Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the system's network list or Bluetooth device list (Bluetooth on Windows 10 opens Settings) |
-| Media | Click the cover to show / hide previous and next; the buttons pause / play and skip |
+| Media | Click the cover for previous, pause / play and next; they hide when the mouse leaves |
 | Input mode | Click to switch between native and English input |
 | Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
 | F2 | Enter or leave edit mode: drag edges to resize, items to reorder, empty space to move |

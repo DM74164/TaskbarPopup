@@ -127,7 +127,7 @@ const wchar_t* const kEnglish[][2] = {
     {L"鼠标停在屏幕边上时弹出", L"Show when the mouse rests on the screen edge"},
     {L"任务栏藏着时，鼠标在迷你任务栏那条边上停一下", L"While the taskbar is hidden, rest the mouse on the mini taskbar's edge"},
     {L"显示正在播放的媒体", L"Show now playing"},
-    {L"点封面展开上一首、下一首", L"Click the cover for previous and next"},
+    {L"点封面弹出切歌和暂停", L"Click the cover for playback controls"},
     {L"显示输入法中英文", L"Show input mode"},
     {L"点一下切换中英文", L"Click to switch between native and English input"},
     {L"显示电量", L"Show battery"},
