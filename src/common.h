@@ -60,8 +60,9 @@ struct ScreenPlace {
 inline bool operator==(const ScreenPlace& a, const ScreenPlace& b) {
     return a.key == b.key && a.edge == b.edge && a.align == b.align && a.offset == b.offset;
 }
-// 迷你任务栏里能排顺序的模块（编辑模式里拖着换位置），开始按钮总在最前面；后面几样（输入法、电量、时钟）挨着时中间没有分隔线
-enum Module { kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock, kModuleCount };
+// 迷你任务栏里能排顺序的模块（编辑模式里拖着换位置），开始按钮总在最前面；后面几样（输入法、电量、时钟）挨着时中间没有分隔线。
+// kModLevels：底部时竖着放在图标那一行的音量、亮度调节条（横着的在下面一行，侧边时在最下面，都不算模块）
+enum Module { kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock, kModLevels, kModuleCount };
 constexpr int kMinLongPressMs = 200;
 constexpr int kMaxLongPressMs = 5000;
 constexpr int kDefaultLongPressMs = 1000;
@@ -73,13 +74,16 @@ constexpr int kDefaultIconGap = 4;
 // 迷你任务栏显示哪些、按什么顺序：放在底部和侧边时各一份（Settings::modules 的下标见 ModuleSide）
 struct ModuleSet {
     bool tray = true;     // 系统托盘“隐藏的图标”里的那些
-    bool levels = true;   // 音量和亮度调节
+    bool volume = true;          // 音量调节条
+    bool brightness = true;      // 亮度调节条
+    bool volumeVertical = false;  // 底部时音量条竖着放在图标那一行（侧边时总是竖着，不用这两项）
+    bool brightVertical = false;
     bool radios = true;   // Wi-Fi 和蓝牙开关
     bool media = true;    // 正在播放的媒体
     bool ime = true;      // 输入法的中英文状态
     bool battery = true;  // 电量（没有电池时不显示）
     bool clock = true;    // 时钟
-    int order[kModuleCount] = {kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock};  // 模块的顺序，见 Module
+    int order[kModuleCount] = {kModWindows, kModTray, kModMedia, kModIme, kModBattery, kModClock, kModLevels};  // 模块的顺序，见 Module
 };
 enum ModuleSide { kSideBottom, kSideEdge };
 inline int ModuleSideOf(int edge) { return edge == kEdgeBottom ? kSideBottom : kSideEdge; }
@@ -399,6 +403,7 @@ void Popup_Destroy();
 void Popup_Show();
 void Popup_Hide();
 void Popup_Toggle();
+void Popup_Edit();  // 弹出来直接进编辑模式（设置里的“编辑”按钮）
 // 任务栏藏着时短按了 Win：先弹出迷你任务栏，弹完再打开开始菜单（开始菜单开着时迷你任务栏一直在）；
 // 任务栏没藏着、开始菜单已经开着时照常补发 Win
 void Popup_StartMenu(DWORD vk);

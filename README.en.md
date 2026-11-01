@@ -44,7 +44,7 @@ The icons hidden in the system tray are in the mini taskbar too, stacked four at
 
 ### Volume, brightness, Wi-Fi and Bluetooth
 
-Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list.
+Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list. Volume and brightness can be turned off separately on the Status & controls page of Settings. With the mini taskbar at the bottom, click "Vertical" to make one a tall bar that sits in the icon row.
 
 ![Drag to set the volume, click to turn Wi-Fi off and on, right-click for the network list](docs/demo/en/quick.webp)
 
@@ -92,10 +92,10 @@ Choose liquid glass or the original Windows 11 look (the system's acrylic: a sol
 
 ### Edit mode
 
-Press F2 while the mini taskbar is open to arrange it your way:
+Press F2 while the mini taskbar is open, or click "Edit" on the Size & position page of Settings, to arrange it your way:
 
 - Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it.
-- Drag the tray icons, media, input mode, battery or clock to reorder them, or drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too. The bottom and the screen sides remember this separately.
+- Drag the tray icons, media, input mode, battery, clock or the vertical volume and brightness bars to reorder them: the one you drag follows the mouse and the others slide aside. Drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too. The bottom and the screen sides remember this separately.
 - Drag the window icons or empty space to slide the whole panel anywhere along the screen edge; it snaps to the center and the ends. Double-click to reset.
 - Right-click to choose what shows, or reset the order and position. Press Enter or Esc when you're done.
 
@@ -170,7 +170,7 @@ Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini t
 - **Media** shows only what appears in the system's volume flyout (most browsers and players do).
 - **Input mode**: a few third-party IMEs manage Chinese / English themselves, so the indicator may be off and clicking may not switch. Use the IME's own shortcut then.
 - **Tray icons** are clicked for you in the system tray through UI Automation, which may miss for a few programs. If it does, try once with the diagnostic log on.
-- **The mini taskbar's glass background** is a snapshot from when it opened, so a video playing behind it won't move.
+- **The mini taskbar's glass background** follows what's behind it in real time, like the Settings window. This needs Windows 10 2004 or later; on older versions it's a snapshot from when it opened.
 - **Antivirus false positives**: the exe isn't signed and uses keyboard and mouse hooks (only to detect holding Win and your hotkeys; no keys are recorded or sent anywhere). Release builds are compiled from source by GitHub Actions. If it's blocked, allow it in Windows Security → Protection history.
 - **Taskbar missing after force-killing the app**: start the app again and it restores everything.
 

@@ -375,7 +375,7 @@ void EnsureUnicodeIni() {
 
 namespace {
 
-const wchar_t* const kModuleKeys[kModuleCount] = {L"windows", L"tray", L"media", L"ime", L"battery", L"clock"};
+const wchar_t* const kModuleKeys[kModuleCount] = {L"windows", L"tray", L"media", L"ime", L"battery", L"clock", L"levels"};
 
 // 模块的顺序：名字用逗号隔开。认不出的跳过，没写到的按默认顺序补在后面
 void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
@@ -396,14 +396,23 @@ void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
         if (!used[m]) order[n++] = m;
 }
 
-// 底部那份用原来的键，侧边那份在键前面加 Side；侧边没写过的跟着底部
+// 底部那份用原来的键，侧边那份在键前面加 Side；侧边没写过的跟着底部。
+// oldKey：旧版本音量、亮度共用一个开关 ShowLevels，新键没写过时照它
 struct ModuleKey {
     const wchar_t* key;
     bool ModuleSet::*item;
+    bool def = true;
+    const wchar_t* oldKey = nullptr;
 };
-const ModuleKey kModuleSetKeys[] = {{L"TrayIcons", &ModuleSet::tray},     {L"ShowLevels", &ModuleSet::levels},
-                                    {L"ShowRadios", &ModuleSet::radios},  {L"ShowMedia", &ModuleSet::media},
-                                    {L"ShowIme", &ModuleSet::ime},        {L"ShowBattery", &ModuleSet::battery},
+const ModuleKey kModuleSetKeys[] = {{L"TrayIcons", &ModuleSet::tray},
+                                    {L"ShowVolume", &ModuleSet::volume, true, L"ShowLevels"},
+                                    {L"ShowBrightness", &ModuleSet::brightness, true, L"ShowLevels"},
+                                    {L"VolumeVertical", &ModuleSet::volumeVertical, false},
+                                    {L"BrightVertical", &ModuleSet::brightVertical, false},
+                                    {L"ShowRadios", &ModuleSet::radios},
+                                    {L"ShowMedia", &ModuleSet::media},
+                                    {L"ShowIme", &ModuleSet::ime},
+                                    {L"ShowBattery", &ModuleSet::battery},
                                     {L"ShowClock", &ModuleSet::clock}};
 std::wstring SideKey(const wchar_t* key) { return std::wstring(L"Side") + key; }
 
@@ -442,9 +451,12 @@ void LoadSettings() {
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
     for (const ModuleKey& k : kModuleSetKeys) {
-        bool bottom = GetPrivateProfileIntW(L"General", k.key, 1, f.c_str()) != 0;
+        int def = k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", k.oldKey, k.def, f.c_str())) : k.def;
+        bool bottom = GetPrivateProfileIntW(L"General", k.key, def, f.c_str()) != 0;
         g_settings.modules[kSideBottom].*k.item = bottom;
-        g_settings.modules[kSideEdge].*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), bottom, f.c_str()) != 0;
+        int sideDef = k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", SideKey(k.oldKey).c_str(), bottom, f.c_str()))
+                               : bottom;
+        g_settings.modules[kSideEdge].*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), sideDef, f.c_str()) != 0;
     }
     g_settings.clockSeconds = GetPrivateProfileIntW(L"General", L"ClockSeconds", 0, f.c_str()) != 0;
     g_settings.clockWeekday = GetPrivateProfileIntW(L"General", L"ClockWeekday", 0, f.c_str()) != 0;
@@ -654,7 +666,8 @@ const wchar_t* const kLookKeys[] = {
     L"TrayIcons",   L"TrayStyle",   L"ShowMedia",         L"ShowIme",     L"ShowBattery",  L"ShowClock",   L"ClockSeconds",
     L"ClockWeekday", L"ClockDate",  L"ShowLevels",        L"ShowRadios",  L"PopupEdge",    L"PopupAlign",  L"PopupOffset",
     L"SideModuleOrder", L"SideTrayIcons", L"SideShowMedia", L"SideShowIme", L"SideShowBattery", L"SideShowClock",
-    L"SideShowLevels",  L"SideShowRadios", L"PopupPerScreen", L"ScreenPlaces"};
+    L"SideShowLevels",  L"SideShowRadios", L"PopupPerScreen", L"ScreenPlaces", L"ShowVolume", L"ShowBrightness",
+    L"VolumeVertical", L"BrightVertical", L"SideShowVolume", L"SideShowBrightness", L"SideVolumeVertical", L"SideBrightVertical"};
 
 std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 
@@ -742,7 +755,11 @@ bool ImportSettings(const std::wstring& path) {
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
     // 旧版本导出的没有侧边那份：先删掉现在的，读的时候跟着导入的底部
-    for (const ModuleKey& k : kModuleSetKeys) WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), nullptr, f.c_str());
+    // 音量、亮度分开的开关也是：旧版本导出的只有 ShowLevels，删掉现在的才会照它
+    for (const ModuleKey& k : kModuleSetKeys) {
+        WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), nullptr, f.c_str());
+        if (k.oldKey) WritePrivateProfileStringW(L"General", k.key, nullptr, f.c_str());
+    }
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), nullptr, f.c_str());
     // 快捷键也先删掉：旧版本导出的没有后加的几个，留着现在的可能和导入的撞上
     for (const wchar_t* key : kHotkeyKeys)

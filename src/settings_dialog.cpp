@@ -50,9 +50,9 @@ const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏",
                                                L"外观",   L"方案和备份", L"快捷键",     L"启动和更新"};
 
 // 开关
-enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kLevels, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
+enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kVolume, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
              kAlwaysHide, kFlashAlert, kEdgePopup, kMedia, kIme, kBattery, kClock, kClockSeconds, kClockWeekday, kClockDate,
-             kShowTitle, kKeepOtherBars, kMarkScreens, kBrightAll, kToggleCount };
+             kShowTitle, kKeepOtherBars, kMarkScreens, kBrightAll, kBright, kVolumeVertical, kBrightVertical, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -63,7 +63,7 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"固定的小窗口在所有窗口上面", nullptr},
     {L"长按 Win 键弹出迷你任务栏", L"左键单击托盘图标也能弹出"},
     {L"显示固定在任务栏的应用", nullptr},
-    {L"显示音量和亮度调节", nullptr},
+    {L"显示音量调节", nullptr},
     {L"显示 Wi-Fi 和蓝牙开关", L"右键按钮弹出网络、蓝牙列表"},
     {L"显示托盘里隐藏的图标", L"左键、右键和在系统托盘里点一样"},
     {L"开机自动启动", nullptr},
@@ -83,6 +83,9 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"其它屏幕的任务栏照常显示", L"Edge、Chrome 这类程序最大化时还是一起藏"},
     {L"标出其它屏幕上的窗口", L"图标右上角显示屏幕编号"},
     {L"所有屏幕亮度一起调", nullptr},
+    {L"显示亮度调节", nullptr},
+    {L"竖排", nullptr},  // 音量、亮度各一个小胶囊，只在底部时有
+    {L"竖排", nullptr},
 };
 
 // 滑块
@@ -141,7 +144,7 @@ const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 
 // 能点的东西
 enum Kind {
     kNoItem, kToggleRow, kSliderRow, kSegment, kHotkeyRow, kHotkeyClear, kHotkeyMode, kCheckNow, kChip, kAddChip, kClose,
-    kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip, kScreenChip
+    kNav, kSwatch, kPreset, kAddPreset, kFile, kToggleChip, kScreenChip, kEditMini
 };
 struct Item {
     Kind kind = kNoItem;
@@ -173,9 +176,15 @@ struct SideToggle {
     int toggle;
     bool ModuleSet::*item;
 };
-const SideToggle kSideToggles[] = {{kTray, &ModuleSet::tray},       {kLevels, &ModuleSet::levels},
-                                   {kRadios, &ModuleSet::radios},   {kMedia, &ModuleSet::media},
-                                   {kIme, &ModuleSet::ime},         {kBattery, &ModuleSet::battery},
+const SideToggle kSideToggles[] = {{kTray, &ModuleSet::tray},
+                                   {kVolume, &ModuleSet::volume},
+                                   {kBright, &ModuleSet::brightness},
+                                   {kVolumeVertical, &ModuleSet::volumeVertical},
+                                   {kBrightVertical, &ModuleSet::brightVertical},
+                                   {kRadios, &ModuleSet::radios},
+                                   {kMedia, &ModuleSet::media},
+                                   {kIme, &ModuleSet::ime},
+                                   {kBattery, &ModuleSet::battery},
                                    {kClock, &ModuleSet::clock}};
 const SideToggle* FindSideToggle(int toggle) {
     for (const SideToggle& t : kSideToggles)
@@ -364,6 +373,17 @@ float ToggleRow(int which, float x, float y, float w) {
     return h;
 }
 
+// 音量、亮度：开关左边一个“竖排”小胶囊（迷你任务栏在底部、开着时才有；侧边时总是竖着）
+float LevelRow(int which, int vertical, float x, float y, float w) {
+    float h = ToggleRow(which, x, y, w);
+    if (s_v.seg[kSegSide] == kSideBottom && s_v.on[which]) {
+        float cw = MeasureWidth(Tr(kToggleText[vertical].label), Px(12.5f)) + Px(28), ch = Px(kChipH);
+        float cx = x + w - Px(kRowPad) - Px(40) - Px(12) - cw;
+        s_items.push_back({kToggleChip, vertical, RectF(cx, y + (h - ch) / 2, cw, ch)});
+    }
+    return h;
+}
+
 float SliderRow(int which, float x, float y, float w) {
     float h = Px(56);
     s_items.push_back({kSliderRow, which, RectF(x, y, w, h)});
@@ -513,13 +533,21 @@ float FileRow(float x, float y, float w) {
 // 迷你任务栏大小和长度：在它的编辑模式里拖边改，这里只说怎么改、现在多大
 float SizeRow(float x, float y, float w) {
     float pad = Px(kRowPad);
-    s_texts.push_back({Tr(L"大小"), RectF(x + pad, y + Px(8), w - 2 * pad, Px(20)), 4});
-    s_texts.push_back({L"", RectF(x + pad, y + Px(8), w - 2 * pad, Px(20)), 5});
-    // 说明一行放不下就换行
-    std::wstring hint = Tr(L"弹出后按 F2：拖边改大小，拖模块排顺序，拖空白处挪位置");
+    s_texts.push_back({Tr(L"大小"), RectF(x + pad, y + Px(11), w - 2 * pad, Px(20)), 4});
+    s_texts.push_back({L"", RectF(x + pad, y + Px(11), w - 2 * pad, Px(20)), 5});
+    return Px(42);
+}
+
+// 编辑模式：右边一个按钮弹出迷你任务栏进编辑模式（弹出后按 F2 也行），下面一行说明能做什么
+float EditRow(float x, float y, float w) {
+    float pad = Px(kRowPad), bh = Px(28);
+    float bw = MeasureWidth(Tr(L"编辑"), Px(12.5f)) + Px(40), bx = x + w - pad - bw;
+    s_texts.push_back({Tr(L"编辑模式"), RectF(x + pad, y + Px(4), bx - x - pad, Px(42)), 4});
+    s_items.push_back({kEditMini, 0, RectF(bx, y + Px(11), bw, bh)});
+    std::wstring hint = Tr(L"拖边改大小，拖模块排顺序，拖空白处挪位置。弹出后按 F2 也能进入");
     bool wrap = MeasureWidth(hint, Px(11.5f)) > w - 2 * pad;
-    s_texts.push_back({hint, RectF(x + pad, y + Px(30), w - 2 * pad, Px(wrap ? 34 : 18)), 1});
-    return Px(wrap ? 70 : 56);
+    s_texts.push_back({hint, RectF(x + pad, y + Px(44), w - 2 * pad, Px(wrap ? 34 : 18)), 1});
+    return Px(wrap ? 82 : 66);
 }
 
 // 每块屏幕分别设置时：说明现在改的是哪块屏幕
@@ -590,7 +618,8 @@ float BuildPage(int page, float x, float y) {
             y = AddGroup(x, y, L"显示",
                          {[](float x, float y, float w) { return SegRow(kSegSide, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kLevels, x, y, w); },
+                          [](float x, float y, float w) { return LevelRow(kVolume, kVolumeVertical, x, y, w); },
+                          [](float x, float y, float w) { return LevelRow(kBright, kBrightVertical, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kMedia, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kIme, x, y, w); },
@@ -602,7 +631,7 @@ float BuildPage(int page, float x, float y) {
         }
         case kPageSize: {
             y = AddGroup(x, y, L"大小",
-                         {SizeRow, [](float x, float y, float w) { return SliderRow(kIconSize, x, y, w); },
+                         {SizeRow, EditRow, [](float x, float y, float w) { return SliderRow(kIconSize, x, y, w); },
                           [](float x, float y, float w) { return SliderRow(kIconGap, x, y, w); },
                           [](float x, float y, float w) { return ToggleRow(kShowTitle, x, y, w); }});
             std::vector<RowFn> place;
@@ -745,7 +774,9 @@ bool Enabled(const Item& it) {
 Item HitTest(int x, int y) {
     PointF pt(static_cast<float>(x), static_cast<float>(y));
     // “立即检查”、快捷键的小叉在一整行上面，先看它们
-    auto onTop = [](const Item& it) { return it.kind == kCheckNow || it.kind == kHotkeyClear || it.kind == kHotkeyMode; };
+    auto onTop = [](const Item& it) {
+        return it.kind == kCheckNow || it.kind == kHotkeyClear || it.kind == kHotkeyMode || it.kind == kToggleChip;
+    };
     for (const Item& it : s_items)
         if (onTop(it) && it.rect.Contains(pt) && Enabled(it)) return it;
     for (const Item& it : s_items)
@@ -814,6 +845,9 @@ void DrawToggleRow(Graphics& g, const Item& it) {
     float textW = r.Width - 2 * Px(kRowPad) - Px(50);
     if (it.index == kUpdates)
         if (const Item* check = FindItem({kCheckNow, 0})) textW = check->rect.X - r.X - Px(kRowPad) - Px(6);
+    if (it.index == kVolume || it.index == kBright)  // 别压到“竖排”
+        if (const Item* chip = FindItem({kToggleChip, it.index == kVolume ? kVolumeVertical : kBrightVertical}))
+            textW = chip->rect.X - r.X - Px(kRowPad) - Px(6);
     if (t.sub) {
         float x = r.X + Px(kRowPad);
         DrawText(g, Tr(t.label), Px(13.5f), FontStyleRegular, RectF(x, r.Y + Px(8), textW, Px(20)), pal.text);
@@ -1047,9 +1081,10 @@ void DrawButton(Graphics& g, const Item& it) {
         DrawText(g, Tr(L"立即检查"), Px(12.5f), FontStyleRegular, r, pal.accent, StringAlignmentCenter);
         return;
     }
-    // 导入、导出
+    // 导入、导出、编辑迷你任务栏
     DrawCard(g, r, r.Height / 2, hot ? pal.buttonHot : pal.button, pal.cardRim);
-    DrawText(g, Tr(it.index ? L"导出…" : L"导入…"), Px(12.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
+    const wchar_t* label = it.kind == kEditMini ? L"编辑" : it.index ? L"导出…" : L"导入…";
+    DrawText(g, Tr(label), Px(12.5f), FontStyleRegular, r, pal.text, StringAlignmentCenter);
 }
 
 void DrawContent(Graphics& g) {
@@ -1537,7 +1572,9 @@ void SetToggle(int which, bool on) {
     s_knobStart[which] = NowMs();
     StartAnimation();
     // 跟着收起 / 放出来的行；“最大化或全屏时隐藏任务栏”换的是下面那个名单
-    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kClock) Relayout(true);
+    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kClock || which == kVolume ||
+        which == kBright)
+        Relayout(true);
     // 显示哪些、时钟显示什么：弹出来看看
     if (which == kShowTitle || FindSideToggle(which) || which == kClockSeconds || which == kClockWeekday ||
         which == kClockDate)
@@ -2240,6 +2277,9 @@ void Activate(const Item& it) {
         case kFile:
             if (it.index == 0) ImportFile();
             else ExportFile();
+            return;
+        case kEditMini:
+            Popup_Edit();
             return;
         case kNav: SetPage(it.index); return;
         case kChip: RemoveExclude(it.index); return;
