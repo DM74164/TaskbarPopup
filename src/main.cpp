@@ -135,9 +135,9 @@ void HandleCommand(UINT id) {
             }
             break;
         case ID_OPENLOG: {
-            // 打开日志所在的文件夹并选中它
-            std::wstring args = L"/select,\"" + LogFile() + L"\"";
-            ShellExecuteW(nullptr, nullptr, L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+            // 打开日志所在的文件夹并选中它。交给资源管理器以普通权限打开：本程序是管理员时直接启动 explorer.exe，
+            // 会多出一个管理员权限的资源管理器进程，它会把桌面图标藏掉（“显示桌面图标”仍勾着）
+            OpenFileLocation(LogFile());
             break;
         }
         case ID_EXIT:
