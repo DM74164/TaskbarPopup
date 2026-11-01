@@ -1151,6 +1151,50 @@ void DesktopIcons_EmergencyShow() {
     if (HWND list = s_hiddenNow.exchange(nullptr)) ShowWindowAsync(list, SW_SHOWNA);  // 记号留着，下次启动时再看一眼
 }
 
+namespace {
+// 桌面放图标的列表窗口（不经过 COM，主线程上每次定时检查都能用）。墙纸软件会把它挪到 WorkerW 里
+HWND FindIconList() {
+    HWND defView = FindWindowExW(GetShellWindow(), nullptr, L"SHELLDLL_DefView", nullptr);
+    for (HWND w = nullptr; !defView && (w = FindWindowExW(nullptr, w, L"WorkerW", nullptr)) != nullptr;)
+        defView = FindWindowExW(w, nullptr, L"SHELLDLL_DefView", nullptr);
+    return defView ? FindWindowExW(defView, nullptr, L"SysListView32", nullptr) : nullptr;
+}
+
+DWORD ReadDword(HKEY root, const wchar_t* key, const wchar_t* name) {
+    DWORD value = 0, size = sizeof(value);
+    return RegGetValueW(root, key, name, RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS ? value : 0;
+}
+
+// “显示桌面图标”开着（右键桌面 → 查看），也没有策略禁用桌面
+bool IconsWanted() {
+    constexpr wchar_t kAdvanced[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
+    constexpr wchar_t kPolicy[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer";
+    return !ReadDword(HKEY_CURRENT_USER, kAdvanced, L"HideIcons") && !ReadDword(HKEY_CURRENT_USER, kPolicy, L"NoDesktop") &&
+           !ReadDword(HKEY_LOCAL_MACHINE, kPolicy, L"NoDesktop");
+}
+
+DWORD s_strayHiddenAt = 0;  // 发现图标窗口被藏着（不是本程序藏的）的时间，0 = 没有
+}  // namespace
+
+// 主线程定时检查：图标窗口不是本程序藏的、“显示桌面图标”也开着，却一直藏着，就显示回来。
+// 本程序藏着图标期间打开文件管理器窗口以后，资源管理器有时会在图标显示回来几秒后又把它藏掉（右键菜单里仍勾着）
+void DesktopIcons_Watch() {
+    HWND list = FindIconList();
+    if (!list || IsWindowVisible(list) || s_hiddenNow || !IsWindowVisible(GetParent(list))) {
+        s_strayHiddenAt = 0;
+        return;
+    }
+    DWORD now = GetTickCount();
+    if (!s_strayHiddenAt) {
+        s_strayHiddenAt = now ? now : 1;
+        return;
+    }
+    if (now - s_strayHiddenAt < 1500 || !IconsWanted()) return;  // 刚启动的资源管理器可能还没显示出来
+    s_strayHiddenAt = 0;
+    Log(L"桌面图标被藏起来了（不是本程序藏的，“显示桌面图标”开着），显示回来");
+    ShowWindowAsync(list, SW_SHOWNA);
+}
+
 void DesktopIcons_Finish(DWORD ms) {
     if (!s_thread) return;
     {

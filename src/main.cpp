@@ -241,6 +241,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kTimerFullscreen) {
                 Fullscreen_Check();
+                DesktopIcons_Watch();
             } else if (wParam == kTimerShowPopup) {
                 KillTimer(hwnd, kTimerShowPopup);
                 Popup_Show();
