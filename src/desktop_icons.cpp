@@ -1151,6 +1151,62 @@ void DesktopIcons_EmergencyShow() {
     if (HWND list = s_hiddenNow.exchange(nullptr)) ShowWindowAsync(list, SW_SHOWNA);  // 记号留着，下次启动时再看一眼
 }
 
+namespace {
+// 一个窗口的样子：句柄、自己有没有 WS_VISIBLE（v / h）、位置大小
+std::wstring WindowText(HWND hwnd) {
+    RECT r = {};
+    GetWindowRect(hwnd, &r);
+    wchar_t text[96];
+    swprintf(text, ARRAYSIZE(text), L"%p %ls (%ld,%ld)-(%ld,%ld)", static_cast<void*>(hwnd),
+             (GetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE) ? L"v" : L"h", r.left, r.top, r.right, r.bottom);
+    return text;
+}
+
+// 放图标的那几层窗口：Progman / WorkerW → SHELLDLL_DefView → SysListView32
+std::wstring DesktopChain(HWND top) {
+    std::wstring out = GetClassNameStr(top) + L" " + WindowText(top);
+    for (HWND child = nullptr; (child = FindWindowExW(top, child, nullptr, nullptr)) != nullptr;) {
+        std::wstring cls = GetClassNameStr(child);
+        if (cls != L"SHELLDLL_DefView" && cls != L"WorkerW") continue;
+        out += L" > " + cls + L" " + WindowText(child);
+        if (cls != L"SHELLDLL_DefView") continue;
+        if (HWND list = FindWindowExW(child, nullptr, L"SysListView32", nullptr)) {
+            DWORD_PTR count = 0;
+            SendMessageTimeoutW(list, LVM_GETITEMCOUNT, 0, 0, SMTO_ABORTIFHUNG, 50, &count);
+            wchar_t extra[48];
+            swprintf(extra, ARRAYSIZE(extra), L"，%llu 个图标", static_cast<unsigned long long>(count));
+            out += L" > 图标 " + WindowText(list) + extra;
+        }
+    }
+    return out;
+}
+
+std::wstring s_lastDesktop;  // 上次记下的桌面窗口的样子
+}  // namespace
+
+// 诊断：桌面那几层窗口（显示 / 隐藏、位置、父窗口）一变就记一行，查图标被谁藏掉
+void DesktopIcons_LogWindows() {
+    if (!g_settings.debugLog) {
+        s_lastDesktop.clear();
+        return;
+    }
+    std::wstring now;
+    HWND progman = GetShellWindow();
+    if (progman) now += DesktopChain(progman);
+    for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"WorkerW", nullptr)) != nullptr;)
+        if (FindWindowExW(w, nullptr, L"SHELLDLL_DefView", nullptr) || (GetWindowLongW(w, GWL_STYLE) & WS_VISIBLE))
+            now += L" | " + DesktopChain(w);
+    DWORD hide = 0, size = sizeof(hide);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"HideIcons",
+                 RRF_RT_REG_DWORD, nullptr, &hide, &size);
+    now += hide ? L" | 设置：不显示桌面图标" : L"";
+    if (s_hiddenNow) now += L" | 本程序藏着图标";
+    if (now == s_lastDesktop) return;
+    s_lastDesktop = now;
+    HWND fg = GetForegroundWindow();
+    Log(L"诊断：桌面窗口 %ls（前台 %ls %ls）", now.c_str(), GetClassNameStr(fg).c_str(), GetProcessPath(fg).c_str());
+}
+
 void DesktopIcons_Finish(DWORD ms) {
     if (!s_thread) return;
     {

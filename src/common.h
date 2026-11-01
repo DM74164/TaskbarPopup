@@ -261,6 +261,7 @@ void DesktopIcons_Recover();           // 上次藏起的桌面图标没显示�
 void DesktopIcons_DisplayChanged();    // 主线程，显示器变了（WM_DISPLAYCHANGE）：接上了第二块屏的话藏着的图标马上显示
 // 一直隐藏任务栏时自动隐藏一直开着、桌面一直要用，不藏图标（位置照样记、照样摆回去）；藏着的马上显示
 void DesktopIcons_KeepShown(bool keep);
+void DesktopIcons_LogWindows();        // 主线程定时，诊断：桌面那几层窗口变了就记一行
 void DesktopIcons_EmergencyShow();     // 崩溃时：藏着的桌面图标直接显示（不摆位置）
 void DesktopIcons_Finish(DWORD ms);     // 退出时：摆回去并结束线程，最多等 ms 毫秒
 
