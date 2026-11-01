@@ -201,8 +201,55 @@ bool RelaunchUnelevated() {
     return false;
 }
 
+namespace {
+bool EndsWithI(const std::wstring& s, const wchar_t* tail) {
+    size_t n = wcslen(tail);
+    return s.size() >= n && _wcsicmp(s.c_str() + s.size() - n, tail) == 0;
+}
+
+bool IsExplorerExe(const std::wstring& path) {
+    return _wcsicmp(path.c_str(), L"explorer.exe") == 0 || EndsWithI(path, L"\\explorer.exe");
+}
+
+// 文件资源管理器本身（不带参数）：开始菜单里的“文件资源管理器”、任务栏上固定的、explorer.exe
+bool IsExplorerApp(const std::wstring& target) {
+    if (_wcsicmp(target.c_str(), L"shell:AppsFolder\\Microsoft.Windows.Explorer") == 0 || IsExplorerExe(target)) return true;
+    if (!EndsWithI(target, L".lnk")) return false;
+    Ref<IShellLinkW> link;
+    Ref<IPersistFile> file;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link.p))) ||
+        FAILED(link->QueryInterface(IID_PPV_ARGS(&file.p))) || FAILED(file->Load(target.c_str(), STGM_READ)))
+        return false;
+    wchar_t path[MAX_PATH] = {}, args[MAX_PATH] = {};
+    if (link->GetPath(path, MAX_PATH, nullptr, SLGP_RAWPATH) != S_OK || FAILED(link->GetArguments(args, MAX_PATH))) return false;
+    return IsExplorerExe(path) && !*args;
+}
+
+// 按 Win+E 时打开的位置（文件夹选项里“打开文件资源管理器时打开”）
+std::wstring ExplorerStartFolder() {
+    DWORD to = 0, size = sizeof(to);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"LaunchTo",
+                 RRF_RT_REG_DWORD, nullptr, &to, &size);
+    if (to == 1) return L"shell:MyComputerFolder";
+    if (to == 3) return L"shell:Downloads";
+    constexpr wchar_t kHome[] = L"shell:::{f874310e-b6b7-47dc-bc84-b9e6b38f5903}";  // Win11 的“主文件夹”
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (SUCCEEDED(SHParseDisplayName(kHome, nullptr, &pidl, 0, nullptr))) {
+        CoTaskMemFree(pidl);
+        return kHome;
+    }
+    return L"shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}";  // Win10 的“快速访问”
+}
+}  // namespace
+
 void LaunchAsUser(const std::wstring& target, const std::wstring& args, const std::wstring& dir) {
     AllowSetForegroundWindow(ASFW_ANY);  // 让新启动的程序能拿到前台
+    // 不带参数启动文件资源管理器：改成打开 Win+E 打开的那个位置，由正在运行的资源管理器在自己的进程里开窗口。
+    // 另起一个 explorer.exe 进程的话，有的电脑上（装了 Wallpaper Engine 之类）桌面图标会被藏掉
+    if (args.empty() && IsExplorerApp(target)) {
+        LaunchAsUser(ExplorerStartFolder());
+        return;
+    }
     if (IsElevated()) {
         if (ShellExecuteViaExplorer(target, args, dir)) return;
         // 资源管理器没在运行（正在重启）时不能退回到自己启动：那样启动的程序也是管理员权限

@@ -2,6 +2,9 @@
 // 读它跳转列表里的“最近”项（IApplicationDocumentLists），以管理员身份运行，打开文件所在的位置。
 #include "common.h"
 
+#include <exdisp.h>
+#include <shlguid.h>
+
 namespace app {
 namespace {
 
@@ -333,11 +336,117 @@ void RunAsAdmin(HWND owner, const std::wstring& file) {
         Log(L"以管理员身份运行失败（%lu）：%ls", GetLastError(), file.c_str());
 }
 
+namespace {
+// 用完自动 Release 的接口指针
+template <class T>
+struct Ref {
+    T* p = nullptr;
+    Ref() = default;
+    Ref(const Ref&) = delete;
+    Ref& operator=(const Ref&) = delete;
+    ~Ref() {
+        if (p) p->Release();
+    }
+    T* operator->() const { return p; }
+};
+
+// 资源管理器窗口（每个标签页一项）。identity 是它的 IUnknown，用来认出是不是新开的
+struct ShellWindow {
+    Ref<IUnknown> identity;
+    Ref<IDispatch> disp;
+};
+
+std::vector<std::unique_ptr<ShellWindow>> ShellWindowList() {
+    std::vector<std::unique_ptr<ShellWindow>> list;
+    Ref<IShellWindows> windows;
+    if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&windows.p)))) return list;
+    long count = 0;
+    if (FAILED(windows->get_Count(&count))) return list;
+    for (long i = 0; i < count; ++i) {
+        VARIANT index;
+        VariantInit(&index);
+        index.vt = VT_I4;
+        index.lVal = i;
+        auto w = std::make_unique<ShellWindow>();
+        if (windows->Item(index, &w->disp.p) != S_OK || !w->disp.p ||
+            FAILED(w->disp->QueryInterface(IID_PPV_ARGS(&w->identity.p))))
+            continue;
+        list.push_back(std::move(w));
+    }
+    return list;
+}
+
+// 在新开的、显示着 folder 的窗口里选中 name。窗口还没开好时返回 false
+bool SelectInNewWindow(const std::wstring& folder, const std::wstring& name,
+                       const std::vector<std::unique_ptr<ShellWindow>>& before) {
+    for (const auto& w : ShellWindowList()) {
+        bool old = false;
+        for (const auto& b : before) old = old || b->identity.p == w->identity.p;
+        if (old) continue;
+        Ref<IServiceProvider> provider;
+        Ref<IShellBrowser> browser;
+        Ref<IShellView> view;
+        Ref<IFolderView> folderView;
+        Ref<IPersistFolder2> persist;
+        Ref<IShellFolder> shellFolder;
+        if (FAILED(w->disp->QueryInterface(IID_PPV_ARGS(&provider.p))) ||
+            FAILED(provider->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser.p))) ||
+            FAILED(browser->QueryActiveShellView(&view.p)) || !view.p ||
+            FAILED(view->QueryInterface(IID_PPV_ARGS(&folderView.p))) ||
+            FAILED(folderView->GetFolder(IID_PPV_ARGS(&persist.p))) ||
+            FAILED(folderView->GetFolder(IID_PPV_ARGS(&shellFolder.p))))
+            continue;
+        PIDLIST_ABSOLUTE current = nullptr;
+        wchar_t path[MAX_PATH] = {};
+        bool same = SUCCEEDED(persist->GetCurFolder(&current)) && SHGetPathFromIDListW(current, path) &&
+                    CompareStringOrdinal(path, -1, folder.c_str(), -1, TRUE) == CSTR_EQUAL;
+        CoTaskMemFree(current);
+        if (!same) continue;
+        PIDLIST_RELATIVE child = nullptr;
+        if (FAILED(shellFolder->ParseDisplayName(nullptr, nullptr, const_cast<LPWSTR>(name.c_str()), nullptr, &child, nullptr)))
+            return true;  // 文件没了：只开文件夹
+        view->SelectItem(reinterpret_cast<PCUITEMID_CHILD>(child),
+                         SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE | SVSI_FOCUSED);
+        CoTaskMemFree(child);
+        return true;
+    }
+    return false;
+}
+
+struct LocationJob {
+    std::wstring folder;
+    std::wstring name;
+};
+
+DWORD WINAPI OpenLocationThread(LPVOID param) {
+    std::unique_ptr<LocationJob> job(static_cast<LocationJob*>(param));
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 0;
+    {
+        auto before = ShellWindowList();
+        LaunchAsUser(job->folder);
+        for (int i = 0; i < 50 && !SelectInNewWindow(job->folder, job->name, before); ++i) Sleep(100);
+    }
+    CoUninitialize();
+    return 0;
+}
+}  // namespace
+
 void OpenFileLocation(const std::wstring& path) {
-    // 交给资源管理器：本程序是管理员时也以普通权限打开
-    wchar_t windows[MAX_PATH] = {};
-    GetWindowsDirectoryW(windows, MAX_PATH);
-    LaunchAsUser(std::wstring(windows) + L"\\explorer.exe", L"/select,\"" + path + L"\"");
+    // 打开所在的文件夹（交给资源管理器，本程序是管理员时也以普通权限打开），窗口开好以后在里面选中它。
+    // 不用 explorer.exe /select：那样会另起一个 explorer.exe 进程，有的电脑上（装了 Wallpaper Engine 之类）桌面图标会被藏掉。
+    // 要等窗口开好，放在另一个线程上做
+    size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return;
+    auto* job = new LocationJob{path.substr(0, slash), path.substr(slash + 1)};
+    if (job->folder.size() == 2) job->folder += L"\\";  // C: → C:\（根目录）
+    AllowSetForegroundWindow(ASFW_ANY);
+    HANDLE thread = CreateThread(nullptr, 0, OpenLocationThread, job, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
+        return;
+    }
+    LaunchAsUser(job->folder);
+    delete job;
 }
 
 }  // namespace app
