@@ -609,21 +609,20 @@ float BuildPage(int page, float x, float y) {
             if (s_v.on[kLongPress]) popup.push_back([](float x, float y, float w) { return SliderRow(kLongPressMs, x, y, w); });
             popup.push_back([](float x, float y, float w) { return ToggleRow(kEdgePopup, x, y, w); });
             y = AddGroup(x, y, L"弹出", popup);
-            return AddGroup(x, y, L"显示",
-                            {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); },
-                             [](float x, float y, float w) { return SegRow(kSegTray, x, y, w); }});
+            return AddGroup(x, y, L"显示", {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); }});
         }
         case kPageControls: {
-            // 迷你任务栏在底部、侧边时各显示哪些：先选改哪一份
-            y = AddGroup(x, y, L"显示",
-                         {[](float x, float y, float w) { return SegRow(kSegSide, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); },
-                          [](float x, float y, float w) { return LevelRow(kVolume, kVolumeVertical, x, y, w); },
-                          [](float x, float y, float w) { return LevelRow(kBright, kBrightVertical, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kMedia, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kIme, x, y, w); },
-                          [](float x, float y, float w) { return ToggleRow(kBattery, x, y, w); }});
+            // 迷你任务栏在底部、侧边时各显示哪些：先选改哪一份。托盘图标关着时收起它的样式
+            std::vector<RowFn> shown = {[](float x, float y, float w) { return SegRow(kSegSide, x, y, w); },
+                                        [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); }};
+            if (s_v.on[kTray]) shown.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return LevelRow(kVolume, kVolumeVertical, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return LevelRow(kBright, kBrightVertical, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return ToggleRow(kMedia, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return ToggleRow(kIme, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return ToggleRow(kBattery, x, y, w); });
+            y = AddGroup(x, y, L"显示", shown);
             // 时钟关着时收起它的选项
             std::vector<RowFn> clock = {[](float x, float y, float w) { return ToggleRow(kClock, x, y, w); }};
             if (s_v.on[kClock]) clock.push_back(ClockPartsRow);
@@ -1572,8 +1571,8 @@ void SetToggle(int which, bool on) {
     s_knobStart[which] = NowMs();
     StartAnimation();
     // 跟着收起 / 放出来的行；“最大化或全屏时隐藏任务栏”换的是下面那个名单
-    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kClock || which == kVolume ||
-        which == kBright)
+    if (which == kAutoHide || which == kKeepFloats || which == kLongPress || which == kClock || which == kTray ||
+        which == kVolume || which == kBright)
         Relayout(true);
     // 显示哪些、时钟显示什么：弹出来看看
     if (which == kShowTitle || FindSideToggle(which) || which == kClockSeconds || which == kClockWeekday ||

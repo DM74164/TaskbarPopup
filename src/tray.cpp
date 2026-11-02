@@ -658,6 +658,18 @@ bool RunJob(const Job& job) {
             }
             Log(L"托盘：像按菜单键那样没弹出 %ls 的菜单，改成真的右键点一下", b->name.c_str());
         }
+        // 左键：展开以后按钮能“调用”了，先这样点，鼠标不用挪过去（Win10 的老式托盘“调用”不一定转给程序，照旧真点）
+        if (!job.right && !LegacyTray() && Press(*b)) {
+            Log(L"托盘：展开后调用了 %ls 的托盘图标", b->name.c_str());
+            // 真点时隐藏的图标会自己收起，“调用”的有时还开着：等一会儿（收起动画放完）还开着、程序也没弹菜单，就再按一次收起来
+            for (int i = 0; i < 8 && OverflowShowing() && !MenuShowing(); ++i) Sleep(50);
+            if (OverflowShowing() && !MenuShowing() && !ForegroundIsApp(job.app.exe)) {
+                std::vector<Button> buttons = TaskbarButtons(uia.p, tray);
+                Button legacyChevron;
+                if (const Button* chevron = FindChevron(uia.p, tray, buttons, legacyChevron)) Press(*chevron);
+            }
+            return true;
+        }
         Log(L"托盘：%ls隐藏图标里的 %ls（%ld,%ld - %ld,%ld）", job.right ? L"右键" : L"点", b->name.c_str(), r.left,
             r.top, r.right, r.bottom);
         ClickAt(r, job.right);

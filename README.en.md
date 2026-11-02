@@ -38,7 +38,7 @@ When the taskbar is hidden, a short press of Win first raises a one-row mini tas
 
 ### Tray icons
 
-The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu.
+The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu.
 
 ![Hidden tray icons: scroll to flip pages, right-click for the app's menu](docs/demo/en/tray.webp)
 
