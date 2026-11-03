@@ -116,7 +116,7 @@ struct Layout {
     float radioW, radioH, radioGap;    // Wi-Fi 和蓝牙按钮的大小、间隔
     // 竖排（弹在屏幕左右两边）时：一列格子的左边、各段的顶边。这时 itemsW、trayW 是竖着的长度，
     // 窗口在面板里侧多留 bubbleW 宽，放显示标题的小牌子
-    float colX, startY, itemsY, tilesY, trayY, clockY, clockH, bubbleW;
+    float colX, itemsY, tilesY, trayY, clockY, clockH, bubbleW;
     // 时钟前面的几样：媒体（封面）、输入法、电量，这次没有的长度为 0。横排时 X 是左边、W 是宽，竖排时 Y 是顶边、H 是高
     float mediaX, mediaW, imeX, imeW, battX, battW;
     float mediaY, mediaH, imeY, imeH, battY, battH;
@@ -206,12 +206,19 @@ POINT s_edgeClickPt = {};
 // 编辑模式里鼠标下、正在拖的东西：模块（Module）、调节条、Wi-Fi 蓝牙按钮，或者边、别的地方（挪面板）、
 // 模块角上改大小的圆点（kPartHandle + 模块）。kPartLevels：下面那一行（侧边时最下面那块）的调节条
 enum EditPart {
-    kPartNone = -1, kPartLevels = kModuleCount, kPartRadios, kPartScaleEdge, kPartLengthEdge, kPartPanel, kPartHandle = 100
+    kPartNone = -1, kPartLevels = kModuleCount, kPartRadios, kPartScaleEdge, kPartLengthEdge, kPartPanel,
+    kPartGap,  // 两个窗口格子之间的缝：拖它改图标间距
+    kPartHandle = 100
 };
 bool IsHandlePart(int part) { return part >= kPartHandle && part < kPartHandle + kModuleCount; }
 int s_editHover = kPartNone;
 int s_hoverModule = -1;        // 鼠标下的模块（窗口格子那一段也算），它角上显示改大小的圆点
 int s_scaleModule = -1;        // 正在拖圆点改大小的模块
+int s_hoverGap = -1;           // 鼠标下的格子之间的缝（缝前面那个格子的序号）
+int s_gapDrag = -1;            // 正在拖着改图标间距的缝
+int s_gapFromValue = 0;        // 开始拖缝时的图标间距
+POINT s_gapAt = {};            // 开始拖缝时鼠标在屏幕上的位置
+bool s_wheelGap = false;       // 刚在缝上用滚轮改了间距：鼠标离开之前标题上显示间距
 int s_scaleFromPercent = 100;  // 开始拖时设置里的大小
 float s_scaleFromK = 1;        // 开始拖时画着的大小（倍数）
 PointF s_scaleAnchor, s_scaleDiag;  // 开始拖时模块对角（不动的那个角）和到圆点的那条对角线（屏幕坐标）
@@ -227,11 +234,16 @@ PointF s_modFrom[kModuleCount];
 double s_modStart = 0;
 constexpr double kModuleSlideMs = 200.0 * TP_ANIM_SCALE;
 // 模块变大小（拖圆点、滚轮、恢复、刚显示出来）：从 s_scaleFrom 慢慢变到设置里的大小，别的模块跟着让开
-float s_scaleFrom[kModuleCount] = {1, 1, 1, 1, 1, 1, 1, 1};
+float s_scaleFrom[kModuleCount] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
 double s_scaleStart = -1e9;
 constexpr double kModuleScaleMs = 220.0 * TP_ANIM_SCALE;
+// 图标间距变了（拖缝、滚轮、双击恢复）：从 s_gapFrom 像素慢慢变到设置里的
+float s_gapFrom = 0;
+double s_gapStart = -1e9;
 POINT s_moveFromPos = {};      // 开始拖面板时窗口的位置、对齐和自定义位置
 int s_moveFromAlign = kAlignSystem, s_moveFromOffset = 500;
+// 编辑模式里正拖着东西：边、面板、模块、改大小的圆点、格子之间的缝
+bool EditDragging() { return s_resize || s_movePanel || s_moveModule != kPartNone || s_scaleModule >= 0 || s_gapDrag >= 0; }
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
 double s_animStart = 0;
@@ -450,6 +462,18 @@ float ModK(int m) {
     return s_scaleFrom[m] + (TargetK(m) - s_scaleFrom[m]) * e;
 }
 
+double GapT() { return AnimationsOn() ? (NowMs() - s_gapStart) / kModuleScaleMs : 1.0; }
+bool GapChanging() { return GapT() < 1; }
+
+// 现在画的图标间距（像素，按 100% 大小算）：变的时候从 s_gapFrom 变到设置里的
+float GapNow() {
+    float to = static_cast<float>(s_look.iconGap);
+    double t = GapT();
+    if (t >= 1) return to;
+    float e = static_cast<float>(1 - std::pow(1 - std::max(0.0, t), 3.0));
+    return s_gapFrom + (to - s_gapFrom) * e;
+}
+
 // 记下各模块现在画着的大小，改了设置里的大小以后用 AnimateScales 从这里变过去
 struct ScaleSnap {
     float k[kModuleCount];
@@ -474,7 +498,10 @@ bool CustomScales() {
 }
 
 // 大小跟着格子边长走的模块（格子自动放大补位时它们也跟着放大）
-bool TileBased(int m) { return m == kModWindows || m == kModTray || m == kModMedia || PillModule(m); }
+bool TileBased(int m) { return m == kModStart || m == kModWindows || m == kModTray || m == kModMedia || PillModule(m); }
+
+// 按放大缩小以后的大小直接排的模块：开始按钮、窗口格子（TileRect 就是画出来的位置）；别的按原大小排、画的时候放大
+bool LaidActual(int m) { return m == kModStart || m == kModWindows; }
 
 // 看起来有多大（百分比）：格子自动放大补位时跟着格子走的模块也算上放大的
 int VisualPercent(int m) { return static_cast<int>(std::lround(Mods().scale[m] * (TileBased(m) ? s_tileGrow : 1.0f))); }
@@ -490,6 +517,7 @@ float BaseLen(const Layout& L, int m) {
         case kModClock: return v ? L.clockH : L.clockW;
         case kModVolume:
         case kModBright: return PillSlider(m == kModVolume ? 0 : 1) ? Px(kPillW) : 0;
+        case kModStart: return L.tile;
         default: return L.itemsW;
     }
 }
@@ -503,7 +531,7 @@ bool ModuleShown(int m) { return m == kModWindows || ModuleLen(s_L, m) > 0; }
 PointF ModToActual(int m, const PointF& p) {
     const Layout& L = s_L;
     float k = L.modK[m], pos = L.modPos[m], c = L.modC[m];
-    if (m == kModWindows) return p;
+    if (LaidActual(m)) return p;
     if (Vertical()) return PointF(c + (p.X - c) * k, pos + (p.Y - pos) * k);
     return PointF(pos + (p.X - pos) * k, c + (p.Y - c) * k);
 }
@@ -512,14 +540,14 @@ PointF ModToActual(int m, const PointF& p) {
 PointF ModToBase(int m, REAL x, REAL y) {
     const Layout& L = s_L;
     float k = std::max(0.01f, L.modK[m]), pos = L.modPos[m], c = L.modC[m];
-    if (m == kModWindows) return PointF(x, y);
+    if (LaidActual(m)) return PointF(x, y);
     if (Vertical()) return PointF(c + (x - c) / k, pos + (y - pos) / k);
     return PointF(pos + (x - pos) / k, c + (y - c) / k);
 }
 
 RectF ModRect(int m, const RectF& r) {
     PointF a = ModToActual(m, PointF(r.X, r.Y));
-    float k = m == kModWindows ? 1.0f : s_L.modK[m];
+    float k = LaidActual(m) ? 1.0f : s_L.modK[m];
     return RectF(a.X, a.Y, r.Width * k, r.Height * k);
 }
 
@@ -527,7 +555,7 @@ RectF ModRect(int m, const RectF& r) {
 void ScaleModule(Graphics& g, int m) {
     const Layout& L = s_L;
     float k = L.modK[m], pos = L.modPos[m], c = L.modC[m];
-    if (m == kModWindows || k == 1) return;
+    if (LaidActual(m) || k == 1) return;
     if (Vertical()) {
         g.TranslateTransform(c, pos);
         g.ScaleTransform(k, k);
@@ -577,7 +605,7 @@ void SlideModules(const ModuleSnap& snap) {
     s_modStart = NowMs();
 }
 
-// 这次显示的模块按顺序排好，算出每个前面的间隔（第一个前面是和开始按钮之间的）。
+// 这次显示的模块按顺序排好，算出每个前面的间隔（第一个前面没有）。
 // 输入法、电量、时钟挨着时没有间隔；两根竖着的调节条挨着时只隔一点、不画分隔线
 int ModuleSequence(const Layout& L, int seq[kModuleCount], float sepBefore[kModuleCount]) {
     int count = 0;
@@ -586,12 +614,12 @@ int ModuleSequence(const Layout& L, int seq[kModuleCount], float sepBefore[kModu
     for (int i = 0; i < count; ++i) {
         bool joined = i > 0 && StatusModule(seq[i - 1]) && StatusModule(seq[i]);
         bool pills = i > 0 && PillModule(seq[i - 1]) && PillModule(seq[i]);
-        sepBefore[i] = joined ? 0 : pills ? Px(kPillGap) : L.sep;
+        sepBefore[i] = i == 0 || joined ? 0 : pills ? Px(kPillGap) : L.sep;
     }
     return count;
 }
 
-// 从开始按钮后面起按顺序摆好各模块，记下要画的分隔线（挨着占两行的媒体的不画，它有自己的底）。返回最后一个的末端
+// 从面板的一头起按顺序摆好各模块，记下要画的分隔线（挨着占两行的媒体的不画，它有自己的底）。返回最后一个的末端
 float PlaceModules(Layout& L, float start) {
     int seq[kModuleCount];
     float sepBefore[kModuleCount];
@@ -604,8 +632,8 @@ float PlaceModules(Layout& L, float start) {
         bool byMedia = L.mediaTall && (seq[i] == kModMedia || (i > 0 && seq[i - 1] == kModMedia));
         bool pills = i > 0 && PillModule(seq[i - 1]) && PillModule(seq[i]);
         if (sepBefore[i] > 0 && !byMedia && !pills) {
-            // 分隔线跟着两边大的那个（第一个前面是开始按钮，和窗口格子一样大）
-            L.sepK[L.sepCount] = std::max(L.modK[i > 0 ? seq[i - 1] : kModWindows], L.modK[seq[i]]);
+            // 分隔线跟着两边大的那个
+            L.sepK[L.sepCount] = std::max(L.modK[seq[i - 1]], L.modK[seq[i]]);
             L.sepAt[L.sepCount++] = at;
         }
         L.modPos[seq[i]] = at;
@@ -624,9 +652,9 @@ void ComputeLayout() {
     L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕边的距离
     L.pad = s_compact ? Px(4) : Px(8);
     L.tile = Px(48.0f * s_look.iconSize / 100 * s_tileGrow);
-    L.gap = Px(static_cast<float>(s_look.iconGap));
+    L.gap = Px(GapNow());
     for (int m = 0; m < kModuleCount; ++m) L.modK[m] = ModK(m);
-    float kw = L.modK[kModWindows];  // 窗口格子和开始按钮的大小
+    float kw = L.modK[kModWindows];  // 窗口格子的大小
     L.wTile = L.tile * kw;
     L.wGap = L.gap * kw;
     L.titleH = s_compact || vertical || !s_look.showTitle ? 0 : Px(24);  // 竖排时标题显示在面板旁边的小牌子上
@@ -677,11 +705,11 @@ void ComputeLayout() {
     L.radiosOther = false;
     L.itemsW = 0;
 
-    // 除了窗口格子那一段以外的长度：两头的边距、开始按钮、各模块和它们之间的间隔
+    // 除了窗口格子那一段以外的长度：两头的边距、各模块（开始按钮也是）和它们之间的间隔
     int seq[kModuleCount];
     float sepBefore[kModuleCount];
     int count = ModuleSequence(L, seq, sepBefore);
-    float fixed = 2 * L.pad + L.wTile;
+    float fixed = 2 * L.pad;
     for (int i = 0; i < count; ++i) fixed += sepBefore[i] + ModuleLen(L, seq[i]);
     // 图标那一行（竖排时那一列）多高（宽）：最大的模块那么大。横排时占两行的媒体放大了也可能撑高这一行
     L.rowH = L.wTile;
@@ -727,8 +755,7 @@ void ComputeLayout() {
         L.rowC = L.panelX + L.pad + L.rowH / 2;
         L.colX = L.rowC - L.tile / 2;
         for (int m = 0; m < kModuleCount; ++m) L.modC[m] = L.rowC;
-        L.startY = L.panelY + L.pad;
-        float end = PlaceModules(L, L.startY + L.wTile);
+        float end = PlaceModules(L, L.panelY + L.pad);
         L.itemsY = L.modPos[kModWindows];
         L.tilesY = L.itemsY + (L.itemsW - tilesH) / 2;
         L.trayY = L.modPos[kModTray];
@@ -767,7 +794,7 @@ void ComputeLayout() {
     float mediaStart0 = 0, sepAfterMedia = 0;  // 格子那段长度为 0 时媒体的起点
     if (L.mediaTall) {
         float mediaLen = ModuleLen(L, kModMedia);
-        mediaStart0 = L.pad + L.wTile;
+        mediaStart0 = L.pad;
         for (int i = 0; i < mediaAt; ++i) mediaStart0 += sepBefore[i] + ModuleLen(L, seq[i]);
         mediaStart0 += sepBefore[mediaAt];
         sepAfterMedia = mediaAt + 1 < count ? sepBefore[mediaAt + 1] : 0;
@@ -810,7 +837,7 @@ void ComputeLayout() {
     L.sliderY = rowTop + L.rowH + L.rowGap;
     for (int m = 0; m < kModuleCount; ++m) L.modC[m] = L.rowC;
     if (L.mediaTall) L.modC[kModMedia] = L.rowC + (L.rowGap + L.sliderH) / 2;
-    PlaceModules(L, L.panelX + L.pad + L.wTile);
+    PlaceModules(L, L.panelX + L.pad);
     L.itemsX = L.modPos[kModWindows];
     L.tilesX = L.itemsX + (L.itemsW - tilesW) / 2;
     L.trayX = L.modPos[kModTray];
@@ -986,10 +1013,13 @@ bool IsTileVisible(int index) {
 // 格子画出来的位置（窗口格子和开始按钮按放大缩小以后的大小直接排）
 RectF TileRect(int index) {
     const Layout& L = s_L;
+    if (index == 0) {  // 开始按钮：自己是一个模块
+        float t = L.tile * L.modK[kModStart], across = L.rowC - t / 2, at = L.modPos[kModStart];
+        return Vertical() ? RectF(across, at, t, t) : RectF(at, across, t, t);
+    }
     int slot = index - 1 - s_first;
     float t = L.wTile, step = L.wTile + L.wGap, across = L.rowC - t / 2;
-    if (Vertical()) return RectF(across, index == 0 ? L.startY : L.tilesY + slot * step, t, t);
-    if (index == 0) return RectF(L.panelX + L.pad, across, t, t);
+    if (Vertical()) return RectF(across, L.tilesY + slot * step, t, t);
     return RectF(L.tilesX + slot * step, across, t, t);
 }
 
@@ -1993,7 +2023,7 @@ void DrawContent(Graphics& g) {
             int part = s_scaleModule >= 0 ? s_scaleModule : s_moveModule != kPartNone ? s_moveModule : s_editHover;
             if (IsHandlePart(part)) part -= kPartHandle;
             if (part >= 0 && part < kPartScaleEdge && EditPartShown(part)) anchor = mid(EditPartRect(part));
-            else if (vertical) anchor = L.startY + L.wTile / 2;
+            else if (vertical) anchor = mid(TileRect(0));
         } else if (s_drag != kNone || s_hoverControl != kNone) {
             int which = SliderOf(s_drag != kNone ? s_drag : s_hoverControl);
             const Slider& sl = s_sliders[which];
@@ -2030,8 +2060,6 @@ void DrawContent(Graphics& g) {
         DrawLabel(g, title.c_str(), titleFont, titleRect, oneLine, pal.text);
     }
 
-    if (IsTileVisible(0)) DrawTile(g, 0);  // 开始按钮
-
     // 分隔线：横排是竖线，竖排是横线（占两行的媒体有自己的底，挨着它的不画；输入法、电量和时钟挨着时中间不画）
     // 编辑模式里拖着模块、模块还在滑的时候不画（它们挪到哪还没定）
     Pen sepPen(pal.separator, 1.0f);
@@ -2046,9 +2074,10 @@ void DrawContent(Graphics& g) {
         PointF shift = ModuleShift(m);
         GraphicsState state = g.Save();
         g.TranslateTransform(shift.X, shift.Y);
-        ScaleModule(g, m);  // 除了窗口格子，模块里都按原大小画，在这里放大缩小
-        s_drawK = m == kModWindows ? 1.0f : L.modK[m];
+        ScaleModule(g, m);  // 除了开始按钮和窗口格子，模块里都按原大小画，在这里放大缩小
+        s_drawK = LaidActual(m) ? 1.0f : L.modK[m];
         switch (m) {
+            case kModStart: DrawTile(g, 0); break;
             case kModWindows: {
                 for (int idx = 1; idx <= ItemCount(); ++idx)
                     if (IsTileVisible(idx)) DrawTile(g, idx);
@@ -2518,12 +2547,14 @@ void EndResize();
 void EndModuleDrag(bool drop);
 void EndPanelMove(bool drop);
 void EndScaleDrag();
+void EndGapDrag();
 
 void HideNow() {
     EndResize();
     EndModuleDrag(false);
     EndPanelMove(false);
     EndScaleDrag();
+    EndGapDrag();
     s_editing = false;
     s_editHover = kPartNone;
     s_hoverModule = -1;
@@ -2585,7 +2616,7 @@ void Frame() {
         return;
     }
     if (s_scaleLayout && s_open) {
-        s_scaleLayout = ModulesScaling();
+        s_scaleLayout = ModulesScaling() || GapChanging();
         ScaleRelayout();
     }
     SyncPill();
@@ -3423,6 +3454,7 @@ void SetEditing(bool on) {
     EndModuleDrag(false);
     EndPanelMove(false);
     EndScaleDrag();
+    EndGapDrag();
     if (s_drag != kNone) {  // 拖着音量、亮度时按了 F2
         s_drag = kNone;
         if (GetCapture() == s_hwnd) ReleaseCapture();
@@ -3505,7 +3537,7 @@ PointF HandlePoint(int m, PointF* anchor = nullptr) {
 
 // 鼠标下的改大小圆点是哪个模块的，没有为 -1（拖着别的东西时不算）
 int HandleAt(int x, int y) {
-    if (!s_editing || s_anim != Anim::None || s_resize || s_movePanel || s_moveModule != kPartNone) return -1;
+    if (!s_editing || s_anim != Anim::None || EditDragging()) return -1;
     float best = Px(9) * Px(9);
     int found = -1;
     for (int m = 0; m < kModuleCount; ++m) {
@@ -3520,28 +3552,50 @@ int HandleAt(int x, int y) {
     return found;
 }
 
-// 编辑模式里鼠标下是什么：改大小的圆点、边、能拖的模块（窗口格子那一段不算，拖它是挪面板）、调节条、Wi-Fi 蓝牙，
-// 面板上别的地方
+// 两个窗口格子之间的缝在哪（沿排列方向的中线，算上还没滑完的那段）。after：缝前面那个格子的序号（1 起）
+float GapCenter(int after) {
+    const Layout& L = s_L;
+    PointF shift = ModuleShift(kModWindows);
+    return Along(TileRect(after)) + L.wTile + L.wGap / 2 + (Vertical() ? shift.Y : shift.X);
+}
+
+// 编辑模式里鼠标下的两个窗口格子之间的缝（拖它改图标间距），返回缝前面那个格子的序号，没有为 -1
+int GapAt(int x, int y) {
+    if (!s_editing || s_anim != Anim::None || EditDragging() || s_visible < 2) return -1;
+    const Layout& L = s_L;
+    bool v = Vertical();
+    PointF shift = ModuleShift(kModWindows);
+    float along = static_cast<float>(v ? y : x), across = static_cast<float>(v ? x : y) - (v ? shift.X : shift.Y);
+    if (std::abs(across - L.rowC) > L.wTile / 2) return -1;
+    float half = std::min(std::max(L.wGap / 2, Px(4)), L.wTile / 4);
+    for (int idx = s_first + 1; idx < s_first + s_visible && idx < ItemCount(); ++idx)
+        if (std::abs(along - GapCenter(idx)) <= half) return idx;
+    return -1;
+}
+
+// 编辑模式里鼠标下是什么：改大小的圆点、边、格子之间的缝、能拖的模块、调节条、Wi-Fi 蓝牙，面板上别的地方
 int EditPartAt(int x, int y) {
     if (int m = HandleAt(x, y); m >= 0) return kPartHandle + m;
     if (int edges = ResizeEdgeAt(x, y)) return edges & ScaleEdges() ? kPartScaleEdge : kPartLengthEdge;
+    if (GapAt(x, y) >= 0) return kPartGap;
     PointF pt(static_cast<REAL>(x), static_cast<REAL>(y));
     for (int part = 0; part < kPartScaleEdge; ++part)
-        if (part != kModWindows && EditPartShown(part) && EditPartRect(part).Contains(pt)) return part;
+        if (EditPartShown(part) && EditPartRect(part).Contains(pt)) return part;
     const Layout& L = s_L;
     if (RectF(L.panelX, L.panelY, L.panelW, L.panelH).Contains(pt)) return kPartPanel;
     return kPartNone;
 }
 
 // 鼠标下的模块（显示改大小的圆点、滚轮改大小）：part 是 EditPartAt 的结果。在面板的边上也算下面的模块；
-// 窗口格子那一段和开始按钮算窗口
+// 格子之间的缝算窗口
 int EditModuleAt(int x, int y, int part) {
     if (IsHandlePart(part)) return part - kPartHandle;
+    if (part == kPartGap) return kModWindows;
     if (part == kPartNone || part == kPartLevels || part == kPartRadios) return -1;
     PointF pt(static_cast<REAL>(x), static_cast<REAL>(y));
     for (int m = 0; m < kModuleCount; ++m)
         if (ModuleShown(m) && EditPartRect(m).Contains(pt)) return m;
-    return TileRect(0).Contains(pt) ? kModWindows : -1;
+    return -1;
 }
 
 const wchar_t* PartName(int part) {
@@ -3558,6 +3612,7 @@ const wchar_t* PartName(int part) {
             return Tr(volume && bright ? L"音量和亮度" : volume ? L"音量" : L"亮度");
         }
         case kPartRadios: return Tr(L"Wi-Fi 和蓝牙");
+        case kModStart: return Tr(L"开始");
         default: return Tr(L"窗口");
     }
 }
@@ -3577,18 +3632,22 @@ std::wstring PlaceText() {
 std::wstring EditText() {
     if (s_resize) return SizeText();
     if (s_scaleModule >= 0) return TrF(L"%ls %d%%", PartName(s_scaleModule), VisualPercent(s_scaleModule));
+    if (s_gapDrag >= 0 || (s_wheelGap && s_editHover == kPartGap)) return TrF(L"图标间距 %d 像素", s_look.iconGap);
     if (s_movePanel) return PlaceText();
     if (s_moveModule != kPartNone) return s_moveOut ? TrF(L"松开隐藏%ls", PartName(s_moveModule)) : Tr(L"放到想要的位置");
     if (s_wheelScaled >= 0 && s_wheelScaled == s_hoverModule)  // 刚用滚轮改了大小
         return TrF(L"%ls %d%%", PartName(s_wheelScaled), VisualPercent(s_wheelScaled));
     if (IsHandlePart(s_editHover)) return Tr(L"拖动改大小，双击恢复，滚轮也能调");
     switch (s_editHover) {
+        case kPartGap: return Tr(L"拖动改间距，双击恢复，滚轮也能调");
         case kPartScaleEdge: return Tr(L"拖动改大小，双击恢复");
         case kPartLengthEdge: return Tr(L"拖动改长度，双击恢复");
         case kPartLevels:
         case kPartRadios: return Tr(L"拖出面板隐藏");
         case kPartPanel: return Tr(L"拖动挪位置，双击恢复");
         case kPartNone: return Tr(L"编辑模式：回车完成，右键更多");
+        case kModStart:
+        case kModWindows: return Tr(L"拖动换位置");
         default: return Tr(L"拖动换位置，拖出面板隐藏");
     }
 }
@@ -3647,7 +3706,7 @@ void DragModule(POINT screen) {
     PointF pt(static_cast<REAL>(screen.x - s_pos.x), static_cast<REAL>(screen.y - s_pos.y));
     RectF keep(L.panelX, L.panelY, L.panelW, L.panelH);
     keep.Inflate(Px(16), Px(16));
-    bool out = !keep.Contains(pt);
+    bool out = !keep.Contains(pt) && !LaidActual(s_moveModule);  // 开始按钮、窗口格子不能隐藏
     s_moveOut = out;
     Redraw();  // 拖着的模块跟着鼠标
     if (out || s_moveModule >= kModuleCount) return;
@@ -3877,16 +3936,21 @@ void ResetOrder() {
 
 // 改设置里各模块的大小（change 里改），从现在画着的大小慢慢变过去。格子放大补位的倍数先按新的大小算好，
 // 动画中不变；它变了的话，跟着格子边长走的模块从同样大的地方开始变，不会先跳一下
+// gapFrom：图标间距也改了的话，它从现在画着的这么多像素变过去
 template <class F>
-void ChangeScales(F change) {
+void ChangeScales(F change, float gapFrom = -1) {
     ScaleSnap snap = SnapScales();
     float oldGrow = s_tileGrow;
     change();
-    s_scaleStart = -1e9;  // 先按新的大小排一遍
+    s_scaleStart = s_gapStart = -1e9;  // 先按新的大小、间距排一遍
     FitTiles();
     for (int m = 0; m < kModuleCount; ++m)
         if (TileBased(m)) snap.k[m] *= oldGrow / s_tileGrow;
     AnimateScales(snap);
+    if (gapFrom >= 0) {
+        s_gapFrom = gapFrom;
+        s_gapStart = NowMs();
+    }
     s_scaleLayout = true;
     s_glass.Extend(GrowArea());
     ScaleRelayout();
@@ -3968,6 +4032,63 @@ void WheelScale(int m, int notches) {
     s_wheelScaled = s_hoverModule = m;
     SaveSettings();
     SettingsDialog_SettingsChanged();
+    Redraw();
+}
+
+// ---- 编辑模式：拖格子之间的缝改图标间距 ----
+
+// 图标间距改成 gap 像素（按 100% 大小算），从现在画着的间距慢慢变过去
+void SetIconGap(int gap) {
+    gap = std::clamp(gap, 0, kMaxIconGap);
+    if (gap == s_look.iconGap) return;
+    float from = GapNow();
+    ChangeScales([&] { g_settings.iconGap = s_look.iconGap = gap; }, from);
+}
+
+void SaveIconGap() {
+    Log(L"编辑模式里改了图标间距：%d 像素", s_look.iconGap);
+    SaveSettings();
+    SettingsDialog_SettingsChanged();
+}
+
+// 按下了格子之间的缝：开始拖着改间距（双击恢复默认）
+void BeginGapDrag(int after, POINT screen) {
+    if (EditClickTwice(screen)) {
+        if (s_look.iconGap != kDefaultIconGap) {
+            SetIconGap(kDefaultIconGap);
+            SaveIconGap();
+        }
+        return;
+    }
+    s_gapDrag = after;
+    s_gapFromValue = s_look.iconGap;
+    s_gapAt = screen;
+    SetCapture(s_hwnd);
+    SetCursor(LoadCursorW(nullptr, Vertical() ? IDC_SIZENS : IDC_SIZEWE));
+    Redraw();
+}
+
+// 沿着排列方向往后（右、下）拖变宽，鼠标走两个像素（按 100% 缩放算）间距变一个像素
+void DragGap(POINT screen) {
+    if (s_gapDrag < 0) return;
+    float moved = static_cast<float>(Vertical() ? screen.y - s_gapAt.y : screen.x - s_gapAt.x);
+    SetIconGap(s_gapFromValue + static_cast<int>(std::lround(moved / Px(2))));
+}
+
+void EndGapDrag() {
+    if (s_gapDrag < 0) return;
+    s_gapDrag = -1;  // 先清掉：放开鼠标捕获时还会再进来
+    if (GetCapture() == s_hwnd) ReleaseCapture();
+    if (s_look.iconGap != s_gapFromValue) SaveIconGap();
+    Redraw();
+}
+
+// 滚轮在缝上：一格一个像素（往上滚变宽）
+void WheelGap(int notches) {
+    int was = s_look.iconGap;
+    SetIconGap(was + notches);
+    s_wheelGap = true;
+    if (s_look.iconGap != was) SaveIconGap();
     Redraw();
 }
 
@@ -4053,6 +4174,10 @@ void EditMouseDown(int x, int y) {
         BeginResize(edges, screen);
         return;
     }
+    if (int gap = GapAt(x, y); gap >= 0) {
+        BeginGapDrag(gap, screen);
+        return;
+    }
     int part = EditPartAt(x, y);
     if (part == kPartPanel) {
         if (EditClickTwice(screen)) ResetPlace();
@@ -4108,14 +4233,12 @@ void DrawEditFrame(Graphics& g) {
     if (edges & kResizeBottom) bar(cx, r.Y + r.Height, true);
     if (edges & kResizeLeft) bar(r.X, cy, false);
     if (edges & kResizeRight) bar(r.X + r.Width, cy, false);
-    // 能拖的模块：细虚线框；鼠标下的、正拖着的描强调色、铺一层底，要拖出去隐藏时是红的。
-    // 窗口格子那一段（拖它是挪面板）只在改它大小时描出来
-    bool busy = s_resize || s_movePanel || s_moveModule != kPartNone || s_scaleModule >= 0;
+    // 能拖的模块：细虚线框；鼠标下的、正拖着的描强调色、铺一层底，要拖出去隐藏时是红的
+    bool busy = EditDragging();
     for (int part = 0; part < kPartScaleEdge; ++part) {
         if (!EditPartShown(part)) continue;
         bool active = busy ? part == s_moveModule || part == s_scaleModule
                            : part == s_editHover || s_editHover == kPartHandle + part;
-        if (part == kModWindows && !active) continue;
         Color c = part == s_moveModule && s_moveOut ? Color(255, 232, 72, 72) : accent;
         RectF m = EditPartRect(part);
         if (part < kModuleCount) {  // 跟着模块画的地方走（在滑、在拖）
@@ -4131,6 +4254,19 @@ void DrawEditFrame(Graphics& g) {
         Pen mpen(active ? c : Colors().subtle, std::max(1.0f, Px(1)));
         if (!active) mpen.SetDashPattern(dash, 2);
         g.DrawPath(&mpen, &mp);
+    }
+    // 窗口格子之间的缝：鼠标在窗口那段上、正拖着缝时，每条缝里一根小竖条（竖排时是横条），指着、拖着的那根大一点
+    if (s_gapDrag >= 0 || (!busy && s_hoverModule == kModWindows)) {
+        const Layout& L = s_L;
+        bool v = Vertical();
+        PointF shift = ModuleShift(kModWindows);
+        float c = L.rowC + (v ? shift.X : shift.Y);
+        for (int idx = s_first + 1; idx < s_first + s_visible && idx < ItemCount(); ++idx) {
+            bool hot = idx == s_gapDrag || (s_gapDrag < 0 && s_editHover == kPartGap && idx == s_hoverGap);
+            float len = L.wTile * (hot ? 0.5f : 0.34f), th = hot ? Px(4) : Px(3), at = GapCenter(idx);
+            RectF bar = v ? RectF(c - len / 2, at - th / 2, len, th) : RectF(at - th / 2, c - len / 2, th, len);
+            FillRound(g, bar, th / 2, hot ? accent : Colors().subtle);
+        }
     }
     // 改大小的圆点：在鼠标下的模块（窗口格子那一段也算）、正在改的模块的角上，鼠标指着、拖着时大一圈
     int handle = s_scaleModule >= 0 ? s_scaleModule : busy ? -1 : s_hoverModule;
@@ -4165,6 +4301,10 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 if (int edges = ResizeEdgeAt(pt.x, pt.y)) {
                     SetCursor(LoadCursorW(nullptr, ResizeCursor(edges)));
+                    return TRUE;
+                }
+                if (s_gapDrag >= 0 || GapAt(pt.x, pt.y) >= 0) {  // 格子之间的缝：沿着排列方向拖
+                    SetCursor(LoadCursorW(nullptr, Vertical() ? IDC_SIZENS : IDC_SIZEWE));
                     return TRUE;
                 }
                 if (s_editing && EditPartAt(pt.x, pt.y) != kPartNone) {
@@ -4327,22 +4467,25 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_MOUSEMOVE: {
             int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
-            if (s_resize || s_moveModule != kPartNone || s_movePanel || s_scaleModule >= 0) {
+            if (EditDragging()) {
                 // 窗口跟着大小、位置挪了，按屏幕坐标算
                 DWORD pos = GetMessagePos();
                 POINT screen = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
                 if (s_resize) DragResize(screen);
                 else if (s_movePanel) DragPanel(screen);
                 else if (s_scaleModule >= 0) DragScale(screen);
+                else if (s_gapDrag >= 0) DragGap(screen);
                 else DragModule(screen);
                 return 0;
             }
             if (s_editing) {  // 编辑模式里不选格子，只看鼠标下是什么能拖的
-                int part = EditPartAt(x, y), module = EditModuleAt(x, y, part);
+                int part = EditPartAt(x, y), module = EditModuleAt(x, y, part), gap = part == kPartGap ? GapAt(x, y) : -1;
                 if (module != s_wheelScaled) s_wheelScaled = -1;
-                if (part != s_editHover || module != s_hoverModule) {
+                if (gap != s_hoverGap) s_wheelGap = false;
+                if (part != s_editHover || module != s_hoverModule || gap != s_hoverGap) {
                     s_editHover = part;
                     s_hoverModule = module;
+                    s_hoverGap = gap;
                     Redraw();
                 }
                 TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
@@ -4389,7 +4532,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MOUSELEAVE:
             s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_editHover = kPartNone;
-            s_hoverModule = s_wheelScaled = -1;
+            s_hoverModule = s_wheelScaled = s_hoverGap = -1;
+            s_wheelGap = false;
             s_hover = -1;
             s_hoverControl = kNone;
             s_hoverRadio = -1;
@@ -4421,10 +4565,12 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 EndModuleDrag(true);
                 EndPanelMove(true);
                 EndScaleDrag();
+                EndGapDrag();
                 if (s_editing) {
                     int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
                     s_editHover = EditPartAt(x, y);
                     s_hoverModule = EditModuleAt(x, y, s_editHover);
+                    s_hoverGap = GapAt(x, y);
                     Redraw();
                 }
                 return 0;
@@ -4463,6 +4609,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 EndModuleDrag(false);
                 EndPanelMove(false);
                 EndScaleDrag();
+                EndGapDrag();
             }
             if (s_drag != kNone && reinterpret_cast<HWND>(lParam) != hwnd) {
                 s_drag = kNone;
@@ -4478,7 +4625,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_RBUTTONUP: {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             if (s_editing) {
-                if (!s_resize && s_moveModule == kPartNone && !s_movePanel) ShowEditMenu(pt);
+                if (!EditDragging()) ShowEditMenu(pt);
                 return 0;
             }
             int hit = HitTest(pt.x, pt.y);
@@ -4510,10 +4657,11 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int up = s_wheelRest / WHEEL_DELTA;
             s_wheelRest -= up * WHEEL_DELTA;
             if (up == 0) return 0;
-            if (s_editing) {  // 编辑模式里滚轮在模块上：改它的大小（往上滚变大）
-                bool busy = s_resize || s_movePanel || s_moveModule != kPartNone || s_scaleModule >= 0;
-                int module = busy ? -1 : EditModuleAt(pt.x, pt.y, EditPartAt(pt.x, pt.y));
-                if (module >= 0) WheelScale(module, up);
+            if (s_editing) {  // 编辑模式里滚轮在模块上：改它的大小（往上滚变大）；在格子之间的缝上改间距
+                int part = EditDragging() ? kPartNone : EditPartAt(pt.x, pt.y);
+                int module = part == kPartNone ? -1 : EditModuleAt(pt.x, pt.y, part);
+                if (part == kPartGap) WheelGap(up);
+                else if (module >= 0) WheelScale(module, up);
                 return 0;
             }
             if (control != kNone) {
@@ -4818,9 +4966,10 @@ void Open(bool preview, bool startMenu = false, bool hover = false) {
     s_items = s_allItems;
     s_filter.clear();
     s_lockedItemsW = 0;
-    s_scaleStart = -1e9;  // 上次没放完的模块变大小动画不要了
+    s_scaleStart = s_gapStart = -1e9;  // 上次没放完的模块变大小、间距变的动画不要了
     s_scaleLayout = false;
-    s_hoverModule = s_scaleModule = s_wheelScaled = -1;
+    s_hoverModule = s_scaleModule = s_wheelScaled = s_hoverGap = s_gapDrag = -1;
+    s_wheelGap = false;
     s_keyNav = false;
     s_menuOpen = false;
     s_lastMouse = {INT_MIN, INT_MIN};

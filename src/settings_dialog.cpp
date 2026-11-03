@@ -544,7 +544,7 @@ float EditRow(float x, float y, float w) {
     float bw = MeasureWidth(Tr(L"编辑"), Px(12.5f)) + Px(40), bx = x + w - pad - bw;
     s_texts.push_back({Tr(L"编辑模式"), RectF(x + pad, y + Px(4), bx - x - pad, Px(42)), 4});
     s_items.push_back({kEditMini, 0, RectF(bx, y + Px(11), bw, bh)});
-    std::wstring hint = Tr(L"拖边改大小，拖模块排顺序，拖模块角上的圆点改模块大小，拖空白处挪位置。弹出后按 F2 也能进入");
+    std::wstring hint = Tr(L"拖边改大小，拖模块排顺序，拖角上的圆点改模块大小，拖图标之间的缝改间距，拖空白处挪位置。弹出后按 F2 也能进入");
     bool wrap = MeasureWidth(hint, Px(11.5f)) > w - 2 * pad;
     s_texts.push_back({hint, RectF(x + pad, y + Px(44), w - 2 * pad, Px(wrap ? 34 : 18)), 1});
     return Px(wrap ? 82 : 66);

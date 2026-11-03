@@ -375,8 +375,8 @@ void EnsureUnicodeIni() {
 
 namespace {
 
-const wchar_t* const kModuleKeys[kModuleCount] = {L"windows", L"tray",  L"media",  L"ime",
-                                                  L"battery", L"clock", L"volume", L"brightness"};
+const wchar_t* const kModuleKeys[kModuleCount] = {L"start",   L"windows", L"tray",   L"media",     L"ime",
+                                                  L"battery", L"clock",   L"volume", L"brightness"};
 
 // 逗号隔开的一串，一段段交给 each
 template <class F>
@@ -396,7 +396,7 @@ int ModuleByKey(const std::wstring& name) {
 }
 
 // 模块的顺序：名字用逗号隔开。认不出的跳过，没写到的按默认顺序补在后面。
-// 旧版本音量、亮度是一个模块 levels，放在它的位置上
+// 旧版本音量、亮度是一个模块 levels，放在它的位置上；旧版本开始按钮总在最前面，没写到时放在窗口格子前面
 void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
     bool used[kModuleCount] = {};
     int n = 0;
@@ -413,24 +413,35 @@ void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
             add(ModuleByKey(name));
         }
     });
+    bool start = used[kModStart];
     for (int m = 0; m < kModuleCount; ++m) add(m);
+    if (!start) {  // 挪到窗口格子前面
+        int *end = order + kModuleCount, *windows = std::find(order, end, kModWindows), *at = std::find(order, end, kModStart);
+        if (windows < at) std::rotate(windows, at, at + 1);
+    }
 }
 
-// 各模块的大小：名字:百分比，逗号隔开，只写不是 100% 的。没写到的是 100%
+// 各模块的大小：名字:百分比，逗号隔开，只写不是 100% 的。没写到的是 100%；开始按钮没写到时和窗口格子一样大
+// （旧版本它跟着窗口格子）
 void ParseModuleScale(const std::wstring& text, int scale[kModuleCount]) {
     std::fill(scale, scale + kModuleCount, 100);
+    bool start = false;
     ForEachPart(text, [&](const std::wstring& part) {
         size_t colon = part.find(L':');
         if (colon == std::wstring::npos) return;
         int m = ModuleByKey(part.substr(0, colon));
         if (m >= 0) scale[m] = std::clamp(_wtoi(part.c_str() + colon + 1), kMinModuleScale, kMaxModuleScale);
+        start = start || m == kModStart;
     });
+    if (!start) scale[kModStart] = scale[kModWindows];
 }
 
 std::wstring ModuleScaleText(const int scale[kModuleCount]) {
     std::wstring text;
-    for (int m = 0; m < kModuleCount; ++m)
-        if (scale[m] != 100) text += (text.empty() ? L"" : L",") + std::wstring(kModuleKeys[m]) + L":" + std::to_wstring(scale[m]);
+    for (int m = 0; m < kModuleCount; ++m) {
+        bool write = m == kModStart ? scale[m] != scale[kModWindows] : scale[m] != 100;
+        if (write) text += (text.empty() ? L"" : L",") + std::wstring(kModuleKeys[m]) + L":" + std::to_wstring(scale[m]);
+    }
     return text;
 }
 
