@@ -16,6 +16,7 @@
 // 材质有液态玻璃和 Win11 原版（平的亚克力，细边框，高亮块是平的，字更清楚），圆角大小在设置里调。
 #include "common.h"
 
+#include <cfloat>
 #include <climits>
 #include <cmath>
 #include <cwchar>
@@ -125,9 +126,12 @@ struct Layout {
     bool mediaTall, radiosOther;
     // 各模块（Module）沿排列方向的起点和长度（放大缩小以后的），这次没有的长度为 0
     float modPos[kModuleCount], modLen[kModuleCount];
-    // 各模块的大小（倍数）和它放大缩小时不动的那条中线（横排是 y，竖排是 x）。除了窗口格子，模块里的东西都按原大小
-    // 排（从 modPos 起），画的时候以 modPos 和中线为原点放大 modK 倍，见 ModToActual
+    // 各模块的大小（倍数）和它的中线（横排是 y，竖排是 x）。除了开始按钮和窗口格子，模块里的东西都按原大小排，
+    // 画的时候放大 modK 倍再挪 modT：画出来的位置 = 原来的位置 × modK + modT，见 ModToActual
     float modK[kModuleCount], modC[kModuleCount];
+    PointF modT[kModuleCount];
+    // 自由布局时放模块的那块区域的左上角（面板里去掉边距、横排时再去掉标题那一行）
+    float freeX, freeY;
     // 窗口格子（和开始按钮）放大缩小以后的边长、间隔；它们直接按这个排，不用放大。tilesLen：格子实际占的长度
     // （格子那一段比它长时格子在中间）
     float wTile, wGap, tilesLen;
@@ -210,10 +214,10 @@ enum EditPart {
     kPartGap,  // 两个窗口格子之间的缝：拖它改图标间距
     kPartHandle = 100
 };
-bool IsHandlePart(int part) { return part >= kPartHandle && part < kPartHandle + kModuleCount; }
+bool IsHandlePart(int part) { return part >= kPartHandle && part < kPartHandle + kFreeItems; }
 int s_editHover = kPartNone;
 int s_hoverModule = -1;        // 鼠标下的模块（窗口格子那一段也算），它角上显示改大小的圆点
-int s_scaleModule = -1;        // 正在拖圆点改大小的模块
+int s_scaleModule = -1;        // 正在拖圆点改大小的模块（自由布局时也可以是调节条那一行、Wi-Fi 蓝牙）
 int s_hoverGap = -1;           // 鼠标下的格子之间的缝（缝前面那个格子的序号）
 int s_gapDrag = -1;            // 正在拖着改图标间距的缝
 int s_gapFromValue = 0;        // 开始拖缝时的图标间距
@@ -229,6 +233,22 @@ bool s_movePanel = false;      // 正在拖面板挪位置
 POINT s_moveAt = {};           // 开始拖时鼠标在屏幕上的位置
 POINT s_moveCur = {};          // 拖模块时鼠标现在在屏幕上的位置（拖着的模块跟着它画）
 float s_moveStartPos = 0;      // 开始拖时那个模块沿排列方向的起点
+POINT s_movePress = {};        // 按下鼠标的地方（按顺序排时挪出几像素才换成自由布局）
+// 自由布局里拖模块：开始拖时它的框、松开会落在哪（w 为 0：没地方放）、对齐到的参考线（区域里的位置，-1 没有）
+FreeBox s_moveBox0, s_moveLand;
+float s_guideX = -1, s_guideY = -1;
+bool s_moveNoRoom = false;  // 想放的地方叠到了别的上面，又没有别的空位（只能回原处）
+// 自由布局里拖圆点改框的长宽：开始拖时的框和鼠标位置
+FreeBox s_scaleBox0;
+POINT s_scaleAt = {};
+// 自由布局里拖边改区域大小：开始拖时的区域大小和各个框
+struct FreeSnap {
+    float w = 0, h = 0;
+    FreeBox box[kFreeItems];
+};
+FreeSnap s_freeFrom;
+bool s_wheelPanel = false;  // 刚在面板空白处用滚轮改了大小：鼠标离开之前标题上显示大小
+std::wstring s_editNote;    // 标题上临时显示的一句话（比如“已保存当前布局”），鼠标挪到别的东西上就不显示了
 // 编辑模式里换了顺序、显示隐藏了模块：各模块从原来画的地方滑到新位置。s_modFrom 是开始滑时还差的那段
 PointF s_modFrom[kModuleCount];
 double s_modStart = 0;
@@ -340,7 +360,7 @@ int s_canvasW = 0, s_canvasH = 0;
 
 // 高亮块：从一个格子滑到另一个格子
 int s_pillIndex = -1;
-float s_pillX = 0, s_pillFrom = 0, s_pillTo = 0;
+PointF s_pillAt, s_pillFrom, s_pillTo;  // 高亮块左上角（自由布局时开始按钮和窗口格子不一定在一行，两个方向都滑）
 double s_pillStart = 0;
 
 float Px(float dip) { return dip * s_scale; }
@@ -382,10 +402,17 @@ bool BubbleTitle() { return s_edge == kEdgeBottom && !s_compact && !s_look.showT
 bool Vertical() { return s_edge != kEdgeBottom; }
 // 这次弹出的那条边用哪份“显示哪些、什么顺序”（底部、侧边各一份）。预览时用设置窗口里改着的
 ModuleSet& Mods() { return (s_preview ? s_look.modules : g_settings.modules)[ModuleSideOf(s_edge)]; }
+// 这次按自由布局摆（开始菜单上那一行总是按顺序排）
+bool FreeLayout() { return Mods().free && !s_compact; }
 
 // 读图标用的大小（像素）：格子边长的三分之二，图标大小、窗口格子调大了也清楚
 int IconPx() {
-    float k = std::max(1.0f, Mods().scale[kModWindows] / 100.0f);
+    const ModuleSet& mods = Mods();
+    float k = std::max(1.0f, mods.scale[kModWindows] / 100.0f);
+    if (FreeLayout()) {  // 自由布局：窗口格子按框的粗细（不超过长度）定大小，框的单位跟着图标大小变
+        const FreeBox& b = mods.box[kModWindows];
+        k = std::max(1.0f, std::min(b.w, b.h) / 48);
+    }
     return static_cast<int>(std::lround(Px(32.0f * s_look.iconSize / 100 * k)));
 }
 
@@ -449,7 +476,7 @@ bool StatusModule(int m) { return m == kModIme || m == kModBattery || m == kModC
 // ---- 各模块的大小 ----
 
 // 设置里的大小（倍数）；开始菜单上那一行都是原大小
-float TargetK(int m) { return s_compact ? 1.0f : Mods().scale[m] / 100.0f; }
+float TargetK(int m) { return s_compact || FreeLayout() ? 1.0f : Mods().scale[m] / 100.0f; }
 
 double ScaleT() { return AnimationsOn() ? (NowMs() - s_scaleStart) / kModuleScaleMs : 1.0; }
 bool ModulesScaling() { return ScaleT() < 1; }
@@ -472,6 +499,39 @@ float GapNow() {
     if (t >= 1) return to;
     float e = static_cast<float>(1 - std::pow(1 - std::max(0.0, t), 3.0));
     return s_gapFrom + (to - s_gapFrom) * e;
+}
+
+// 自由布局里的框变了（松开拖着的模块、改大小、换布局、刚显示出来）：从 s_boxFrom 慢慢变到设置里的
+FreeBox s_boxFrom[kFreeItems];
+double s_boxStart = -1e9;
+
+double BoxT() { return AnimationsOn() ? (NowMs() - s_boxStart) / kModuleScaleMs : 1.0; }
+bool BoxesChanging() { return BoxT() < 1; }
+
+// 现在画的框
+FreeBox BoxNow(int item) {
+    const FreeBox& to = Mods().box[item];
+    const FreeBox& from = s_boxFrom[item];
+    double t = BoxT();
+    if (t >= 1 || from.w <= 0 || to.w <= 0) return to;
+    float e = static_cast<float>(1 - std::pow(1 - std::max(0.0, t), 3.0));
+    auto mix = [e](float a, float b) { return a + (b - a) * e; };
+    return {mix(from.x, to.x), mix(from.y, to.y), mix(from.w, to.w), mix(from.h, to.h)};
+}
+
+struct BoxSnap {
+    FreeBox b[kFreeItems];
+};
+
+BoxSnap SnapBoxes() {
+    BoxSnap snap;
+    for (int i = 0; i < kFreeItems; ++i) snap.b[i] = BoxNow(i);
+    return snap;
+}
+
+void AnimateBoxes(const BoxSnap& snap) {
+    std::copy(snap.b, snap.b + kFreeItems, s_boxFrom);
+    s_boxStart = NowMs();
 }
 
 // 记下各模块现在画着的大小，改了设置里的大小以后用 AnimateScales 从这里变过去
@@ -529,20 +589,18 @@ bool ModuleShown(int m) { return m == kModWindows || ModuleLen(s_L, m) > 0; }
 
 // 模块里按原大小排的位置 → 画出来的位置：以模块起点和它的中线为原点放大 modK 倍（窗口格子本来就是画出来的位置）
 PointF ModToActual(int m, const PointF& p) {
-    const Layout& L = s_L;
-    float k = L.modK[m], pos = L.modPos[m], c = L.modC[m];
     if (LaidActual(m)) return p;
-    if (Vertical()) return PointF(c + (p.X - c) * k, pos + (p.Y - pos) * k);
-    return PointF(pos + (p.X - pos) * k, c + (p.Y - c) * k);
+    float k = s_L.modK[m];
+    const PointF& t = s_L.modT[m];
+    return PointF(p.X * k + t.X, p.Y * k + t.Y);
 }
 
 // 反过来：鼠标在窗口里的位置 → 模块里按原大小排的位置（拿去和模块里的格子、按钮比）
 PointF ModToBase(int m, REAL x, REAL y) {
-    const Layout& L = s_L;
-    float k = std::max(0.01f, L.modK[m]), pos = L.modPos[m], c = L.modC[m];
     if (LaidActual(m)) return PointF(x, y);
-    if (Vertical()) return PointF(c + (x - c) / k, pos + (y - pos) / k);
-    return PointF(pos + (x - pos) / k, c + (y - c) / k);
+    float k = std::max(0.01f, s_L.modK[m]);
+    const PointF& t = s_L.modT[m];
+    return PointF((x - t.X) / k, (y - t.Y) / k);
 }
 
 RectF ModRect(int m, const RectF& r) {
@@ -553,27 +611,21 @@ RectF ModRect(int m, const RectF& r) {
 
 // 画模块之前：之后按原大小画的东西放大缩小到画出来的位置
 void ScaleModule(Graphics& g, int m) {
-    const Layout& L = s_L;
-    float k = L.modK[m], pos = L.modPos[m], c = L.modC[m];
-    if (LaidActual(m) || k == 1) return;
-    if (Vertical()) {
-        g.TranslateTransform(c, pos);
-        g.ScaleTransform(k, k);
-        g.TranslateTransform(-c, -pos);
-    } else {
-        g.TranslateTransform(pos, c);
-        g.ScaleTransform(k, k);
-        g.TranslateTransform(-pos, -c);
-    }
+    float k = s_L.modK[m];
+    const PointF& t = s_L.modT[m];
+    if (LaidActual(m) || (k == 1 && t.X == 0 && t.Y == 0)) return;
+    g.TranslateTransform(t.X, t.Y);
+    g.ScaleTransform(k, k);
 }
 
 // 编辑模式里模块画在离排好的位置多远：拖着的跟着鼠标走，别的从原来的地方滑过来（先快后慢）
 PointF ModuleShift(int m) {
     if (m == s_moveModule) {
         float dx = static_cast<float>(s_moveCur.x - s_moveAt.x), dy = static_cast<float>(s_moveCur.y - s_moveAt.y);
-        float along = s_moveStartPos - s_L.modPos[m];
+        float along = m < kModuleCount ? s_moveStartPos - s_L.modPos[m] : 0;
         return Vertical() ? PointF(dx, dy + along) : PointF(dx + along, dy);
     }
+    if (m >= kModuleCount) return PointF(0, 0);  // 调节条、Wi-Fi 蓝牙只在拖着时挪
     double t = AnimationsOn() ? (NowMs() - s_modStart) / kModuleSlideMs : 1;
     if (t >= 1) return PointF(0, 0);
     float k = static_cast<float>(std::pow(1 - std::max(0.0, t), 3.0));
@@ -640,20 +692,26 @@ float PlaceModules(Layout& L, float start) {
         L.modLen[seq[i]] = ModuleLen(L, seq[i]);
         at += L.modLen[seq[i]];
     }
+    // 以起点和中线为原点放大缩小
+    for (int m = 0; m < kModuleCount; ++m) {
+        float k = 1 - L.modK[m], pos = L.modPos[m] * k, c = L.modC[m] * k;
+        L.modT[m] = Vertical() ? PointF(c, pos) : PointF(pos, c);
+    }
     return at;
 }
 
 // 编辑模式里开着却暂时没有内容的托盘（没有隐藏的图标）也占个位置，好拖着排顺序
 bool TrayHolder() { return s_editing && s_tray.empty() && Mods().tray && !s_compact; }
 
-void ComputeLayout() {
+// 按顺序排（自由布局时也先这样按原大小排一遍，模块里的东西照这个画，再放大缩小到各自的框里）
+void ComputeSequence() {
     Layout& L = s_L;
     bool vertical = Vertical();
     L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕边的距离
     L.pad = s_compact ? Px(4) : Px(8);
     L.tile = Px(48.0f * s_look.iconSize / 100 * s_tileGrow);
     L.gap = Px(GapNow());
-    for (int m = 0; m < kModuleCount; ++m) L.modK[m] = ModK(m);
+    for (int m = 0; m < kModuleCount; ++m) L.modK[m] = FreeLayout() ? 1.0f : ModK(m);
     float kw = L.modK[kModWindows];  // 窗口格子的大小
     L.wTile = L.tile * kw;
     L.wGap = L.gap * kw;
@@ -695,7 +753,7 @@ void ComputeLayout() {
     if (TrayHolder()) L.trayW = s_trayStyle == kTrayRow ? (vertical ? L.cellH : L.cellW) : L.tile;
     int n = static_cast<int>(s_items.size());
     // 媒体只有一张正方形的封面：和格子一样大，横排有调节条那一行时占两行
-    L.mediaTall = s_showMedia && !vertical && L.sliderH > 0;
+    L.mediaTall = s_showMedia && !vertical && L.sliderH > 0 && !FreeLayout();
     L.mediaW = !s_showMedia ? 0 : L.mediaTall ? L.tile + L.rowGap + L.sliderH : L.tile;
     L.mediaH = s_showMedia ? L.tile : 0;
     L.imeW = s_showIme ? Px(30) : 0;
@@ -891,12 +949,25 @@ void ComputeLayout() {
     L.radius = std::min(Px(static_cast<float>(PopupRadius())), L.panelH / 2);
 }
 
+void ApplyFreeLayout(Layout& L);
+
+// 排好布局：按顺序排，自由布局时再把各样东西挪到它的框里
+void ComputeLayout() {
+    ComputeSequence();
+    if (FreeLayout()) ApplyFreeLayout(s_L);
+}
+
 // 排好布局。格子那段有空（关掉了一些模块，面板按调节条那行的最小长度来，或者拖过长度）时，格子按比例放大补上：
 // 面板长度不变、格子都放得下，最多放大到图标大小 150%。筛选时格子大小不变；开始菜单上面那一行、改过模块大小时不放大。
 // 媒体先不算：格子大小、拖过的长度都按没有媒体时来，媒体加在上面，面板跟着变长（放没放歌，原来的布局都一样大）。
 // keepGrow：放大的倍数不重新算（模块变大小的动画中）
 void FitTiles(bool keepGrow = false) {
     s_holderRoom = 0;
+    if (FreeLayout()) {  // 自由布局：各样东西就在它的框里，格子不放大补位
+        s_tileGrow = 1;
+        ComputeLayout();
+        return;
+    }
     bool media = s_showMedia;
     auto length = [] { return Vertical() ? s_L.panelH : s_L.panelW; };
     // 拖过长度时把媒体占的长度加到长度上，格子那段和没有媒体时一样长
@@ -1014,11 +1085,11 @@ bool IsTileVisible(int index) {
 RectF TileRect(int index) {
     const Layout& L = s_L;
     if (index == 0) {  // 开始按钮：自己是一个模块
-        float t = L.tile * L.modK[kModStart], across = L.rowC - t / 2, at = L.modPos[kModStart];
+        float t = L.tile * L.modK[kModStart], across = L.modC[kModStart] - t / 2, at = L.modPos[kModStart];
         return Vertical() ? RectF(across, at, t, t) : RectF(at, across, t, t);
     }
     int slot = index - 1 - s_first;
-    float t = L.wTile, step = L.wTile + L.wGap, across = L.rowC - t / 2;
+    float t = L.wTile, step = L.wTile + L.wGap, across = L.modC[kModWindows] - t / 2;
     if (Vertical()) return RectF(across, L.tilesY + slot * step, t, t);
     return RectF(L.tilesX + slot * step, across, t, t);
 }
@@ -1232,6 +1303,315 @@ bool OverTray(int x, int y) {
     return area.Contains(ModToBase(kModTray, static_cast<REAL>(x), static_cast<REAL>(y)));
 }
 
+// ---- 自由布局 ----
+// 编辑模式里把模块拖到面板里随便哪儿以后，各样东西（模块、调节条那一行、Wi-Fi 蓝牙）就待在设置里存的框（FreeBox）里，
+// 框从放模块的那块区域（面板去掉边距、横排时再去掉标题那一行）的左上角算，单位见 FreeUnit。
+// 模块里的东西还是先按顺序、原大小排一遍（ComputeSequence），再整个放大缩小、挪到框的正中（不变形）；
+// 开始按钮、窗口格子按框的粗细定大小，窗口格子再按长度定显示几个，一行大图标的托盘也按长度定显示几个；
+// 竖着的音量、亮度条按框的宽定粗细、按高拉长；调节条那一行、Wi-Fi 蓝牙按框的长宽横着或竖着排满
+
+constexpr float kMaxFreeThick = 480;  // 那块区域最厚多少：横排时的高、竖排时的宽
+constexpr float kFreeGap = 6;         // 找空位时尽量和别的隔开这么多
+constexpr int kMaxFreeTray = 32;      // 一行大图标的托盘框够长时最多同时显示几个
+
+bool s_freePresent[kFreeItems];  // 这次有没有这一样（ApplyFreeLayout 里定）
+
+// 框的一个单位是多少像素：100% 大小时的一像素，再跟着图标大小变（设置里调图标大小，自由布局整个跟着变）
+float FreeUnit() { return Px(s_look.iconSize / 100.0f); }
+
+// 框在窗口里画在哪
+RectF FreeToActual(const FreeBox& b) {
+    float u = FreeUnit();
+    return RectF(s_L.freeX + b.x * u, s_L.freeY + b.y * u, b.w * u, b.h * u);
+}
+
+RectF FreeRect(int item) { return FreeToActual(BoxNow(item)); }
+
+bool FreePresentNow(const Layout& L, int item) {
+    if (item == kFreeLevels) return RowSliderCount() > 0;
+    if (item == kFreeRadios) return s_radioCount > 0;
+    return item == kModWindows || BaseLen(L, item) > 0;
+}
+
+// 模块里的东西按原大小排在哪（开始按钮、窗口格子不用）
+RectF FreeBaseRect(const Layout& L, int m) {
+    bool v = Vertical();
+    switch (m) {
+        case kModTray: {
+            PointF o = TrayOrigin();
+            return v ? RectF(o.X, o.Y, L.tile, L.trayW) : RectF(o.X, o.Y, L.trayW, L.tile);
+        }
+        case kModMedia: return MediaLayout().cover;
+        // 输入法、电量、时钟竖排时画在比格子宽一点的地方（到面板的边距里），按格子那么宽算（中心一样）
+        case kModIme: return v ? RectF(L.colX, L.imeY, L.tile, L.imeH) : ExtraRect(kExtraIme);
+        case kModBattery: return v ? RectF(L.colX, L.battY, L.tile, L.battH) : ExtraRect(kExtraBattery);
+        case kModClock: return v ? RectF(L.colX, L.clockY, L.tile, L.clockH) : RectF(L.clockX, L.tileY, L.clockW, L.tile);
+        case kModVolume:
+        case kModBright: return s_sliders[m == kModVolume ? 0 : 1].box;
+        default: return RectF();
+    }
+}
+
+// 一样东西原来（按顺序排、100% 大小）有多大，单位见 FreeUnit
+SizeF NaturalSize(const Layout& L, int item) {
+    float u = FreeUnit();
+    bool v = Vertical();
+    auto oriented = [&](float along, float across) { return v ? SizeF(across / u, along / u) : SizeF(along / u, across / u); };
+    switch (item) {
+        case kFreeLevels: return v ? oriented(Px(128), L.tile) : oriented(Px(RowSliderCount() == 2 ? 360.0f : 280.0f), Px(34));
+        case kFreeRadios: {
+            int n = std::max(1, s_radioCount);
+            float along = n * (v ? L.radioH : L.radioW) + (n - 1) * L.radioGap;
+            return oriented(along, v ? L.radioW : L.radioH);
+        }
+        case kModStart: return oriented(L.tile, L.tile);
+        case kModWindows: {
+            int n = ItemCount();
+            return oriented(n == 0 ? L.emptyW : std::min(n, 6) * (L.tile + L.gap) - L.gap, L.tile);
+        }
+        case kModTray: {
+            float cell = v ? L.cellH : L.cellW;
+            return oriented(s_trayStyle == kTrayRow ? std::clamp(TrayCells(), 1, kMaxTrayRow) * cell : L.tile, L.tile);
+        }
+        case kModVolume:
+        case kModBright: return SizeF(Px(kPillW) / u, L.tile / u);
+        default: {
+            RectF r = FreeBaseRect(L, item);
+            return SizeF(r.Width / u, r.Height / u);
+        }
+    }
+}
+
+// 框最小多小：一般是原来的一半；开始按钮、窗口格子半个格子见方；调节条那一行要放得下图标
+SizeF MinBoxSize(const Layout& L, int item) {
+    float u = FreeUnit();
+    if (item == kModStart || item == kModWindows) return SizeF(L.tile / 2 / u, L.tile / 2 / u);
+    if (item == kFreeLevels) return SizeF(Px(RowSliderCount() == 2 ? 48.0f : 34.0f) / u, Px(34) / u);
+    SizeF n = NaturalSize(L, item);
+    float least = Px(14) / u;
+    return SizeF(std::max(least, n.Width / 2), std::max(least, n.Height / 2));
+}
+
+// a 往外扩 pad 以后和 b 叠在一起（只挨着不算）
+bool BoxesOverlap(const FreeBox& a, const FreeBox& b, float pad) {
+    const float e = 0.01f;
+    return a.x - pad < b.x + b.w - e && b.x < a.x + a.w + pad - e && a.y - pad < b.y + b.h - e && b.y < a.y + a.h + pad - e;
+}
+
+// 放在 box 会不会和别的（这次有的）叠在一起。self：它自己，不算
+bool Collides(const FreeBox& box, int self, float pad = 0) {
+    const ModuleSet& mods = Mods();
+    for (int i = 0; i < kFreeItems; ++i)
+        if (i != self && s_freePresent[i] && mods.box[i].w > 0 && BoxesOverlap(box, mods.box[i], pad)) return true;
+    return false;
+}
+
+bool InCanvas(const FreeBox& b) {
+    const ModuleSet& mods = Mods();
+    const float e = 0.01f;
+    return b.x >= -e && b.y >= -e && b.x + b.w <= mods.freeW + e && b.y + b.h <= mods.freeH + e;
+}
+
+// 离 want 最近、在区域里、不和别的叠在一起的位置（差不多近时挑和别的隔开一点的）；没有返回 w 为 0 的。
+// 最近的空位每个方向上要么就是想放的位置，要么贴着区域的边或者别的框的边，只要试这些
+FreeBox FindSpot(const FreeBox& want, int self) {
+    const ModuleSet& mods = Mods();
+    std::vector<float> xs = {want.x, 0, mods.freeW - want.w}, ys = {want.y, 0, mods.freeH - want.h};
+    for (int i = 0; i < kFreeItems; ++i) {
+        const FreeBox& o = mods.box[i];
+        if (i == self || !s_freePresent[i] || o.w <= 0) continue;
+        for (float g : {0.0f, kFreeGap}) {
+            xs.insert(xs.end(), {o.x - want.w - g, o.x + o.w + g});
+            ys.insert(ys.end(), {o.y - want.h - g, o.y + o.h + g});
+        }
+        xs.insert(xs.end(), {o.x, o.x + o.w - want.w});
+        ys.insert(ys.end(), {o.y, o.y + o.h - want.h});
+    }
+    FreeBox best[2];
+    float bestD[2] = {FLT_MAX, FLT_MAX};
+    for (int pass = 0; pass < 2; ++pass) {
+        float pad = pass == 0 ? kFreeGap - 0.05f : 0;
+        for (float x : xs)
+            for (float y : ys) {
+                FreeBox b{x, y, want.w, want.h};
+                float d = std::hypot(x - want.x, y - want.y);
+                if (d < bestD[pass] && InCanvas(b) && !Collides(b, self, pad)) {
+                    best[pass] = b;
+                    bestD[pass] = d;
+                }
+            }
+    }
+    if (best[0].w > 0 && bestD[0] <= bestD[1] + 2 * kFreeGap) return best[0];
+    return best[1];
+}
+
+// 这次有的东西都要有个放得下的框：上次的框出了区域就挪回来（比区域还大就缩小），和别的叠在一起就挪到最近的空位
+// （设置窗口里打开了一样东西、区域改小了以后会这样）。还没放过的（第一次有）按原来的大小找个空位：调节条那一行放左下角、
+// Wi-Fi 蓝牙放右下角、别的放在最后面（横排的右头、竖排的下头），挑最近的空位；哪儿都放不下就把区域加长，放在最后
+void PlaceMissing(const Layout& L) {
+    ModuleSet& mods = Mods();
+    bool v = Vertical();
+    for (int item = 0; item < kFreeItems; ++item) {
+        FreeBox& b = mods.box[item];
+        if (!s_freePresent[item]) continue;
+        if (b.w > 0) {
+            float k = std::min({1.0f, mods.freeW / b.w, mods.freeH / b.h});
+            b.w *= k;
+            b.h *= k;
+            b.x = std::clamp(b.x, 0.0f, mods.freeW - b.w);
+            b.y = std::clamp(b.y, 0.0f, mods.freeH - b.h);
+            if (Collides(b, item)) b = FindSpot(b, item);
+            if (b.w > 0) continue;
+        }
+        SizeF n = NaturalSize(L, item);
+        float thick = v ? mods.freeW : mods.freeH, need = v ? n.Width : n.Height;
+        if (need > thick) {  // 比区域还厚：按比例缩到放得下
+            n.Width *= thick / need;
+            n.Height *= thick / need;
+        }
+        FreeBox want{0, 0, n.Width, n.Height};
+        if (item == kFreeLevels) {
+            want.y = mods.freeH - n.Height;
+        } else if (item == kFreeRadios) {
+            want.x = mods.freeW - n.Width;
+            want.y = mods.freeH - n.Height;
+        } else if (v) {
+            want.x = (mods.freeW - n.Width) / 2;
+            want.y = mods.freeH - n.Height;
+        } else {
+            want.x = mods.freeW - n.Width;
+            want.y = (mods.freeH - n.Height) / 2;
+        }
+        FreeBox spot = FindSpot(want, item);
+        if (spot.w <= 0) {
+            if (v) {
+                spot = {(mods.freeW - n.Width) / 2, mods.freeH + kFreeGap, n.Width, n.Height};
+                mods.freeH += kFreeGap + n.Height;
+            } else {
+                spot = {mods.freeW + kFreeGap, (mods.freeH - n.Height) / 2, n.Width, n.Height};
+                mods.freeW += kFreeGap + n.Width;
+            }
+        }
+        mods.box[item] = spot;
+    }
+}
+
+// 按顺序排好以后（ComputeSequence），把各样东西挪到自由布局里它的框里
+void ApplyFreeLayout(Layout& L) {
+    bool v = Vertical();
+    ModuleSet& mods = Mods();
+    for (int i = 0; i < kFreeItems; ++i) s_freePresent[i] = FreePresentNow(L, i);
+    PlaceMissing(L);
+    float u = FreeUnit();
+    // 面板：那块区域加上四周的边距（横排时还有标题那一行）
+    L.panelW = 2 * L.pad + mods.freeW * u;
+    L.panelH = 2 * L.pad + L.titleH + mods.freeH * u;
+    L.panelX = v ? (s_edge == kEdgeLeft ? L.margin : L.bubbleW + L.margin) : L.margin;
+    L.panelY = v ? L.margin : L.margin + L.topGap;
+    L.freeX = L.panelX + L.pad;
+    L.freeY = L.panelY + L.pad + L.titleH;
+    L.sepCount = 0;
+    L.rowH = v ? mods.freeW * u : mods.freeH * u;
+    // 各模块沿排列方向的起点、长度和中线记成它的框（编辑模式、标题的小牌子用）
+    for (int m = 0; m < kModuleCount; ++m) {
+        L.modPos[m] = L.modLen[m] = 0;
+        if (!s_freePresent[m]) continue;
+        RectF B = FreeRect(m);
+        L.modPos[m] = v ? B.Y : B.X;
+        L.modLen[m] = v ? B.Height : B.Width;
+        L.modC[m] = v ? B.X + B.Width / 2 : B.Y + B.Height / 2;
+    }
+
+    // 开始按钮：框里最大的正方形
+    RectF B = FreeRect(kModStart);
+    float t = std::max(1.0f, std::min(B.Width, B.Height));
+    L.modK[kModStart] = t / L.tile;
+    L.modPos[kModStart] = v ? B.Y + (B.Height - t) / 2 : B.X + (B.Width - t) / 2;
+    L.modLen[kModStart] = t;
+
+    // 窗口格子：框有多粗格子就多大（不超过框的长度），长度放得下几个就显示几个，在框里居中
+    B = FreeRect(kModWindows);
+    float along = v ? B.Height : B.Width, start = v ? B.Y : B.X;
+    int n = ItemCount();
+    t = std::max(1.0f, std::min(v ? B.Width : B.Height, along));
+    L.modK[kModWindows] = t / L.tile;
+    L.wTile = t;
+    L.wGap = L.gap * t / L.tile;
+    s_visible = n == 0 ? 0 : std::clamp(static_cast<int>((along + L.wGap) / (t + L.wGap) + 0.001f), 1, n);
+    L.tilesLen = n == 0 ? along : s_visible * (t + L.wGap) - L.wGap;
+    L.itemsW = along;
+    (v ? L.itemsY : L.itemsX) = start;
+    (v ? L.tilesY : L.tilesX) = start + (along - L.tilesLen) / 2;
+
+    // 别的模块：整个放大缩小到框里最大、放在正中
+    for (int m = 0; m < kModuleCount; ++m) {
+        if (LaidActual(m) || !s_freePresent[m]) continue;
+        B = FreeRect(m);
+        if (m == kModTray && s_trayStyle == kTrayRow && TrayCells() > 0) {  // 一行大图标：框多长显示几个
+            float cell = v ? L.cellH : L.cellW, k = (v ? B.Width : B.Height) / L.tile;
+            int fits = static_cast<int>((v ? B.Height : B.Width) / (cell * k) + 0.01f);
+            s_trayRowMax = std::clamp(fits, 1, kMaxFreeTray);
+            L.trayW = std::min(TrayCells(), s_trayRowMax) * cell;
+            s_trayFirst = std::clamp(s_trayFirst, 0, std::max(0, TrayCells() - s_trayRowMax));
+        }
+        if (PillModule(m)) {  // 竖着的音量、亮度条：框的宽定粗细（宽过高时和高一样粗），高度拉满
+            Slider& sl = s_sliders[m == kModVolume ? 0 : 1];
+            float w = Px(kPillW), k = std::max(0.02f, std::min(B.Width, B.Height) / w);
+            float h = B.Height / k, x = sl.box.X, y = sl.box.Y;
+            sl.box = RectF(x, y, w, h);
+            sl.icon = RectF(x, y + h - w, w, w);
+            sl.a0 = y + h;
+            sl.a1 = y;
+            L.modK[m] = k;
+            L.modT[m] = PointF(B.X + (B.Width - w * k) / 2 - x * k, B.Y - y * k);
+            continue;
+        }
+        RectF base = FreeBaseRect(L, m);
+        float k = std::max(0.02f, std::min(B.Width / std::max(0.5f, base.Width), B.Height / std::max(0.5f, base.Height)));
+        L.modK[m] = k;
+        L.modT[m] = PointF(B.X + (B.Width - base.Width * k) / 2 - base.X * k, B.Y + (B.Height - base.Height * k) / 2 - base.Y * k);
+    }
+
+    // 调节条那一行：框横着长就横着排（各占一段），竖着长就竖着排（各占一列，图标在下面）
+    if (s_freePresent[kFreeLevels]) {
+        B = FreeRect(kFreeLevels);
+        int idx[2], cnt = 0;
+        for (int i = 0; i < 2; ++i)
+            if (RowSlider(i)) idx[cnt++] = i;
+        for (int k = 0; k < cnt; ++k) {
+            Slider& sl = s_sliders[idx[k]];
+            if (B.Width >= B.Height) {
+                float gap = Px(16), seg = (B.Width - (cnt - 1) * gap) / cnt, x0 = B.X + k * (seg + gap), x1 = x0 + seg;
+                float cy = B.Y + B.Height / 2, icon = Px(30);
+                sl = Slider{RectF(x0, cy - icon / 2, icon, icon), x0 + icon + Px(10), x1 - Px(10), cy};
+            } else {
+                float icon = Px(24), cx = B.X + B.Width * (2 * k + 1) / (2 * cnt), iconY = B.GetBottom() - icon;
+                sl = Slider{RectF(cx - icon / 2, iconY, icon, icon), iconY - Px(10), B.Y + Px(10), cx};
+                sl.vertical = true;
+            }
+        }
+    }
+    // Wi-Fi 蓝牙：框横着长就排一行，竖着长就排一列，平分框的长度
+    if (s_freePresent[kFreeRadios]) {
+        B = FreeRect(kFreeRadios);
+        bool row = B.Width >= B.Height;
+        float each = ((row ? B.Width : B.Height) - (s_radioCount - 1) * L.radioGap) / s_radioCount;
+        for (int k = 0; k < s_radioCount; ++k) {
+            float at = k * (each + L.radioGap);
+            s_radioRects[k] = row ? RectF(B.X + at, B.Y, each, B.Height) : RectF(B.X, B.Y + at, B.Width, each);
+        }
+    }
+
+    if (v) {
+        s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin + L.bubbleW));
+        s_height = static_cast<int>(std::ceil(L.panelH + 2 * L.margin));
+    } else {
+        s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin));
+        s_height = static_cast<int>(std::ceil(L.panelH + L.margin + L.topGap + L.bottomGap));
+    }
+    L.radius = std::min(Px(static_cast<float>(PopupRadius())), std::min(L.panelW, L.panelH) / 2);
+}
+
 // 鼠标所指的托盘格子的标题；堆叠又不止一页时带上第几页
 std::wstring TrayTitle(int i) {
     std::wstring name = i >= 0 && i < TrayCells() ? s_tray[i].name : L"";
@@ -1259,24 +1639,26 @@ void SyncPill() {
         s_pillIndex = -1;
         return;
     }
-    float x = Along(TileRect(shown));
+    RectF r = TileRect(shown);
+    PointF at(r.X, r.Y);
     if (s_pillIndex < 0) {
-        s_pillX = s_pillFrom = s_pillTo = x;
-    } else if (x != s_pillTo) {
-        s_pillFrom = s_pillX;
-        s_pillTo = x;
+        s_pillAt = s_pillFrom = s_pillTo = at;
+    } else if (!at.Equals(s_pillTo)) {
+        s_pillFrom = s_pillAt;
+        s_pillTo = at;
         s_pillStart = NowMs();
     }
     s_pillIndex = shown;
 }
 
-bool PillMoving() { return s_pillIndex >= 0 && s_pillX != s_pillTo; }
+bool PillMoving() { return s_pillIndex >= 0 && !s_pillAt.Equals(s_pillTo); }
 
 void AdvancePill(double now) {
     if (!PillMoving()) return;
     double t = AnimationsOn() ? std::min(1.0, (now - s_pillStart) / kPillMs) : 1.0;
     double e = 1 - std::pow(1 - t, 3.0);
-    s_pillX = t >= 1 ? s_pillTo : static_cast<float>(s_pillFrom + (s_pillTo - s_pillFrom) * e);
+    auto mix = [&](float a, float b) { return static_cast<float>(a + (b - a) * e); };
+    s_pillAt = t >= 1 ? s_pillTo : PointF(mix(s_pillFrom.X, s_pillTo.X), mix(s_pillFrom.Y, s_pillTo.Y));
 }
 
 // ---- 绘制 ----
@@ -1309,7 +1691,8 @@ void DrawPill(Graphics& g) {
     if (s_pillIndex < 0) return;
     const Palette& pal = Colors();
     RectF r = TileRect(s_pillIndex);
-    (Vertical() ? r.Y : r.X) = s_pillX;
+    r.X = s_pillAt.X;
+    r.Y = s_pillAt.Y;
     r.Inflate(-0.5f, -0.5f);
     GraphicsPath path;
     AddRoundRect(path, r, PillRadius());
@@ -2091,13 +2474,13 @@ void DrawContent(Graphics& g) {
                     if (IsUrgentItem(i)) (i < s_first ? urgentBefore : urgentAfter) = true;
                 }
                 if (vertical) {
-                    float midX = L.rowC, y0 = L.itemsY - Px(2), y1 = L.itemsY + L.itemsW + Px(2);
+                    float midX = L.modC[kModWindows], y0 = L.itemsY - Px(2), y1 = L.itemsY + L.itemsW + Px(2);
                     PointF up[3] = {PointF(midX, y0 - tri), PointF(midX - tri, y0), PointF(midX + tri, y0)};
                     PointF down[3] = {PointF(midX, y1 + tri), PointF(midX - tri, y1), PointF(midX + tri, y1)};
                     if (before) g.FillPolygon(urgentBefore ? &urgentHint : &hint, up, 3);
                     if (after) g.FillPolygon(urgentAfter ? &urgentHint : &hint, down, 3);
                 } else {
-                    float midY = L.rowC, x0 = L.itemsX - Px(2), x1 = L.itemsX + L.itemsW + Px(2);
+                    float midY = L.modC[kModWindows], x0 = L.itemsX - Px(2), x1 = L.itemsX + L.itemsW + Px(2);
                     PointF left[3] = {PointF(x0 - tri, midY), PointF(x0, midY - tri), PointF(x0, midY + tri)};
                     PointF right[3] = {PointF(x1 + tri, midY), PointF(x1, midY - tri), PointF(x1, midY + tri)};
                     if (before) g.FillPolygon(urgentBefore ? &urgentHint : &hint, left, 3);
@@ -2105,12 +2488,13 @@ void DrawContent(Graphics& g) {
                 }
                 if (s_items.empty()) {
                     const wchar_t* empty = Tr(s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用");
-                    if (vertical)
-                        DrawLabel(g, empty, smallFont, RectF(L.panelX + Px(4), L.itemsY, L.panelW - Px(8), L.itemsW), center,
-                                  pal.subtle);
-                    else
-                        DrawLabel(g, empty, titleFont, RectF(L.itemsX, L.rowC - L.wTile / 2, L.itemsW, L.wTile), center,
-                                  pal.subtle);
+                    if (vertical) {
+                        RectF r = FreeLayout() ? FreeRect(kModWindows) : RectF(L.panelX + Px(4), L.itemsY, L.panelW - Px(8), L.itemsW);
+                        DrawLabel(g, empty, smallFont, r, center, pal.subtle);
+                    } else {
+                        DrawLabel(g, empty, titleFont, RectF(L.itemsX, L.modC[kModWindows] - L.wTile / 2, L.itemsW, L.wTile),
+                                  center, pal.subtle);
+                    }
                 }
                 break;
             }
@@ -2145,9 +2529,19 @@ void DrawContent(Graphics& g) {
         if (m != s_moveModule) drawModule(m);
     if (s_moveModule >= 0 && s_moveModule < kModuleCount) drawModule(s_moveModule);
 
-    for (int i = 0; i < 2; ++i)
-        if (RowSlider(i)) DrawSlider(g, i);
-    DrawRadios(g);
+    // 调节条那一行、Wi-Fi 蓝牙：编辑模式里拖着时跟着鼠标
+    auto drawShifted = [&](int part, auto draw) {
+        PointF shift = ModuleShift(part);
+        GraphicsState state = g.Save();
+        g.TranslateTransform(shift.X, shift.Y);
+        draw();
+        g.Restore(state);
+    };
+    drawShifted(kPartLevels, [&] {
+        for (int i = 0; i < 2; ++i)
+            if (RowSlider(i)) DrawSlider(g, i);
+    });
+    drawShifted(kPartRadios, [&] { DrawRadios(g); });
     if (s_editing) DrawEditFrame(g);
 }
 
@@ -2616,7 +3010,7 @@ void Frame() {
         return;
     }
     if (s_scaleLayout && s_open) {
-        s_scaleLayout = ModulesScaling() || GapChanging();
+        s_scaleLayout = ModulesScaling() || GapChanging() || BoxesChanging();
         ScaleRelayout();
     }
     SyncPill();
@@ -3332,7 +3726,12 @@ void WatchHoverLeave();
 RECT GrowArea() {
     float grow = static_cast<float>(kMaxPopupScale) / std::max(1, s_preview ? s_previewPercent : g_settings.popupScale);
     // 模块放大时图标那一行（竖排时那一列）也会变高（宽）：最多到最大的模块放到最大
-    if (s_editing) grow *= std::max(1.0f, kMaxModuleScale / 100.0f * s_L.tile / std::max(1.0f, s_L.rowH));
+    if (s_editing && FreeLayout()) {  // 自由布局：那块区域最厚到 kMaxFreeThick
+        float thick = Vertical() ? s_L.panelW : s_L.panelH;
+        grow *= std::max(1.0f, (kMaxFreeThick * FreeUnit() + 2 * s_L.pad + s_L.titleH) / std::max(1.0f, thick));
+    } else if (s_editing) {
+        grow *= std::max(1.0f, kMaxModuleScale / 100.0f * s_L.tile / std::max(1.0f, s_L.rowH));
+    }
     LONG w = static_cast<LONG>(std::ceil(s_width * grow)), h = static_cast<LONG>(std::ceil(s_height * grow));
     const RECT& b = s_bounds;
     if (s_edge == kEdgeLeft) return {b.left, b.top, b.left + w, b.bottom};
@@ -3491,6 +3890,7 @@ bool EditPartShown(int part) {
 RectF EditPartRect(int part) {
     const Layout& L = s_L;
     bool v = Vertical();
+    if (FreeLayout()) return FreeRect(part);  // 自由布局：就是它的框
     if (part == kPartLevels) {
         if (v) return RectF(L.colX, L.sliderY, L.tile, L.sliderH);
         const Slider& first = s_sliders[RowSlider(0) ? 0 : 1];
@@ -3519,6 +3919,65 @@ RectF EditPartRect(int part) {
     return RectF(pos, L.modC[part] - across / 2, len, across);
 }
 
+// 按顺序排时各样东西画在哪（换成自由布局时照这个定框，看起来不变）
+RectF SeqRect(int item) {
+    const Layout& L = s_L;
+    bool v = Vertical();
+    switch (item) {
+        case kModStart: return TileRect(0);
+        case kModWindows: {
+            float along = v ? L.itemsY : L.itemsX, c = L.modC[kModWindows], t = L.wTile;
+            return v ? RectF(c - t / 2, along, t, L.itemsW) : RectF(along, c - t / 2, L.itemsW, t);
+        }
+        case kPartLevels: {
+            if (v) return RectF(L.colX, L.sliderY, L.tile, L.sliderH);
+            const Slider& first = s_sliders[RowSlider(0) ? 0 : 1];
+            const Slider& last = s_sliders[RowSlider(1) ? 1 : 0];
+            return RectF(first.icon.X, L.sliderY, last.a1 + Px(10) - first.icon.X, L.sliderH);
+        }
+        case kPartRadios: {
+            RectF r = s_radioRects[0];
+            for (int k = 1; k < s_radioCount; ++k) RectF::Union(r, r, s_radioRects[k]);
+            return r;
+        }
+        default: return ModRect(item, FreeBaseRect(L, item));
+    }
+}
+
+// 编辑模式里开始拖模块：按现在排好的样子换成自由布局（各样东西的框就是它现在画的地方）
+void ConvertToFree() {
+    const Layout& L = s_L;
+    ModuleSet& mods = Mods();
+    bool v = Vertical();
+    float u = FreeUnit(), ox = L.panelX + L.pad, oy = L.panelY + L.pad + L.titleH;
+    FreeBox boxes[kFreeItems];
+    for (int i = 0; i < kFreeItems; ++i) {
+        if (!EditPartShown(i)) continue;
+        RectF r = SeqRect(i);
+        boxes[i] = {(r.X - ox) / u, (r.Y - oy) / u, r.Width / u, r.Height / u};
+    }
+    float W = (L.panelW - 2 * L.pad) / u, H = (L.panelH - 2 * L.pad - L.titleH) / u;
+    // 自由布局里格子之间的间隔跟着格子大小（不算放大补位），可能宽一点：窗口那段加长到还放得下现在这么多个，后面的往后挪
+    FreeBox& w = boxes[kModWindows];
+    if (s_visible > 1) {
+        float t = v ? w.w * u : w.h * u, gap = L.gap * t / Px(48.0f * s_look.iconSize / 100);
+        float need = (s_visible * (t + gap) - gap) / u, len = v ? w.h : w.w;
+        if (need > len + 0.01f) {
+            float d = need - len, end = (v ? w.y : w.x) + len;
+            for (int i = 0; i < kFreeItems; ++i)
+                if (i != kModWindows && boxes[i].w > 0 && (v ? boxes[i].y : boxes[i].x) >= end - 0.5f) (v ? boxes[i].y : boxes[i].x) += d;
+            (v ? w.h : w.w) += d;
+            (v ? H : W) += d;
+        }
+    }
+    mods.free = true;
+    mods.freeW = std::max(16.0f, W);
+    mods.freeH = std::max(16.0f, H);
+    std::copy(boxes, boxes + kFreeItems, mods.box);
+    s_boxStart = s_modStart = s_scaleStart = s_gapStart = -1e9;
+    Log(L"编辑模式里换成了自由布局");
+}
+
 // 改大小的圆点在模块的哪个角：横排是右上角，竖排是靠面板里侧的下角（往外、往下拖变大）。
 // anchor：对面那个角（拖的时候按鼠标在这条对角线上走了多远算大小）
 PointF HandlePoint(int m, PointF* anchor = nullptr) {
@@ -3540,8 +3999,8 @@ int HandleAt(int x, int y) {
     if (!s_editing || s_anim != Anim::None || EditDragging()) return -1;
     float best = Px(9) * Px(9);
     int found = -1;
-    for (int m = 0; m < kModuleCount; ++m) {
-        if (!ModuleShown(m)) continue;
+    for (int m = 0; m < (FreeLayout() ? kFreeItems : kModuleCount); ++m) {
+        if (!EditPartShown(m)) continue;
         PointF h = HandlePoint(m);
         float dx = h.X - x, dy = h.Y - y, d = dx * dx + dy * dy;
         if (d <= best) {
@@ -3566,7 +4025,7 @@ int GapAt(int x, int y) {
     bool v = Vertical();
     PointF shift = ModuleShift(kModWindows);
     float along = static_cast<float>(v ? y : x), across = static_cast<float>(v ? x : y) - (v ? shift.X : shift.Y);
-    if (std::abs(across - L.rowC) > L.wTile / 2) return -1;
+    if (std::abs(across - L.modC[kModWindows]) > L.wTile / 2) return -1;
     float half = std::min(std::max(L.wGap / 2, Px(4)), L.wTile / 4);
     for (int idx = s_first + 1; idx < s_first + s_visible && idx < ItemCount(); ++idx)
         if (std::abs(along - GapCenter(idx)) <= half) return idx;
@@ -3591,6 +4050,7 @@ int EditPartAt(int x, int y) {
 int EditModuleAt(int x, int y, int part) {
     if (IsHandlePart(part)) return part - kPartHandle;
     if (part == kPartGap) return kModWindows;
+    if (FreeLayout() && (part == kPartLevels || part == kPartRadios)) return part;  // 自由布局里它们也能改大小
     if (part == kPartNone || part == kPartLevels || part == kPartRadios) return -1;
     PointF pt(static_cast<REAL>(x), static_cast<REAL>(y));
     for (int m = 0; m < kModuleCount; ++m)
@@ -3628,27 +4088,41 @@ std::wstring PlaceText() {
     }
 }
 
+// 自由布局里一样东西的框多大（单位见 FreeUnit）
+std::wstring BoxSizeText(int item) {
+    const FreeBox& b = Mods().box[item];
+    return TrF(L"%ls %d × %d", PartName(item), static_cast<int>(std::lround(b.w)), static_cast<int>(std::lround(b.h)));
+}
+
 // 编辑模式里标题上的说明：正在拖的、鼠标下的东西怎么拖
 std::wstring EditText() {
+    bool free = FreeLayout();
+    const ModuleSet& mods = Mods();
+    if (s_resize && free)
+        return TrF(L"区域 %d × %d", static_cast<int>(std::lround(mods.freeW)), static_cast<int>(std::lround(mods.freeH)));
     if (s_resize) return SizeText();
-    if (s_scaleModule >= 0) return TrF(L"%ls %d%%", PartName(s_scaleModule), VisualPercent(s_scaleModule));
+    if (s_scaleModule >= 0)
+        return free ? BoxSizeText(s_scaleModule) : TrF(L"%ls %d%%", PartName(s_scaleModule), VisualPercent(s_scaleModule));
     if (s_gapDrag >= 0 || (s_wheelGap && s_editHover == kPartGap)) return TrF(L"图标间距 %d 像素", s_look.iconGap);
     if (s_movePanel) return PlaceText();
-    if (s_moveModule != kPartNone) return s_moveOut ? TrF(L"松开隐藏%ls", PartName(s_moveModule)) : Tr(L"放到想要的位置");
+    if (s_moveModule != kPartNone) {
+        if (s_moveOut) return TrF(L"松开隐藏%ls", PartName(s_moveModule));
+        return Tr(free && s_moveNoRoom ? L"没有空位，先拖边把区域放大" : L"放到想要的位置");
+    }
     if (s_wheelScaled >= 0 && s_wheelScaled == s_hoverModule)  // 刚用滚轮改了大小
-        return TrF(L"%ls %d%%", PartName(s_wheelScaled), VisualPercent(s_wheelScaled));
-    if (IsHandlePart(s_editHover)) return Tr(L"拖动改大小，双击恢复，滚轮也能调");
+        return free ? BoxSizeText(s_wheelScaled) : TrF(L"%ls %d%%", PartName(s_wheelScaled), VisualPercent(s_wheelScaled));
+    if (s_wheelPanel && s_editHover == kPartPanel) return TrF(L"大小 %d%%", g_settings.popupScale);
+    if (!s_editNote.empty()) return s_editNote;
+    if (IsHandlePart(s_editHover)) return Tr(free ? L"拖动改长宽，双击恢复，滚轮也能调" : L"拖动改大小，双击恢复，滚轮也能调");
     switch (s_editHover) {
         case kPartGap: return Tr(L"拖动改间距，双击恢复，滚轮也能调");
-        case kPartScaleEdge: return Tr(L"拖动改大小，双击恢复");
-        case kPartLengthEdge: return Tr(L"拖动改长度，双击恢复");
-        case kPartLevels:
-        case kPartRadios: return Tr(L"拖出面板隐藏");
-        case kPartPanel: return Tr(L"拖动挪位置，双击恢复");
+        case kPartScaleEdge: return Tr(free ? L"拖动改区域大小，双击去掉空白" : L"拖动改大小，双击恢复");
+        case kPartLengthEdge: return Tr(free ? L"拖动改区域大小，双击去掉空白" : L"拖动改长度，双击恢复");
+        case kPartPanel: return Tr(L"拖动挪位置，滚轮改大小，双击恢复");
         case kPartNone: return Tr(L"编辑模式：回车完成，右键更多");
         case kModStart:
-        case kModWindows: return Tr(L"拖动换位置");
-        default: return Tr(L"拖动换位置，拖出面板隐藏");
+        case kModWindows: return Tr(L"拖到想放的地方");
+        default: return Tr(L"拖到想放的地方，拖出面板隐藏");
     }
 }
 
@@ -3665,19 +4139,39 @@ bool EditClickTwice(POINT screen) {
 
 // ---- 编辑模式：拖模块换顺序、拖出去隐藏 ----
 
+// 拖着的模块在自由布局里现在在哪（跟着鼠标，没对齐、没挪进区域）
+FreeBox DraggedBox() {
+    FreeBox b = s_moveBox0;
+    float u = FreeUnit();
+    b.x += (s_moveCur.x - s_moveAt.x) / u;
+    b.y += (s_moveCur.y - s_moveAt.y) / u;
+    return b;
+}
+
 void BeginModuleDrag(int part, POINT screen) {
-    ModuleSnap snap = SnapModules();  // 别的模块还在滑的话接着滑
     s_moveModule = part;
     s_moveOut = false;
-    s_moveAt = s_moveCur = screen;
+    s_moveAt = s_moveCur = s_movePress = screen;
     s_moveStartPos = part < kModuleCount ? s_L.modPos[part] : 0;
-    if (part < kModuleCount) {  // 拖着的从它现在画的地方开始跟着鼠标
-        PointF from = snap.at[part];
-        float pos = s_moveStartPos + static_cast<float>(Vertical() ? s_pos.y : s_pos.x);
-        s_moveAt.x -= static_cast<LONG>(std::lround(Vertical() ? from.X : from.X - pos));
-        s_moveAt.y -= static_cast<LONG>(std::lround(Vertical() ? from.Y - pos : from.Y));
+    s_moveLand = {};
+    s_guideX = s_guideY = -1;
+    if (FreeLayout()) {
+        if (BoxesChanging()) {  // 还在变的框直接到位
+            s_boxStart = -1e9;
+            EditRelayout();
+            s_moveStartPos = part < kModuleCount ? s_L.modPos[part] : 0;
+        }
+        s_moveBox0 = s_moveLand = Mods().box[part];
+    } else {
+        ModuleSnap snap = SnapModules();  // 别的模块还在滑的话接着滑
+        if (part < kModuleCount) {  // 拖着的从它现在画的地方开始跟着鼠标
+            PointF from = snap.at[part];
+            float pos = s_moveStartPos + static_cast<float>(Vertical() ? s_pos.y : s_pos.x);
+            s_moveAt.x -= static_cast<LONG>(std::lround(Vertical() ? from.X : from.X - pos));
+            s_moveAt.y -= static_cast<LONG>(std::lround(Vertical() ? from.Y - pos : from.Y));
+        }
+        SlideModules(snap);
     }
-    SlideModules(snap);
     SetCapture(s_hwnd);
     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
     Redraw();
@@ -3700,6 +4194,58 @@ void MoveModule(int part, int k) {
     std::copy(rest.begin(), rest.end(), order);
 }
 
+// 拖着的框靠近别的框、区域的边或中线时对齐过去，记下对齐的那条线（画出来）
+void SnapToGuides(FreeBox& c) {
+    const ModuleSet& mods = Mods();
+    float reach = Px(6) / FreeUnit();
+    auto snap = [&](float& pos, float size, bool horizontal, float& guide) {
+        float best = reach, move = 0;
+        guide = -1;
+        auto test = [&](float line) {
+            for (float at : {pos, pos + size / 2, pos + size})
+                if (std::fabs(line - at) < best) {
+                    best = std::fabs(line - at);
+                    move = line - at;
+                    guide = line;
+                }
+        };
+        float full = horizontal ? mods.freeW : mods.freeH;
+        for (float line : {0.0f, full / 2, full}) test(line);
+        for (int i = 0; i < kFreeItems; ++i) {
+            const FreeBox& o = mods.box[i];
+            if (i == s_moveModule || !s_freePresent[i] || o.w <= 0) continue;
+            float a = horizontal ? o.x : o.y, len = horizontal ? o.w : o.h;
+            for (float line : {a, a + len / 2, a + len}) test(line);
+        }
+        pos += move;
+    };
+    snap(c.x, c.w, true, s_guideX);
+    snap(c.y, c.h, false, s_guideY);
+}
+
+// 自由布局里拖着模块：它跟着鼠标走，松开会落在哪（虚线框）——想放的地方（挨近了对齐别的）放得下就是那里，
+// 叠到别的上面就挑最近的空位
+void DragFreeModule() {
+    const ModuleSet& mods = Mods();
+    FreeBox c = DraggedBox();
+    c.x = std::clamp(c.x, 0.0f, std::max(0.0f, mods.freeW - c.w));
+    c.y = std::clamp(c.y, 0.0f, std::max(0.0f, mods.freeH - c.h));
+    SnapToGuides(c);
+    s_moveNoRoom = false;
+    if (s_moveOut) {
+        s_moveLand = {};
+        s_guideX = s_guideY = -1;
+    } else if (Collides(c, s_moveModule)) {
+        s_moveLand = FindSpot(c, s_moveModule);
+        s_guideX = s_guideY = -1;
+        const FreeBox& l = s_moveLand;
+        s_moveNoRoom = l.w <= 0 || (l.x == s_moveBox0.x && l.y == s_moveBox0.y);
+    } else {
+        s_moveLand = c;
+    }
+    Redraw();
+}
+
 void DragModule(POINT screen) {
     const Layout& L = s_L;
     s_moveCur = screen;
@@ -3708,6 +4254,18 @@ void DragModule(POINT screen) {
     keep.Inflate(Px(16), Px(16));
     bool out = !keep.Contains(pt) && !LaidActual(s_moveModule);  // 开始按钮、窗口格子不能隐藏
     s_moveOut = out;
+    // 按顺序排时在面板里挪出几像素：换成自由布局，之后拖到哪就放在哪（拖出去隐藏还是按顺序排）
+    if (!FreeLayout() && !out &&
+        std::abs(screen.x - s_movePress.x) + std::abs(screen.y - s_movePress.y) >= static_cast<LONG>(Px(4))) {
+        ConvertToFree();
+        EditRelayout();
+        s_moveStartPos = s_moveModule < kModuleCount ? s_L.modPos[s_moveModule] : 0;
+        s_moveBox0 = Mods().box[s_moveModule];
+    }
+    if (FreeLayout()) {
+        DragFreeModule();
+        return;
+    }
     Redraw();  // 拖着的模块跟着鼠标
     if (out || s_moveModule >= kModuleCount) return;
     // 鼠标越过了别的模块的中线就换到它那一边（多过几个像素才算，免得面板挪了一点又换回来）
@@ -3736,11 +4294,70 @@ void DragModule(POINT screen) {
 
 void ShowPart(int part, bool on);
 
-// drop：松开了鼠标（拖到外面就隐藏）；否则是被打断了，换过的顺序照样留着
+// 自由布局里换一样东西的框，从现在画的样子慢慢变过去
+void SetFreeBox(int item, const FreeBox& to) {
+    BoxSnap boxes = SnapBoxes();
+    Mods().box[item] = to;
+    AnimateBoxes(boxes);
+    s_scaleLayout = true;
+    EditRelayout();
+}
+
+// 自由布局里显示了一样东西：回到上次的框（那里被占了、出了区域就找最近的空位，哪儿都没有就当没放过、按原来的大小
+// 另找地方），从很小长到框那么大。隐藏的框留着，下次显示还在那里
+void ShowFreePart(int part, bool on) {
+    ModuleSet& mods = Mods();
+    int item = part;
+    if (PillModule(part) && !PillSlider(part == kModVolume ? 0 : 1)) item = kFreeLevels;  // 在调节条那一行的
+    BoxSnap boxes = SnapBoxes();
+    s_boxStart = -1e9;
+    ComputeLayout();  // 先看这次有哪些，没放过的找好地方
+    if (on && s_freePresent[item]) {
+        FreeBox& b = mods.box[item];
+        if (b.w > 0 && (!InCanvas(b) || Collides(b, item))) {
+            FreeBox want = b;
+            want.x = std::clamp(want.x, 0.0f, std::max(0.0f, mods.freeW - want.w));
+            want.y = std::clamp(want.y, 0.0f, std::max(0.0f, mods.freeH - want.h));
+            b = FindSpot(want, item);
+            if (b.w <= 0) ComputeLayout();
+        }
+        const FreeBox& to = mods.box[item];
+        boxes.b[item] = {to.x + to.w * 0.475f, to.y + to.h * 0.475f, to.w * 0.05f, to.h * 0.05f};
+    }
+    AnimateBoxes(boxes);
+    s_scaleLayout = true;
+    SaveSettings();
+    SettingsDialog_SettingsChanged();
+    EditRelayout();
+}
+
+// drop：松开了鼠标（拖到外面就隐藏）；否则是被打断了，换过的顺序照样留着（自由布局时放回原处）
 void EndModuleDrag(bool drop) {
     if (s_moveModule == kPartNone) return;
     int part = s_moveModule;
     bool out = s_moveOut;
+    if (FreeLayout()) {
+        // 从松开的地方慢慢落到虚线框那里（没地方放、被打断了就回到原处）
+        BoxSnap boxes = SnapBoxes();
+        boxes.b[part] = DraggedBox();
+        s_moveModule = kPartNone;  // 先清掉：放开鼠标捕获时还会再进来
+        s_moveOut = false;
+        s_guideX = s_guideY = -1;
+        if (GetCapture() == s_hwnd) ReleaseCapture();
+        if (drop && out) {
+            ShowPart(part, false);
+            return;
+        }
+        FreeBox to = drop && s_moveLand.w > 0 ? s_moveLand : s_moveBox0;
+        Mods().box[part] = to;
+        AnimateBoxes(boxes);
+        s_scaleLayout = true;
+        if (to.x != s_moveBox0.x || to.y != s_moveBox0.y) Log(L"编辑模式里把%ls挪到了 %.0f, %.0f", PartName(part), to.x, to.y);
+        SaveSettings();
+        SettingsDialog_SettingsChanged();
+        EditRelayout();
+        return;
+    }
     ModuleSnap snap = SnapModules();
     s_moveModule = kPartNone;  // 先清掉：放开鼠标捕获时还会再进来
     s_moveOut = false;
@@ -3811,6 +4428,10 @@ void ShowPart(int part, bool on) {
     SyncMediaShown();
     s_editHover = kPartNone;
     s_hoverModule = -1;
+    if (FreeLayout()) {
+        ShowFreePart(part, on);
+        return;
+    }
     SaveSettings();
     SettingsDialog_SettingsChanged();
     // 刚显示出来的模块从很小长到它的大小，别的模块跟着让开；格子放大补位的倍数变了的话，格子也慢慢变过去
@@ -3921,17 +4542,6 @@ void ResetPlace() {
     EditRelayout();
 }
 
-void ResetOrder() {
-    ModuleSnap snap = SnapModules();
-    for (int i = 0; i < kModuleCount; ++i) Mods().order[i] = i;
-    Log(L"迷你任务栏恢复默认顺序");
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
-    EditRelayout();
-    SlideModules(snap);
-    Redraw();
-}
-
 // ---- 编辑模式：改模块大小 ----
 
 // 改设置里各模块的大小（change 里改），从现在画着的大小慢慢变过去。格子放大补位的倍数先按新的大小算好，
@@ -3973,16 +4583,93 @@ void SetModuleScale(int m, int percent) {
     });
 }
 
-void ResetScales() {
-    if (!CustomScales()) return;
-    ChangeScales([] { std::fill(Mods().scale, Mods().scale + kModuleCount, 100); });
-    Log(L"迷你任务栏恢复模块大小");
+// 双击自由布局里的圆点：框恢复原来的大小（中心不动；那里放不下就找最近的空位）
+void ResetFreeBox(int item) {
+    ModuleSet& mods = Mods();
+    FreeBox b = mods.box[item];
+    SizeF n = NaturalSize(s_L, item);
+    n.Width = std::min(n.Width, mods.freeW);
+    n.Height = std::min(n.Height, mods.freeH);
+    FreeBox want{b.x + (b.w - n.Width) / 2, b.y + (b.h - n.Height) / 2, n.Width, n.Height};
+    want.x = std::clamp(want.x, 0.0f, mods.freeW - n.Width);
+    want.y = std::clamp(want.y, 0.0f, mods.freeH - n.Height);
+    if (Collides(want, item)) want = FindSpot(want, item);
+    if (want.w <= 0 || (want.x == b.x && want.y == b.y && want.w == b.w && want.h == b.h)) return;
+    SetFreeBox(item, want);
+    Log(L"双击恢复了%ls的大小", PartName(item));
     SaveSettings();
     SettingsDialog_SettingsChanged();
 }
 
-// 按下了模块角上的圆点：开始拖着改大小（双击恢复 100%）
+// 自由布局里改框的大小：不小于最小、不出区域（anchor 那个角不动，right / top：框往右、往上长）。
+// 叠到别的上面时先长一个方向再长另一个，挑面积大的
+FreeBox GrowBox(int item, const FreeBox& b0, float ax, float ay, bool right, bool top, float w, float h) {
+    const ModuleSet& mods = Mods();
+    SizeF least = MinBoxSize(s_L, item);
+    w = std::clamp(w, least.Width, std::max(least.Width, right ? mods.freeW - ax : ax));
+    h = std::clamp(h, least.Height, std::max(least.Height, top ? ay : mods.freeH - ay));
+    auto boxAt = [&](float bw, float bh) { return FreeBox{right ? ax : ax - bw, top ? ay - bh : ay, bw, bh}; };
+    FreeBox b = boxAt(w, h);
+    if (!Collides(b, item)) return b;
+    // 从 from 往 to 走，走到刚好不叠
+    auto reach = [&](float fromW, float fromH, float toW, float toH) {
+        float lo = 0, hi = 1;
+        for (int i = 0; i < 12; ++i) {
+            float t = (lo + hi) / 2;
+            if (Collides(boxAt(fromW + (toW - fromW) * t, fromH + (toH - fromH) * t), item)) hi = t;
+            else lo = t;
+        }
+        return boxAt(fromW + (toW - fromW) * lo, fromH + (toH - fromH) * lo);
+    };
+    FreeBox wide = reach(b0.w, b0.h, w, b0.h);
+    wide = reach(wide.w, b0.h, wide.w, h);
+    FreeBox tall = reach(b0.w, b0.h, b0.w, h);
+    tall = reach(b0.w, tall.h, w, tall.h);
+    return wide.w * wide.h >= tall.w * tall.h ? wide : tall;
+}
+
+// 圆点在框的哪个角（和 HandlePoint 一样）：横排右上，竖排贴左边时右下、贴右边时左下
+void HandleCorner(bool& right, bool& top) {
+    right = !Vertical() || s_edge == kEdgeLeft;
+    top = !Vertical();
+}
+
+// 自由布局里拖圆点：对角不动，长宽分别跟着鼠标（按住 Shift 不变形）
+void DragFreeScale(POINT screen) {
+    int item = s_scaleModule;
+    const FreeBox& b0 = s_scaleBox0;
+    float u = FreeUnit(), dx = (screen.x - s_scaleAt.x) / u, dy = (screen.y - s_scaleAt.y) / u;
+    bool right, top;
+    HandleCorner(right, top);
+    float w = b0.w + (right ? dx : -dx), h = b0.h + (top ? -dy : dy);
+    if (GetKeyState(VK_SHIFT) & 0x8000) {
+        float k = std::max(w / b0.w, h / b0.h);
+        w = b0.w * k;
+        h = b0.h * k;
+    }
+    float ax = right ? b0.x : b0.x + b0.w, ay = top ? b0.y + b0.h : b0.y;
+    Mods().box[item] = GrowBox(item, b0, ax, ay, right, top, w, h);
+    EditRelayout();
+}
+
+// 按下了模块角上的圆点：开始拖着改大小（双击恢复 100%）。自由布局时长宽分别改，双击恢复原来的大小
 void BeginScaleDrag(int m, POINT screen) {
+    if (FreeLayout()) {
+        if (EditClickTwice(screen)) {
+            ResetFreeBox(m);
+            return;
+        }
+        if (BoxesChanging()) {
+            s_boxStart = -1e9;
+            EditRelayout();
+        }
+        s_scaleModule = m;
+        s_scaleBox0 = Mods().box[m];
+        s_scaleAt = screen;
+        SetCapture(s_hwnd);
+        Redraw();
+        return;
+    }
     if (EditClickTwice(screen)) {
         if (Mods().scale[m] != 100) {
             SetModuleScale(m, 100);
@@ -4005,6 +4692,10 @@ void BeginScaleDrag(int m, POINT screen) {
 
 // 按鼠标沿着对角线走了多远成比例改（拖回原处就是原来的大小），5% 一档
 void DragScale(POINT screen) {
+    if (FreeLayout()) {
+        if (s_scaleModule >= 0) DragFreeScale(screen);
+        return;
+    }
     float len2 = s_scaleDiag.X * s_scaleDiag.X + s_scaleDiag.Y * s_scaleDiag.Y;
     if (s_scaleModule < 0 || len2 < 1) return;
     float dx = screen.x - s_scaleAnchor.X, dy = screen.y - s_scaleAnchor.Y;
@@ -4018,7 +4709,14 @@ void EndScaleDrag() {
     int m = s_scaleModule;
     s_scaleModule = -1;  // 先清掉：放开鼠标捕获时还会再进来
     if (GetCapture() == s_hwnd) ReleaseCapture();
-    if (Mods().scale[m] != s_scaleFromPercent) {
+    if (FreeLayout()) {
+        const FreeBox& b = Mods().box[m];
+        if (b.x != s_scaleBox0.x || b.y != s_scaleBox0.y || b.w != s_scaleBox0.w || b.h != s_scaleBox0.h) {
+            Log(L"拖圆点改了%ls的大小：%.0f × %.0f", PartName(m), b.w, b.h);
+            SaveSettings();
+            SettingsDialog_SettingsChanged();
+        }
+    } else if (Mods().scale[m] != s_scaleFromPercent) {
         Log(L"拖动改了%ls的大小：%d%%", PartName(m), Mods().scale[m]);
         SaveSettings();
         SettingsDialog_SettingsChanged();
@@ -4026,8 +4724,36 @@ void EndScaleDrag() {
     Redraw();
 }
 
-// 滚轮在模块上：一格 5%
+// 滚轮在模块上：一格 5%（自由布局时框以中心放大缩小，不叠到别的上面）
 void WheelScale(int m, int notches) {
+    if (FreeLayout()) {
+        const ModuleSet& mods = Mods();
+        FreeBox b = mods.box[m];
+        SizeF least = MinBoxSize(s_L, m);
+        float k = std::pow(1.05f, static_cast<float>(notches));
+        float w = std::clamp(b.w * k, least.Width, std::max(least.Width, mods.freeW));
+        float h = std::clamp(b.h * k, least.Height, std::max(least.Height, mods.freeH));
+        auto boxAt = [&](float t) {  // 从原来的框往放大缩小以后的走 t
+            float bw = b.w + (w - b.w) * t, bh = b.h + (h - b.h) * t;
+            FreeBox r{b.x + (b.w - bw) / 2, b.y + (b.h - bh) / 2, bw, bh};
+            r.x = std::clamp(r.x, 0.0f, std::max(0.0f, mods.freeW - bw));
+            r.y = std::clamp(r.y, 0.0f, std::max(0.0f, mods.freeH - bh));
+            return r;
+        };
+        float lo = 0, hi = 1;
+        if (!Collides(boxAt(1), m)) lo = 1;
+        for (int i = 0; i < 12 && lo < 1; ++i) {
+            float t = (lo + hi) / 2;
+            if (Collides(boxAt(t), m)) hi = t;
+            else lo = t;
+        }
+        if (lo > 0.01f) SetFreeBox(m, boxAt(lo));
+        s_wheelScaled = s_hoverModule = m;
+        SaveSettings();
+        SettingsDialog_SettingsChanged();
+        Redraw();
+        return;
+    }
     SetModuleScale(m, VisualPercent(m) + 5 * notches);
     s_wheelScaled = s_hoverModule = m;
     SaveSettings();
@@ -4092,9 +4818,123 @@ void WheelGap(int notches) {
     Redraw();
 }
 
-// 编辑模式里的右键菜单：显示哪些模块、恢复默认顺序、大小和位置、完成
+// ---- 编辑模式：保存、换回、恢复布局 ----
+
+void LoadModules(bool preview);
+
+// 一样东西现在画在屏幕上的哪里（换布局时从这里变过去）
+RectF ItemScreenRect(int item) {
+    RectF r = FreeLayout() ? FreeRect(item) : SeqRect(item);
+    r.Offset(static_cast<REAL>(s_pos.x), static_cast<REAL>(s_pos.y));
+    return r;
+}
+
+// 换成另一份布局（保存的、默认的）：显示哪些、顺序、大小、自由布局一起换，各样东西从原来的地方变过去
+void ApplyLayout(const ModuleSet& next) {
+    RectF old[kFreeItems];
+    bool had[kFreeItems];
+    float oldK[kModuleCount];
+    for (int i = 0; i < kFreeItems; ++i) {
+        had[i] = EditPartShown(i);
+        if (had[i]) old[i] = ItemScreenRect(i);
+    }
+    for (int m = 0; m < kModuleCount; ++m) oldK[m] = s_L.modK[m] * (TileBased(m) ? s_tileGrow : 1.0f);
+    Mods() = next;
+    Media_Configure(AnyModuleSet(&ModuleSet::media), s_hwnd);
+    LoadModules(false);
+    s_scaleStart = s_gapStart = s_boxStart = s_modStart = -1e9;
+    s_editHover = kPartNone;
+    s_hoverModule = -1;
+    FitTiles();
+    UpdatePlacement();
+    if (FreeLayout()) {  // 各个框从原来画的地方变过去，新出来的从很小长出来
+        BoxSnap boxes = SnapBoxes();
+        float u = FreeUnit();
+        for (int i = 0; i < kFreeItems; ++i) {
+            const FreeBox& to = Mods().box[i];
+            if (!s_freePresent[i] || to.w <= 0) continue;
+            const RectF& r = old[i];
+            boxes.b[i] = had[i] ? FreeBox{(r.X - s_pos.x - s_L.freeX) / u, (r.Y - s_pos.y - s_L.freeY) / u, r.Width / u, r.Height / u}
+                                : FreeBox{to.x + to.w * 0.475f, to.y + to.h * 0.475f, to.w * 0.05f, to.h * 0.05f};
+        }
+        AnimateBoxes(boxes);
+    } else {  // 各模块从原来的大小变过去、从原来的地方滑过来
+        ScaleSnap scales;
+        for (int m = 0; m < kModuleCount; ++m) scales.k[m] = had[m] ? oldK[m] / (TileBased(m) ? s_tileGrow : 1.0f) : 0.05f;
+        AnimateScales(scales);
+        ScaleRelayout();
+        for (int m = 0; m < kModuleCount; ++m) {
+            s_modFrom[m] = PointF(0, 0);
+            if (!had[m] || !ModuleShown(m)) continue;
+            RectF now = ItemScreenRect(m);
+            s_modFrom[m] = PointF(old[m].X + old[m].Width / 2 - (now.X + now.Width / 2),
+                                  old[m].Y + old[m].Height / 2 - (now.Y + now.Height / 2));
+        }
+        s_modStart = NowMs();
+    }
+    s_scaleLayout = true;
+    SaveSettings();
+    SettingsDialog_SettingsChanged();
+    EditRelayout();
+}
+
+// 默认布局：按默认顺序排、各模块原大小
+bool DefaultLayout() {
+    const ModuleSet& mods = Mods();
+    if (mods.free || CustomScales()) return false;
+    for (int i = 0; i < kModuleCount; ++i)
+        if (mods.order[i] != i) return false;
+    return true;
+}
+
+// 恢复默认布局（显示哪些不变）
+void ResetLayout() {
+    if (DefaultLayout()) return;
+    ModuleSet next = Mods();
+    for (int i = 0; i < kModuleCount; ++i) next.order[i] = i;
+    std::fill(next.scale, next.scale + kModuleCount, 100);
+    next.free = false;
+    next.freeW = next.freeH = 0;
+    std::fill(next.box, next.box + kFreeItems, FreeBox());
+    Log(L"迷你任务栏恢复默认布局");
+    ApplyLayout(next);
+}
+
+// 保存当前布局（底部、侧边各存一份），之后可以换回来
+void SaveLayout() {
+    std::wstring& saved = g_settings.savedLayout[ModuleSideOf(s_edge)];
+    saved = ModuleSetText(Mods());
+    Log(L"保存了迷你任务栏的布局：%ls", saved.c_str());
+    SaveSettings();
+    s_editNote = Tr(L"已保存当前布局");
+    Redraw();
+}
+
+void RestoreLayout() {
+    ModuleSet next;
+    if (!ParseModuleSetText(g_settings.savedLayout[ModuleSideOf(s_edge)], next)) return;
+    Log(L"迷你任务栏换回保存的布局");
+    ApplyLayout(next);
+}
+
+// 滚轮在面板空白处：整个迷你任务栏一格 5%（和拖横排的上边一样）
+void WheelPanel(int notches) {
+    s_glass.Extend(GrowArea());
+    s_baseValid = false;
+    int was = g_settings.popupScale;
+    SetPopupSize(was + 5 * notches, g_settings.popupLength);
+    s_wheelPanel = true;
+    if (g_settings.popupScale != was) {
+        Log(L"滚轮改了迷你任务栏的大小：%d%%", g_settings.popupScale);
+        SaveSettings();
+        SettingsDialog_SettingsChanged();
+    }
+    Redraw();
+}
+
+// 编辑模式里的右键菜单：显示哪些模块、保存 / 换回 / 恢复布局、恢复位置、完成
 void ShowEditMenu(POINT client) {
-    enum { kCmdOrder = 1, kCmdPlace, kCmdDone, kCmdScale, kCmdPart = 100 };
+    enum { kCmdPlace = 1, kCmdDone, kCmdSave, kCmdRestore, kCmdReset, kCmdPart = 100 };
     HMENU menu = CreatePopupMenu();
     const int parts[] = {kModTray, kModMedia, kModIme, kModBattery, kModClock, kModVolume, kModBright, kPartRadios};
     const ModuleSet& mods = Mods();
@@ -4103,10 +4943,10 @@ void ShowEditMenu(POINT client) {
     for (size_t i = 0; i < ARRAYSIZE(parts); ++i)
         AppendMenuW(menu, MF_STRING | (shown[i] ? MF_CHECKED : 0), kCmdPart + parts[i], PartName(parts[i]));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    bool defaultOrder = true;
-    for (int i = 0; i < kModuleCount; ++i) defaultOrder = defaultOrder && mods.order[i] == i;
-    AppendMenuW(menu, MF_STRING | (defaultOrder ? MF_GRAYED : 0), kCmdOrder, Tr(L"恢复默认顺序"));
-    AppendMenuW(menu, MF_STRING | (CustomScales() ? 0 : MF_GRAYED), kCmdScale, Tr(L"恢复模块大小"));
+    bool saved = !g_settings.savedLayout[ModuleSideOf(s_edge)].empty();
+    AppendMenuW(menu, MF_STRING, kCmdSave, Tr(L"保存当前布局"));
+    AppendMenuW(menu, MF_STRING | (saved ? 0 : MF_GRAYED), kCmdRestore, Tr(L"换回保存的布局"));
+    AppendMenuW(menu, MF_STRING | (DefaultLayout() ? MF_GRAYED : 0), kCmdReset, Tr(L"恢复默认布局"));
     AppendMenuW(menu, MF_STRING | (AtDefaultPlace() ? MF_GRAYED : 0), kCmdPlace, Tr(L"恢复默认位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdDone, Tr(L"完成"));
@@ -4117,14 +4957,17 @@ void ShowEditMenu(POINT client) {
     s_menuOpen = false;
     DestroyMenu(menu);
     if (!s_open || !s_editing) return;
+    if (cmd) s_editNote.clear();
     if (cmd >= kCmdPart) {
         int part = static_cast<int>(cmd) - kCmdPart;
         for (size_t i = 0; i < ARRAYSIZE(parts); ++i)
             if (parts[i] == part) ShowPart(part, !shown[i]);
-    } else if (cmd == kCmdOrder) {
-        ResetOrder();
-    } else if (cmd == kCmdScale) {
-        ResetScales();
+    } else if (cmd == kCmdSave) {
+        SaveLayout();
+    } else if (cmd == kCmdRestore) {
+        RestoreLayout();
+    } else if (cmd == kCmdReset) {
+        ResetLayout();
     } else if (cmd == kCmdPlace) {
         ResetPlace();
     } else if (cmd == kCmdDone) {
@@ -4132,12 +4975,98 @@ void ShowEditMenu(POINT client) {
     }
 }
 
+// 自由布局里双击边：那个方向上去掉空白（区域刚好包住里面的东西）
+void FitFreeArea(int edges) {
+    ModuleSet& mods = Mods();
+    bool fitX = (edges & (kResizeLeft | kResizeRight)) != 0, fitY = (edges & (kResizeTop | kResizeBottom)) != 0;
+    float x0 = FLT_MAX, y0 = FLT_MAX, x1 = -FLT_MAX, y1 = -FLT_MAX;
+    for (int i = 0; i < kFreeItems; ++i) {
+        const FreeBox& b = mods.box[i];
+        if (!s_freePresent[i] || b.w <= 0) continue;
+        x0 = std::min(x0, b.x);
+        y0 = std::min(y0, b.y);
+        x1 = std::max(x1, b.x + b.w);
+        y1 = std::max(y1, b.y + b.h);
+    }
+    if (x0 > x1) return;
+    float dx = fitX ? -x0 : 0, dy = fitY ? -y0 : 0;
+    float w = fitX ? std::max(16.0f, x1 - x0) : mods.freeW, h = fitY ? std::max(16.0f, y1 - y0) : mods.freeH;
+    if (w == mods.freeW && h == mods.freeH && dx == 0 && dy == 0) return;
+    for (FreeBox& b : mods.box) {
+        if (b.w <= 0) continue;
+        b.x += dx;
+        b.y += dy;
+    }
+    mods.freeW = w;
+    mods.freeH = h;
+    Log(L"双击边去掉了自由布局区域的空白：%.0f × %.0f", w, h);
+    SaveSettings();
+    SettingsDialog_SettingsChanged();
+    EditRelayout();
+}
+
+// 自由布局里拖边：改那块区域的大小，里面的东西在屏幕上不动（面板往拖的那边长，居中时两头一起长），
+// 不能小到放不下里面的东西；最厚 kMaxFreeThick，最长到屏幕
+void DragFreeArea(POINT screen) {
+    ModuleSet& mods = Mods();
+    const FreeSnap& from = s_freeFrom;
+    bool v = Vertical();
+    float u = FreeUnit();
+    float d[2] = {(screen.x - s_resizeAt.x) / u, (screen.y - s_resizeAt.y) / u};
+    float size[2] = {from.w, from.h}, shift[2] = {0, 0};
+    for (int axis = 0; axis < 2; ++axis) {
+        int low = axis == 0 ? kResizeLeft : kResizeTop, high = axis == 0 ? kResizeRight : kResizeBottom;
+        if (!(s_resize & (low | high))) continue;
+        bool lowEdge = (s_resize & low) != 0, lengthAxis = (axis == 1) == v;
+        float moved = lowEdge ? -d[axis] : d[axis], grow = moved, f = lowEdge ? 1.0f : 0.0f;  // f：框跟着挪多少
+        bool centered = (v || EffectiveAlign() == kAlignCenter || EffectiveAlign() == kAlignCustom) && !s_resizePinned;
+        if (lengthAxis && centered) {
+            grow = 2 * moved;
+            f = 0.5f;
+        }
+        float s0 = size[axis], least = 16 - s0;
+        for (int i = 0; i < kFreeItems; ++i) {
+            const FreeBox& b = from.box[i];
+            if (!s_freePresent[i] || b.w <= 0) continue;
+            float p = axis == 0 ? b.x : b.y, len = axis == 0 ? b.w : b.h;
+            if (f > 0) least = std::max(least, -p / f);
+            if (f < 1) least = std::max(least, (p + len - s0) / (1 - f));
+        }
+        float most = (lengthAxis ? (ScreenSide() - 2 * s_L.margin - 2 * s_L.pad) / u : kMaxFreeThick) - s0;
+        grow = std::clamp(grow, least, std::max(least, most));
+        size[axis] = s0 + grow;
+        shift[axis] = f * grow;
+    }
+    mods.freeW = size[0];
+    mods.freeH = size[1];
+    for (int i = 0; i < kFreeItems; ++i) {
+        mods.box[i] = from.box[i];
+        if (mods.box[i].w <= 0) continue;
+        mods.box[i].x += shift[0];
+        mods.box[i].y += shift[1];
+    }
+    EditRelayout();
+}
+
 void BeginResize(int edges, POINT screen) {
     // 双击边恢复：改大小的边恢复 100%，改长度的边恢复成跟着内容
     bool twice = EditClickTwice(screen);
     s_glass.Extend(GrowArea());  // 背景按最大的大小截一整条（迷你任务栏自己盖着的那块用弹出时截的）
     s_baseValid = false;
-    if (twice) {
+    if (FreeLayout()) {  // 自由布局：拖边改那块区域的大小，双击去掉那个方向上的空白
+        if (twice) {
+            FitFreeArea(edges);
+            return;
+        }
+        if (BoxesChanging()) {
+            s_boxStart = -1e9;
+            EditRelayout();
+        }
+        const ModuleSet& mods = Mods();
+        s_freeFrom.w = mods.freeW;
+        s_freeFrom.h = mods.freeH;
+        std::copy(mods.box, mods.box + kFreeItems, s_freeFrom.box);
+    } else if (twice) {
         int percent = edges & ScaleEdges() ? kDefaultPopupScale : g_settings.popupScale;
         int length = edges & LengthEdges() ? 0 : g_settings.popupLength;
         if (percent != g_settings.popupScale || length != g_settings.popupLength) {
@@ -4166,6 +5095,8 @@ void BeginResize(int edges, POINT screen) {
 void EditMouseDown(int x, int y) {
     DWORD pos = GetMessagePos();
     POINT screen = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
+    s_editNote.clear();
+    s_wheelPanel = false;
     if (int m = HandleAt(x, y); m >= 0) {
         BeginScaleDrag(m, screen);
         return;
@@ -4189,6 +5120,10 @@ void EditMouseDown(int x, int y) {
 }
 
 void DragResize(POINT screen) {
+    if (FreeLayout()) {
+        DragFreeArea(screen);
+        return;
+    }
     int percent = g_settings.popupScale, length = g_settings.popupLength;
     if (s_resize & ScaleEdges()) percent = static_cast<int>(std::lround(s_resizeFrom * ScaleDistance(screen) / s_resizeDist));
     bool fit = (s_resize & LengthEdges()) != 0;
@@ -4203,7 +5138,14 @@ void EndResize() {
     if (!s_resize) return;
     s_resize = 0;  // 先清掉：放开鼠标捕获时还会再进来
     if (GetCapture() == s_hwnd) ReleaseCapture();
-    if (g_settings.popupScale != s_resizeFrom || g_settings.popupLength != s_resizeLenFrom) {
+    const ModuleSet& mods = Mods();
+    if (FreeLayout()) {
+        if (mods.freeW != s_freeFrom.w || mods.freeH != s_freeFrom.h) {
+            Log(L"拖边改了自由布局的区域：%.0f × %.0f", mods.freeW, mods.freeH);
+            SaveSettings();
+            SettingsDialog_SettingsChanged();
+        }
+    } else if (g_settings.popupScale != s_resizeFrom || g_settings.popupLength != s_resizeLenFrom) {
         Log(L"拖边改了迷你任务栏：%ls", SizeText().c_str());
         SaveSettings();
         SettingsDialog_SettingsChanged();
@@ -4241,10 +5183,8 @@ void DrawEditFrame(Graphics& g) {
                            : part == s_editHover || s_editHover == kPartHandle + part;
         Color c = part == s_moveModule && s_moveOut ? Color(255, 232, 72, 72) : accent;
         RectF m = EditPartRect(part);
-        if (part < kModuleCount) {  // 跟着模块画的地方走（在滑、在拖）
-            PointF shift = ModuleShift(part);
-            m.Offset(shift.X, shift.Y);
-        }
+        PointF shift = ModuleShift(part);  // 跟着模块画的地方走（在滑、在拖）
+        m.Offset(shift.X, shift.Y);
         GraphicsPath mp;
         AddRoundRect(mp, m, std::min(PillRadius(), std::min(m.Width, m.Height) / 2));
         if (active) {
@@ -4260,7 +5200,7 @@ void DrawEditFrame(Graphics& g) {
         const Layout& L = s_L;
         bool v = Vertical();
         PointF shift = ModuleShift(kModWindows);
-        float c = L.rowC + (v ? shift.X : shift.Y);
+        float c = L.modC[kModWindows] + (v ? shift.X : shift.Y);
         for (int idx = s_first + 1; idx < s_first + s_visible && idx < ItemCount(); ++idx) {
             bool hot = idx == s_gapDrag || (s_gapDrag < 0 && s_editHover == kPartGap && idx == s_hoverGap);
             float len = L.wTile * (hot ? 0.5f : 0.34f), th = hot ? Px(4) : Px(3), at = GapCenter(idx);
@@ -4268,9 +5208,34 @@ void DrawEditFrame(Graphics& g) {
             FillRound(g, bar, th / 2, hot ? accent : Colors().subtle);
         }
     }
+    // 自由布局里拖着模块：松开会落在哪（虚线框），对齐到的参考线
+    if (FreeLayout() && s_moveModule != kPartNone && !s_moveOut) {
+        Color soft(150, accent.GetR(), accent.GetG(), accent.GetB());
+        if (s_moveLand.w > 0) {
+            RectF land = FreeToActual(s_moveLand);
+            GraphicsPath lp;
+            AddRoundRect(lp, land, std::min(PillRadius(), std::min(land.Width, land.Height) / 2));
+            SolidBrush fill(Color(36, accent.GetR(), accent.GetG(), accent.GetB()));
+            g.FillPath(&fill, &lp);
+            Pen lpen(soft, std::max(1.0f, Px(1.5f)));
+            lpen.SetDashPattern(dash, 2);
+            g.DrawPath(&lpen, &lp);
+        }
+        const ModuleSet& mods = Mods();
+        float u = FreeUnit();
+        Pen guide(soft, std::max(1.0f, Px(1)));
+        if (s_guideX >= 0) {
+            float x = L.freeX + s_guideX * u;
+            g.DrawLine(&guide, x, L.freeY, x, L.freeY + mods.freeH * u);
+        }
+        if (s_guideY >= 0) {
+            float y = L.freeY + s_guideY * u;
+            g.DrawLine(&guide, L.freeX, y, L.freeX + mods.freeW * u, y);
+        }
+    }
     // 改大小的圆点：在鼠标下的模块（窗口格子那一段也算）、正在改的模块的角上，鼠标指着、拖着时大一圈
     int handle = s_scaleModule >= 0 ? s_scaleModule : busy ? -1 : s_hoverModule;
-    if (handle >= 0 && ModuleShown(handle)) {
+    if (handle >= 0 && EditPartShown(handle)) {
         PointF h = HandlePoint(handle);
         bool hot = s_scaleModule == handle || s_editHover == kPartHandle + handle;
         float r = hot ? Px(6.5f) : Px(5);
@@ -4482,6 +5447,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int part = EditPartAt(x, y), module = EditModuleAt(x, y, part), gap = part == kPartGap ? GapAt(x, y) : -1;
                 if (module != s_wheelScaled) s_wheelScaled = -1;
                 if (gap != s_hoverGap) s_wheelGap = false;
+                if (part != kPartPanel) s_wheelPanel = false;
+                if (part != s_editHover || module != s_hoverModule) s_editNote.clear();
                 if (part != s_editHover || module != s_hoverModule || gap != s_hoverGap) {
                     s_editHover = part;
                     s_hoverModule = module;
@@ -4533,7 +5500,8 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             s_lastMouse = {INT_MIN, INT_MIN};  // 回来时哪怕在同一个位置也要重新算
             s_editHover = kPartNone;
             s_hoverModule = s_wheelScaled = s_hoverGap = -1;
-            s_wheelGap = false;
+            s_wheelGap = s_wheelPanel = false;
+            s_editNote.clear();
             s_hover = -1;
             s_hoverControl = kNone;
             s_hoverRadio = -1;
@@ -4662,6 +5630,7 @@ LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int module = part == kPartNone ? -1 : EditModuleAt(pt.x, pt.y, part);
                 if (part == kPartGap) WheelGap(up);
                 else if (module >= 0) WheelScale(module, up);
+                else if (part == kPartPanel) WheelPanel(up);
                 return 0;
             }
             if (control != kNone) {

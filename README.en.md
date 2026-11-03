@@ -94,12 +94,13 @@ Choose liquid glass or the original Windows 11 look (the system's acrylic: a sol
 
 Press F2 while the mini taskbar is open, or click "Edit" on the Size & position page of Settings, to arrange it your way:
 
-- Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it.
-- Drag the Start button, window icons, tray icons, media, input mode, battery, clock or the vertical volume and brightness bars (each its own item) to reorder them: the one you drag follows the mouse and the others slide aside. Drag one off the panel to hide it (not the Start button or the window icons). The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too. The bottom and the screen sides remember this separately.
-- Point at an item and a small dot appears on its corner: drag the dot to size that item (50 – 200%), or scroll over the item. Double-click the dot to reset. The other items slide aside as it grows, and a bigger item makes its row taller.
+- Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it. Scrolling over empty space changes the size too.
+- Drag the Start button, window icons, tray icons, media, input mode, battery, clock, volume and brightness, or the Wi-Fi and Bluetooth toggles anywhere on the panel, and they stay where you drop them. A dashed outline shows where the item will land; it lines up with nearby items and the panel's center, and if it would cover another item it lands in the nearest free spot. Drag an item off the panel to hide it (not the Start button or the window icons). The bottom and the screen sides remember this separately.
+- Once you've moved an item, the panel's edges change the size of the area the items sit in. Double-click an edge to trim the empty space.
+- Point at an item and a small dot appears on its corner: drag the dot to size that item, or scroll over the item. Double-click the dot to reset. Once you've moved an item, width and height change separately (hold Shift to keep the shape): longer window icons show more windows and thicker ones get bigger icons, a longer tray shows more icons, volume, brightness and the Wi-Fi and Bluetooth toggles line up across or down to fit, and other items scale to fit.
 - Point at the window icons and small bars appear in the gaps between them: drag one to change the icon spacing, or scroll over a gap. Double-click to reset.
 - Drag empty space to slide the whole panel anywhere along the screen edge; it snaps to the center and the ends. Double-click to reset.
-- Right-click to choose what shows, or reset the order, item sizes and position. Press Enter or Esc when you're done.
+- Right-click to choose what shows. "Save layout" keeps the current arrangement, and "Restore saved layout" brings it back later. "Reset layout" goes back to the default order and sizes, and "Reset position" to the default place. Press Enter or Esc when you're done.
 
 ### Presets and backup
 
@@ -133,7 +134,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Media | Click the cover for previous, pause / play and next; they hide when the mouse leaves |
 | Input mode | Click to switch between native and English input |
 | Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
-| F2 | Enter or leave edit mode: drag edges to resize, items to reorder, corner dots to size items, icon gaps to space them, empty space to move |
+| F2 | Enter or leave edit mode: drag items anywhere, corner dots to size them, edges to resize, icon gaps to space them, empty space to move |
 | Esc / click elsewhere | Close |
 
 ## Settings

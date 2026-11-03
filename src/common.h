@@ -74,6 +74,12 @@ constexpr int kMaxPopupOffset = 1000;
 constexpr int kMinIconSize = 80, kMaxIconSize = 150;  // 图标大小，百分比
 constexpr int kMaxIconGap = 16;                       // 图标间距，像素（按 100% 大小算）
 constexpr int kDefaultIconGap = 4;
+// 自由布局里一样东西的位置和大小：按 100% 大小的像素，从面板里放模块的那块区域的左上角算。w 为 0：还没放过
+struct FreeBox {
+    float x = 0, y = 0, w = 0, h = 0;
+};
+// 自由布局里能摆的东西：各模块（Module），再加上下面那行（侧边时最下面）的调节条、Wi-Fi 蓝牙按钮
+constexpr int kFreeLevels = kModuleCount, kFreeRadios = kModuleCount + 1, kFreeItems = kModuleCount + 2;
 // 迷你任务栏显示哪些、按什么顺序：放在底部和侧边时各一份（Settings::modules 的下标见 ModuleSide）
 struct ModuleSet {
     bool tray = true;     // 系统托盘“隐藏的图标”里的那些
@@ -89,6 +95,11 @@ struct ModuleSet {
     int order[kModuleCount] = {kModStart,   kModWindows, kModTray,   kModMedia, kModIme,
                                kModBattery, kModClock,   kModVolume, kModBright};  // 模块的顺序，见 Module
     int scale[kModuleCount] = {100, 100, 100, 100, 100, 100, 100, 100, 100};  // 各模块的大小（百分比），编辑模式里改
+    // 自由布局：编辑模式里把模块拖到面板里随便哪儿以后，不再按顺序排，各样东西就在 box 那里（这时不用 order、scale）。
+    // freeW、freeH：放模块的那块区域多大（横排时不算标题那一行）
+    bool free = false;
+    float freeW = 0, freeH = 0;
+    FreeBox box[kFreeItems];
 };
 enum ModuleSide { kSideBottom, kSideEdge };
 inline int ModuleSideOf(int edge) { return edge == kEdgeBottom ? kSideBottom : kSideEdge; }
@@ -99,6 +110,7 @@ struct Settings {
     int longPressMs = 1000;
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
     ModuleSet modules[2];        // 迷你任务栏放在底部、侧边时各显示哪些，见 ModuleSide
+    std::wstring savedLayout[2];  // 编辑模式里“保存当前布局”存下的（底部、侧边各一份，见 ModuleSetText），空 = 没存过
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘），编辑模式里拖面板的边改
     int popupRadius = 22;        // 迷你任务栏的圆角半径，像素（按 100% 大小算）
@@ -178,6 +190,9 @@ std::wstring SettingsFile();  // SettingsDir() 下的 settings.ini
 void EnsureUnicodeIni();      // 写 settings.ini 之前调用：保证它是 UTF-16 编码
 void LoadSettings();
 void SaveSettings();
+// 一份布局（显示哪些、顺序、大小、自由布局）写成一串字 / 从一串字读回来（读不出返回 false）
+std::wstring ModuleSetText(const ModuleSet& mods);
+bool ParseModuleSetText(const std::wstring& text, ModuleSet& mods);
 // 外观方案：设置文件里的 [Look1] ~ [Look8]，存着外观、模块和位置相关的那些键
 constexpr int kMaxLookPresets = 8;
 std::vector<int> LookPresets();  // 存着的方案编号，从小到大

@@ -488,7 +488,101 @@ COLORREF ParseColor(const std::wstring& text, COLORREF fallback) {
 
 int ClampOffset(int offset) { return std::clamp(offset, 0, kMaxPopupOffset); }
 
+// 自由布局：“宽,高|模块:x,y,宽,高|…”（按 100% 大小的像素），不是自由布局时是空的。调节条那行叫 levels，Wi-Fi 蓝牙叫 radios
+const wchar_t* FreeItemKey(int item) {
+    if (item == kFreeLevels) return L"levels";
+    if (item == kFreeRadios) return L"radios";
+    return kModuleKeys[item];
+}
+
+std::wstring Number(float v) {
+    wchar_t text[32];
+    swprintf(text, 32, L"%.1f", v);
+    std::wstring t = text;
+    if (t.size() > 2 && t.compare(t.size() - 2, 2, L".0") == 0) t.resize(t.size() - 2);
+    return t;
+}
+
+std::wstring FreeLayoutText(const ModuleSet& mods) {
+    if (!mods.free) return L"";
+    std::wstring text = Number(mods.freeW) + L"," + Number(mods.freeH);
+    for (int i = 0; i < kFreeItems; ++i) {
+        const FreeBox& b = mods.box[i];
+        if (b.w <= 0 || b.h <= 0) continue;
+        text += L"|" + std::wstring(FreeItemKey(i)) + L":" + Number(b.x) + L"," + Number(b.y) + L"," + Number(b.w) + L"," +
+                Number(b.h);
+    }
+    return text;
+}
+
+// 读不出（空的、区域大小不对）就不是自由布局
+void ParseFreeLayout(const std::wstring& text, ModuleSet& mods) {
+    mods.free = false;
+    mods.freeW = mods.freeH = 0;
+    std::fill(mods.box, mods.box + kFreeItems, FreeBox());
+    std::vector<std::wstring> parts;
+    for (size_t start = 0; start < text.size();) {
+        size_t end = text.find(L'|', start);
+        if (end == std::wstring::npos) end = text.size();
+        parts.push_back(ToLower(text.substr(start, end - start)));
+        start = end + 1;
+    }
+    if (parts.empty() || swscanf(parts[0].c_str(), L"%f,%f", &mods.freeW, &mods.freeH) != 2 || mods.freeW < 8 ||
+        mods.freeH < 8 || mods.freeW > 20000 || mods.freeH > 20000)
+        return;
+    for (size_t i = 1; i < parts.size(); ++i) {
+        size_t colon = parts[i].find(L':');
+        if (colon == std::wstring::npos) continue;
+        std::wstring key = parts[i].substr(0, colon);
+        int item = -1;
+        for (int k = 0; k < kFreeItems; ++k)
+            if (key == FreeItemKey(k)) item = k;
+        FreeBox b;
+        if (item < 0 || swscanf(parts[i].c_str() + colon + 1, L"%f,%f,%f,%f", &b.x, &b.y, &b.w, &b.h) != 4) continue;
+        if (b.w > 0 && b.h > 0) mods.box[item] = b;
+    }
+    mods.free = true;
+}
+
 }  // namespace
+
+// 一份布局：“show=显示的开关;order=顺序;scale=大小;free=自由布局”，开关用设置文件里的键名
+std::wstring ModuleSetText(const ModuleSet& mods) {
+    std::wstring show;
+    for (const ModuleKey& k : kModuleSetKeys)
+        if (mods.*k.item) show += (show.empty() ? L"" : L",") + std::wstring(k.key);
+    return L"show=" + show + L";order=" + ModuleOrderText(mods.order) + L";scale=" + ModuleScaleText(mods.scale) +
+           L";free=" + FreeLayoutText(mods);
+}
+
+bool ParseModuleSetText(const std::wstring& text, ModuleSet& mods) {
+    if (text.compare(0, 5, L"show=") != 0) return false;
+    ModuleSet out;
+    for (size_t start = 0; start < text.size();) {
+        size_t end = text.find(L';', start);
+        if (end == std::wstring::npos) end = text.size();
+        std::wstring part = text.substr(start, end - start);
+        start = end + 1;
+        size_t eq = part.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        std::wstring key = part.substr(0, eq), value = part.substr(eq + 1);
+        if (key == L"show") {
+            for (const ModuleKey& k : kModuleSetKeys) out.*k.item = false;
+            ForEachPart(value, [&](const std::wstring& name) {
+                for (const ModuleKey& k : kModuleSetKeys)
+                    if (name == ToLower(k.key)) out.*k.item = true;
+            });
+        } else if (key == L"order") {
+            ParseModuleOrder(value, out.order);
+        } else if (key == L"scale") {
+            ParseModuleScale(value, out.scale);
+        } else if (key == L"free") {
+            ParseFreeLayout(value, out);
+        }
+    }
+    mods = out;
+    return true;
+}
 
 void LoadSettings() {
     EnsureUnicodeIni();
@@ -579,6 +673,11 @@ void LoadSettings() {
     bool sideScale = !(got == 1 && probe[0] == L'\x01');
     ParseModuleScale(text((sideScale ? SideKey(L"ModuleScale") : std::wstring(L"ModuleScale")).c_str()),
                      g_settings.modules[kSideEdge].scale);
+    // 自由布局：底部和侧边排的方向不一样，侧边没写过就不是自由布局
+    ParseFreeLayout(text(L"FreeLayout"), g_settings.modules[kSideBottom]);
+    ParseFreeLayout(text(SideKey(L"FreeLayout").c_str()), g_settings.modules[kSideEdge]);
+    g_settings.savedLayout[kSideBottom] = text(L"SavedLayout");
+    g_settings.savedLayout[kSideEdge] = text(SideKey(L"SavedLayout").c_str());
     g_settings.customTint = GetPrivateProfileIntW(L"General", L"CustomTint", 0, f.c_str()) != 0;
     g_settings.tintColor = ParseColor(text(L"TintColor"), RGB(32, 32, 36));
     g_settings.customAccent = GetPrivateProfileIntW(L"General", L"CustomAccent", 0, f.c_str()) != 0;
@@ -664,6 +763,12 @@ void SaveSettings() {
                                f.c_str());
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), ModuleScaleText(g_settings.modules[kSideEdge].scale).c_str(),
                                f.c_str());
+    WritePrivateProfileStringW(L"General", L"FreeLayout", FreeLayoutText(g_settings.modules[kSideBottom]).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"FreeLayout").c_str(), FreeLayoutText(g_settings.modules[kSideEdge]).c_str(),
+                               f.c_str());
+    WritePrivateProfileStringW(L"General", L"SavedLayout", g_settings.savedLayout[kSideBottom].c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"SavedLayout").c_str(), g_settings.savedLayout[kSideEdge].c_str(),
+                               f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowTitle", g_settings.showTitle ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"IconSize", std::to_wstring(g_settings.iconSize).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"IconGap", std::to_wstring(g_settings.iconGap).c_str(), f.c_str());
@@ -728,7 +833,7 @@ const wchar_t* const kLookKeys[] = {
     L"SideModuleOrder", L"SideTrayIcons", L"SideShowMedia", L"SideShowIme", L"SideShowBattery", L"SideShowClock",
     L"SideShowLevels",  L"SideShowRadios", L"PopupPerScreen", L"ScreenPlaces", L"ShowVolume", L"ShowBrightness",
     L"VolumeVertical", L"BrightVertical", L"SideShowVolume", L"SideShowBrightness", L"SideVolumeVertical", L"SideBrightVertical",
-    L"ModuleScale", L"SideModuleScale"};
+    L"ModuleScale", L"SideModuleScale", L"FreeLayout", L"SideFreeLayout"};
 
 std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 
@@ -824,6 +929,8 @@ bool ImportSettings(const std::wstring& path) {
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), nullptr, f.c_str());
     WritePrivateProfileStringW(L"General", L"ModuleScale", nullptr, f.c_str());
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), nullptr, f.c_str());
+    WritePrivateProfileStringW(L"General", L"FreeLayout", nullptr, f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"FreeLayout").c_str(), nullptr, f.c_str());
     // 快捷键也先删掉：旧版本导出的没有后加的几个，留着现在的可能和导入的撞上
     for (const wchar_t* key : kHotkeyKeys)
         for (const wchar_t* suffix : {L"", L"Hold", L"HoldMs"})
