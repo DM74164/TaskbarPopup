@@ -375,25 +375,63 @@ void EnsureUnicodeIni() {
 
 namespace {
 
-const wchar_t* const kModuleKeys[kModuleCount] = {L"windows", L"tray", L"media", L"ime", L"battery", L"clock", L"levels"};
+const wchar_t* const kModuleKeys[kModuleCount] = {L"windows", L"tray",  L"media",  L"ime",
+                                                  L"battery", L"clock", L"volume", L"brightness"};
 
-// 模块的顺序：名字用逗号隔开。认不出的跳过，没写到的按默认顺序补在后面
+// 逗号隔开的一串，一段段交给 each
+template <class F>
+void ForEachPart(const std::wstring& text, F each) {
+    for (size_t start = 0; start < text.size();) {
+        size_t end = text.find(L',', start);
+        if (end == std::wstring::npos) end = text.size();
+        each(ToLower(text.substr(start, end - start)));
+        start = end + 1;
+    }
+}
+
+int ModuleByKey(const std::wstring& name) {
+    for (int m = 0; m < kModuleCount; ++m)
+        if (name == kModuleKeys[m]) return m;
+    return -1;
+}
+
+// 模块的顺序：名字用逗号隔开。认不出的跳过，没写到的按默认顺序补在后面。
+// 旧版本音量、亮度是一个模块 levels，放在它的位置上
 void ParseModuleOrder(const std::wstring& text, int order[kModuleCount]) {
     bool used[kModuleCount] = {};
     int n = 0;
-    for (size_t start = 0; start < text.size() && n < kModuleCount;) {
-        size_t end = text.find(L',', start);
-        if (end == std::wstring::npos) end = text.size();
-        std::wstring name = ToLower(text.substr(start, end - start));
-        for (int m = 0; m < kModuleCount; ++m)
-            if (name == kModuleKeys[m] && !used[m]) {
-                used[m] = true;
-                order[n++] = m;
-            }
-        start = end + 1;
-    }
+    auto add = [&](int m) {
+        if (m < 0 || used[m]) return;
+        used[m] = true;
+        order[n++] = m;
+    };
+    ForEachPart(text, [&](const std::wstring& name) {
+        if (name == L"levels") {
+            add(kModVolume);
+            add(kModBright);
+        } else {
+            add(ModuleByKey(name));
+        }
+    });
+    for (int m = 0; m < kModuleCount; ++m) add(m);
+}
+
+// 各模块的大小：名字:百分比，逗号隔开，只写不是 100% 的。没写到的是 100%
+void ParseModuleScale(const std::wstring& text, int scale[kModuleCount]) {
+    std::fill(scale, scale + kModuleCount, 100);
+    ForEachPart(text, [&](const std::wstring& part) {
+        size_t colon = part.find(L':');
+        if (colon == std::wstring::npos) return;
+        int m = ModuleByKey(part.substr(0, colon));
+        if (m >= 0) scale[m] = std::clamp(_wtoi(part.c_str() + colon + 1), kMinModuleScale, kMaxModuleScale);
+    });
+}
+
+std::wstring ModuleScaleText(const int scale[kModuleCount]) {
+    std::wstring text;
     for (int m = 0; m < kModuleCount; ++m)
-        if (!used[m]) order[n++] = m;
+        if (scale[m] != 100) text += (text.empty() ? L"" : L",") + std::wstring(kModuleKeys[m]) + L":" + std::to_wstring(scale[m]);
+    return text;
 }
 
 // 底部那份用原来的键，侧边那份在键前面加 Side；侧边没写过的跟着底部。
@@ -523,6 +561,13 @@ void LoadSettings() {
         std::copy(bottomOrder, bottomOrder + kModuleCount, g_settings.modules[kSideEdge].order);
     else
         ParseModuleOrder(sideOrder, g_settings.modules[kSideEdge].order);
+    // 大小：侧边那份没写过（键不在）时跟着底部
+    ParseModuleScale(text(L"ModuleScale"), g_settings.modules[kSideBottom].scale);
+    wchar_t probe[4];
+    DWORD got = GetPrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), L"\x01", probe, 4, f.c_str());
+    bool sideScale = !(got == 1 && probe[0] == L'\x01');
+    ParseModuleScale(text((sideScale ? SideKey(L"ModuleScale") : std::wstring(L"ModuleScale")).c_str()),
+                     g_settings.modules[kSideEdge].scale);
     g_settings.customTint = GetPrivateProfileIntW(L"General", L"CustomTint", 0, f.c_str()) != 0;
     g_settings.tintColor = ParseColor(text(L"TintColor"), RGB(32, 32, 36));
     g_settings.customAccent = GetPrivateProfileIntW(L"General", L"CustomAccent", 0, f.c_str()) != 0;
@@ -604,6 +649,10 @@ void SaveSettings() {
                                f.c_str());
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), ModuleOrderText(g_settings.modules[kSideEdge].order).c_str(),
                                f.c_str());
+    WritePrivateProfileStringW(L"General", L"ModuleScale", ModuleScaleText(g_settings.modules[kSideBottom].scale).c_str(),
+                               f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), ModuleScaleText(g_settings.modules[kSideEdge].scale).c_str(),
+                               f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowTitle", g_settings.showTitle ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"IconSize", std::to_wstring(g_settings.iconSize).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"IconGap", std::to_wstring(g_settings.iconGap).c_str(), f.c_str());
@@ -667,7 +716,8 @@ const wchar_t* const kLookKeys[] = {
     L"ClockWeekday", L"ClockDate",  L"ShowLevels",        L"ShowRadios",  L"PopupEdge",    L"PopupAlign",  L"PopupOffset",
     L"SideModuleOrder", L"SideTrayIcons", L"SideShowMedia", L"SideShowIme", L"SideShowBattery", L"SideShowClock",
     L"SideShowLevels",  L"SideShowRadios", L"PopupPerScreen", L"ScreenPlaces", L"ShowVolume", L"ShowBrightness",
-    L"VolumeVertical", L"BrightVertical", L"SideShowVolume", L"SideShowBrightness", L"SideVolumeVertical", L"SideBrightVertical"};
+    L"VolumeVertical", L"BrightVertical", L"SideShowVolume", L"SideShowBrightness", L"SideVolumeVertical", L"SideBrightVertical",
+    L"ModuleScale", L"SideModuleScale"};
 
 std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 
@@ -761,6 +811,8 @@ bool ImportSettings(const std::wstring& path) {
         if (k.oldKey) WritePrivateProfileStringW(L"General", k.key, nullptr, f.c_str());
     }
     WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), nullptr, f.c_str());
+    WritePrivateProfileStringW(L"General", L"ModuleScale", nullptr, f.c_str());
+    WritePrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), nullptr, f.c_str());
     // 快捷键也先删掉：旧版本导出的没有后加的几个，留着现在的可能和导入的撞上
     for (const wchar_t* key : kHotkeyKeys)
         for (const wchar_t* suffix : {L"", L"Hold", L"HoldMs"})

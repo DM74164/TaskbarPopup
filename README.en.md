@@ -95,9 +95,10 @@ Choose liquid glass or the original Windows 11 look (the system's acrylic: a sol
 Press F2 while the mini taskbar is open, or click "Edit" on the Size & position page of Settings, to arrange it your way:
 
 - Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it.
-- Drag the tray icons, media, input mode, battery, clock or the vertical volume and brightness bars to reorder them: the one you drag follows the mouse and the others slide aside. Drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too. The bottom and the screen sides remember this separately.
+- Drag the tray icons, media, input mode, battery, clock or the vertical volume and brightness bars (each its own item) to reorder them: the one you drag follows the mouse and the others slide aside. Drag one off the panel to hide it. The volume and brightness sliders and the Wi-Fi and Bluetooth toggles can be dragged off too. The bottom and the screen sides remember this separately.
+- Point at an item (the window icons count too) and a small dot appears on its corner: drag the dot to size that item (50 – 200%; the Start button follows the window icons), or scroll over the item. Double-click the dot to reset. The other items slide aside as it grows, and a bigger item makes its row taller.
 - Drag the window icons or empty space to slide the whole panel anywhere along the screen edge; it snaps to the center and the ends. Double-click to reset.
-- Right-click to choose what shows, or reset the order and position. Press Enter or Esc when you're done.
+- Right-click to choose what shows, or reset the order, item sizes and position. Press Enter or Esc when you're done.
 
 ### Presets and backup
 
@@ -131,7 +132,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Media | Click the cover for previous, pause / play and next; they hide when the mouse leaves |
 | Input mode | Click to switch between native and English input |
 | Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
-| F2 | Enter or leave edit mode: drag edges to resize, items to reorder, empty space to move |
+| F2 | Enter or leave edit mode: drag edges to resize, items to reorder, corner dots to size items, empty space to move |
 | Esc / click elsewhere | Close |
 
 ## Settings
