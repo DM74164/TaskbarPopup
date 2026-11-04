@@ -396,6 +396,7 @@ struct ToneRegion {
 };
 std::vector<ToneRegion> s_tones;  // 空的 = 都照主题（Win11 原版、还没算）
 unsigned s_toneVersion = 0;       // 算的时候玻璃的 Version()
+RECT s_toneAt = {};               // 算的时候窗口的位置和大小（挪了面板、背景没重新截时也要重新算）
 int s_toneLight = -1;             // 正在画的这块：-1 = 照主题，0 = 深色配色，1 = 浅色配色（两条共用，只在画的时候设）
 
 // 正在画的这块用不用浅色玻璃那套配色
@@ -2944,12 +2945,14 @@ int UpdateTones() {
     std::vector<RectF> rects;
     if (s_glass.Style() == kGlassLiquid) rects = ToneRects();
     unsigned version = s_glass.Version();
-    if (version == s_toneVersion && rects.size() == s_tones.size()) {
+    RECT at = {s_pos.x, s_pos.y, s_width, s_height};
+    if (version == s_toneVersion && EqualRect(&at, &s_toneAt) && rects.size() == s_tones.size()) {
         bool same = true;
         for (size_t i = 0; i < rects.size() && same; ++i) same = rects[i].Equals(s_tones[i].rect) != FALSE;
         if (same) return 0;
     }
     s_toneVersion = version;
+    s_toneAt = at;
     bool theme = s_glass.Light(), anyFlip = false;
     std::vector<ToneRegion> tones;
     tones.reserve(rects.size());
@@ -3367,7 +3370,7 @@ bool s_scaleLayout = false;
     X(s_bits) X(s_canvasW) X(s_canvasH) X(s_pillIndex) X(s_pillAt) X(s_pillFrom)\
     X(s_pillTo) X(s_pillStart) X(s_boxFrom) X(s_boxStart) X(s_freePresent) X(s_mediaCutAt) X(s_mediaCut) X(s_layer)\
     X(s_layerValid) X(s_excluded) X(s_excludedAt) X(s_still) X(s_shotSeq) X(s_shotThread)\
-    X(s_scaleLayout) X(s_tones) X(s_toneVersion)
+    X(s_scaleLayout) X(s_tones) X(s_toneVersion) X(s_toneAt)
 
 struct PanelVars {
 #define TP_PANEL_DECL(n) std::remove_cv_t<decltype(n)> v_##n;
@@ -6324,7 +6327,7 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (Vertical()) MoveSelection(1);
                     break;
                 case VK_TAB: MoveSelection((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1); break;
-                case VK_HOME: MoveSelection(-s_sel); break;
+                case VK_HOME: MoveSelection(StartShown() ? -s_sel : 1 - std::max(s_sel, 1)); break;  // 开始按钮在另一条上：第一个格子
                 case VK_END: MoveSelection(ItemCount() - s_sel); break;
                 case VK_SPACE:
                     if (!s_filter.empty()) break;  // 打字筛选时空格是要打的字，交给 WM_CHAR
