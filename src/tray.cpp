@@ -533,6 +533,76 @@ bool ForegroundIsApp(const std::wstring& exe) {
     return same;
 }
 
+// ---- 点的时候遮住 ----
+// 任务栏藏着时，要点隐藏的图标只能临时把任务栏显示出来、展开“隐藏的图标”（资源管理器这时还会把任务栏升上来），
+// 屏幕上会闪一下。点之前把这两个窗口调成几乎全透明（不透明度 1/255：看不见，鼠标照样点得中），点完、藏回去以后再放回来。
+// 崩溃、被结束时没放回的，下次启动、退出时按这个特别的不透明度认出来放回（Tray_RepairVeil）
+constexpr BYTE kVeilAlpha = 1;
+
+struct Veiled {
+    HWND hwnd;
+    bool hadLayered;  // 本来就是分层窗口：放回原来的透明设置；不是：去掉分层
+    COLORREF key;
+    BYTE alpha;
+    DWORD flags;
+};
+std::mutex s_veilLock;
+std::vector<Veiled> s_veiled;
+
+std::wstring ClassOf(HWND h) {
+    wchar_t cls[96] = L"";
+    GetClassNameW(h, cls, ARRAYSIZE(cls));
+    return cls;
+}
+
+void Veil(HWND h) {
+    if (!h || !IsWindow(h)) return;
+    std::lock_guard<std::mutex> guard(s_veilLock);
+    for (const Veiled& v : s_veiled)
+        if (v.hwnd == h) return;
+    Veiled v{h, false, 0, 255, 0};
+    LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    if (ex & WS_EX_LAYERED) {
+        if (!GetLayeredWindowAttributes(h, &v.key, &v.alpha, &v.flags)) {  // 自己用 UpdateLayeredWindow 画的：不动它
+            Log(L"托盘：%ls 是自己画透明的分层窗口，没法遮住", ClassOf(h).c_str());
+            return;
+        }
+        v.hadLayered = true;
+    } else {
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    }
+    if (!SetLayeredWindowAttributes(h, 0, kVeilAlpha, LWA_ALPHA)) {
+        DWORD err = GetLastError();
+        if (!v.hadLayered) SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+        Log(L"托盘：%ls 调不成透明（错误 %lu），会闪一下", ClassOf(h).c_str(), err);
+        return;
+    }
+    s_veiled.push_back(v);
+    Log(L"托盘：先把 %ls 调成透明再点", ClassOf(h).c_str());
+}
+
+void Unveil(const Veiled& v) {
+    if (!IsWindow(v.hwnd)) return;
+    if (v.hadLayered) {
+        SetLayeredWindowAttributes(v.hwnd, v.key, v.alpha, v.flags);
+    } else {
+        SetWindowLongPtrW(v.hwnd, GWL_EXSTYLE, GetWindowLongPtrW(v.hwnd, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+        RedrawWindow(v.hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+    }
+}
+
+bool AnyVeiled() {
+    std::lock_guard<std::mutex> guard(s_veilLock);
+    return !s_veiled.empty();
+}
+
+void UnveilAll() {
+    std::lock_guard<std::mutex> guard(s_veilLock);
+    for (const Veiled& v : s_veiled) Unveil(v);
+    if (!s_veiled.empty()) Log(L"托盘：点完了，任务栏和隐藏的图标放回不透明");
+    s_veiled.clear();
+}
+
 struct Job {
     TrayApp app;
     bool right = false;
@@ -606,9 +676,13 @@ bool RunJob(const Job& job) {
             }
     }
 
-    // 展开“隐藏的图标”，在里面点
+    // 展开“隐藏的图标”，在里面点。只是去点里面的一个图标（不是要看隐藏的图标）时先遮住：
+    // 藏着的任务栏（临时显示、资源管理器展开时自己升上来都看不见）和隐藏的图标那个窗口
     HWND overflow = OverflowWindow();
+    bool veil = !job.overflowOnly;
+    if (veil && tray && !IsWindowVisible(tray)) Veil(tray);
     if (!overflow || !IsWindowVisible(overflow)) {
+        if (veil) Veil(overflow);
         Button legacyChevron;
         const Button* chevron = FindChevron(uia.p, tray, onTaskbar, legacyChevron);
         DWORD_PTR ours = 0;
@@ -632,9 +706,11 @@ bool RunJob(const Job& job) {
             return false;
         }
         for (int i = 0; i < 20; ++i) {  // 最多等 1 秒
-            Sleep(50);
+            Sleep(10);
             overflow = OverflowWindow();
+            if (veil) Veil(overflow);  // 展开时才建出来的：一出来就遮
             if (overflow && IsWindowVisible(overflow)) break;
+            Sleep(40);
         }
         if (!overflow || !IsWindowVisible(overflow)) {
             Log(L"托盘：按了展开隐藏的图标，但没有展开");
@@ -693,9 +769,16 @@ DWORD WINAPI ClickThread(LPVOID param) {
     bool owed = s_hideOwed.exchange(false);
     if (trayHidden || owed) {
         for (int i = 0; clicked && i < 600 && (OverflowShowing() || MenuShowing()); ++i) Sleep(100);  // 最多等 1 分钟
-        if (s_clicking) s_hideOwed = true;
-        else if (IsWindowVisible(tray)) PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
+        if (s_clicking) {
+            s_hideOwed = true;
+        } else if (IsWindowVisible(tray)) {
+            PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
+            for (int i = 0; i < 20 && AnyVeiled() && IsWindowVisible(tray); ++i) Sleep(50);  // 藏回去了再放回不透明
+        }
+    } else {
+        for (int i = 0; AnyVeiled() && i < 600 && OverflowShowing(); ++i) Sleep(100);  // 隐藏的图标收起来再放回
     }
+    if (!s_clicking) UnveilAll();  // 又点了一个：留给那一次点完再放回
     return 0;
 }
 
@@ -840,6 +923,21 @@ void Tray_Click(const TrayApp& app, bool right, HWND notify) { StartJob(new Job{
 void Tray_ShowHidden() { StartJob(new Job{TrayApp{}, false, true, nullptr}); }
 
 bool Tray_Busy() { return s_clicking; }
+
+void Tray_RepairVeil() {
+    for (const wchar_t* cls : {L"Shell_TrayWnd", L"TopLevelWindowForOverflowXamlIsland", L"NotifyIconOverflowWindow"}) {
+        HWND h = FindWindowW(cls, nullptr);
+        if (!h || !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED)) continue;
+        COLORREF key = 0;
+        BYTE alpha = 255;
+        DWORD flags = 0;
+        if (!GetLayeredWindowAttributes(h, &key, &alpha, &flags) || !(flags & LWA_ALPHA) || alpha != kVeilAlpha) continue;
+        SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+        RedrawWindow(h, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+        Log(L"托盘：%ls 还是上次点托盘图标时调的透明，放回来", cls);
+    }
+}
 
 bool Tray_OnMessage(UINT msg, LPARAM lParam) {
     if (msg == WM_APP_TRAY_MENU) {

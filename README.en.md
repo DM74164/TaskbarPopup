@@ -38,7 +38,7 @@ When the taskbar is hidden, a short press of Win first raises a one-row mini tas
 
 ### Tray icons
 
-The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. In edit mode, stretching the tray to twice its thickness switches it to a row too. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu.
+The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. In edit mode, stretching the tray to twice its thickness switches it to a row too. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu. While the taskbar is hidden, clicking a hidden icon makes the system taskbar and the hidden-icons panel transparent first, so they don't flash on screen.
 
 ![Hidden tray icons: scroll to flip pages, right-click for the app's menu](docs/demo/en/tray.webp)
 
@@ -50,7 +50,7 @@ Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button
 
 ### Media, input mode and battery
 
-Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size. There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first), and the mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
+Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size (also when you have arranged items yourself: it takes no room while nothing plays and slots back into its place when something does). There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first), and the mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 

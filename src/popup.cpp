@@ -1362,14 +1362,20 @@ constexpr float kFreeGap = 6;         // 找空位时尽量和别的隔开这么
 constexpr int kMaxFreeTray = 32;      // 一行大图标的托盘框够长时最多同时显示几个
 
 bool s_freePresent[kFreeItems];  // 这次有没有这一样（ApplyFreeLayout 里定）
+// 媒体开着却没在放时，它那一段从区域里去掉：沿排列方向在 s_mediaCutAt 以后的都往前挪 s_mediaCut（单位见 FreeUnit）
+float s_mediaCutAt = 0, s_mediaCut = 0;
 
 // 框的一个单位是多少像素：100% 大小时的一像素，再跟着图标大小变（设置里调图标大小，自由布局整个跟着变）
 float FreeUnit() { return Px(s_look.iconSize / 100.0f); }
 
 // 框在窗口里画在哪
 RectF FreeToActual(const FreeBox& b) {
-    float u = FreeUnit();
-    return RectF(s_L.freeX + b.x * u, s_L.freeY + b.y * u, b.w * u, b.h * u);
+    float u = FreeUnit(), x = b.x, y = b.y;
+    if (s_mediaCut > 0) {
+        float& p = Vertical() ? y : x;
+        if (p >= s_mediaCutAt - 0.01f) p -= s_mediaCut;
+    }
+    return RectF(s_L.freeX + x * u, s_L.freeY + y * u, b.w * u, b.h * u);
 }
 
 RectF FreeRect(int item) { return FreeToActual(BoxNow(item)); }
@@ -1546,16 +1552,60 @@ void PlaceMissing(const Layout& L) {
     }
 }
 
+// 媒体开着却没在放：它那一段（连着它和前后东西之间多出来的空）不占地方，后面的往前挪、面板短一截；
+// 放歌时它回到原来的框里，面板加长。只去掉沿排列方向没被别的东西占着的那段空当（两行时它上下有别的就不动）
+void CutMediaRoom() {
+    s_mediaCutAt = s_mediaCut = 0;
+    const ModuleSet& mods = Mods();
+    const FreeBox& m = mods.box[kModMedia];
+    if (!mods.media || s_editing || s_freePresent[kModMedia] || m.w <= 0 || m.h <= 0) return;
+    bool v = Vertical();
+    float total = v ? mods.freeH : mods.freeW, a = v ? m.y : m.x, b = a + (v ? m.h : m.w);
+    std::vector<std::pair<float, float>> spans;  // 别的东西沿排列方向占的段
+    for (int i = 0; i < kFreeItems; ++i) {
+        const FreeBox& o = mods.box[i];
+        if (i == kModMedia || !s_freePresent[i] || o.w <= 0) continue;
+        float at = v ? o.y : o.x;
+        spans.push_back({at, at + (v ? o.h : o.w)});
+    }
+    if (spans.empty()) return;
+    std::sort(spans.begin(), spans.end());
+    // 没被别的占着、和媒体叠得最多的那段空当 [g0, g1]
+    float best = 0.5f, g0 = 0, g1 = 0, reach = 0;
+    auto consider = [&](float lo, float hi) {
+        float overlap = std::min(hi, b) - std::max(lo, a);
+        if (overlap > best) {
+            best = overlap;
+            g0 = lo;
+            g1 = hi;
+        }
+    };
+    for (const auto& [lo, hi] : spans) {
+        if (lo > reach) consider(reach, lo);
+        reach = std::max(reach, hi);
+    }
+    if (total > reach) consider(reach, total);
+    if (g1 <= g0) return;
+    float cut;
+    if (g0 <= 0) cut = g1 - std::max(0.0f, a);             // 在最前面：前面留的空不变
+    else if (g1 >= total) cut = std::min(b, total) - g0;  // 在最后面：后面留的空不变
+    else cut = (g1 - g0) - std::max(0.0f, std::min(a - g0, g1 - b));  // 中间：前后两个空当留小的那个
+    if (cut <= 0.5f) return;
+    s_mediaCutAt = g1;
+    s_mediaCut = cut;
+}
+
 // 按顺序排好以后（ComputeSequence），把各样东西挪到自由布局里它的框里
 void ApplyFreeLayout(Layout& L) {
     bool v = Vertical();
     ModuleSet& mods = Mods();
     for (int i = 0; i < kFreeItems; ++i) s_freePresent[i] = FreePresentNow(L, i);
     PlaceMissing(L);
+    CutMediaRoom();
     float u = FreeUnit();
     // 面板：那块区域加上四周的边距（横排时还有标题那一行）
-    L.panelW = 2 * L.pad + mods.freeW * u;
-    L.panelH = 2 * L.pad + L.titleH + mods.freeH * u;
+    L.panelW = 2 * L.pad + (mods.freeW - (v ? 0 : s_mediaCut)) * u;
+    L.panelH = 2 * L.pad + L.titleH + (mods.freeH - (v ? s_mediaCut : 0)) * u;
     L.panelX = v ? (s_edge == kEdgeLeft ? L.margin : L.bubbleW + L.margin) : L.margin;
     L.panelY = v ? L.margin : L.margin + L.topGap;
     L.freeX = L.panelX + L.pad;
@@ -3065,7 +3115,7 @@ bool s_scaleLayout = false;
     X(s_startPending) X(s_startMode) X(s_startSeen) X(s_startTyped) X(s_startAt) X(s_startClosedAt)\
     X(s_glass) X(s_base) X(s_baseValid) X(s_canvasDC) X(s_canvas) X(s_canvasOld)\
     X(s_bits) X(s_canvasW) X(s_canvasH) X(s_pillIndex) X(s_pillAt) X(s_pillFrom)\
-    X(s_pillTo) X(s_pillStart) X(s_boxFrom) X(s_boxStart) X(s_freePresent) X(s_layer)\
+    X(s_pillTo) X(s_pillStart) X(s_boxFrom) X(s_boxStart) X(s_freePresent) X(s_mediaCutAt) X(s_mediaCut) X(s_layer)\
     X(s_layerValid) X(s_excluded) X(s_excludedAt) X(s_still) X(s_shotSeq) X(s_shotThread)\
     X(s_scaleLayout)
 

@@ -298,6 +298,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 LONG WINAPI OnCrash(EXCEPTION_POINTERS*) {
+    Tray_RepairVeil();           // 点托盘图标时调透明的任务栏放回来
     Taskbar_EmergencyRestore();  // 崩溃也别把任务栏留在隐藏状态
     DesktopIcons_EmergencyShow();
     return EXCEPTION_CONTINUE_SEARCH;
@@ -1095,6 +1096,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     SetUnhandledExceptionFilter(OnCrash);
     std::set_terminate([] {  // 未捕获的 C++ 异常不经过上面的过滤器
+        Tray_RepairVeil();
         Taskbar_EmergencyRestore();
         DesktopIcons_EmergencyShow();
         std::abort();
@@ -1112,6 +1114,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     Log(L"---- 启动 ----");
     if (IsElevated()) Log(L"以管理员身份运行");
     Taskbar_RestoreAll();  // 上次异常退出可能把任务栏留在隐藏状态、自动隐藏还开着
+    Tray_RepairVeil();     // 也可能留着点托盘图标时调的透明
 
     s_trayIcon = CreateAppIcon();
     WNDCLASSEXW wc = {sizeof(wc)};
@@ -1147,6 +1150,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     Log(L"退出：结束后台线程");
+    Tray_RepairVeil();
     FloatWindows_Configure(false);
     Elevation_Shutdown();
     Update_Stop();
