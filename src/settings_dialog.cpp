@@ -52,7 +52,8 @@ const wchar_t* const kPageNames[kPageCount] = {L"任务栏", L"迷你任务栏",
 // 开关
 enum Toggle { kAutoHide, kKeepFloats, kPinTopmost, kLongPress, kPinned, kVolume, kRadios, kTray, kAutoStart, kUpdates, kPerScreen,
              kAlwaysHide, kFlashAlert, kEdgePopup, kMedia, kIme, kBattery, kClock, kClockSeconds, kClockWeekday, kClockDate,
-             kShowTitle, kKeepOtherBars, kMarkScreens, kBrightAll, kBright, kVolumeVertical, kBrightVertical, kToggleCount };
+             kShowTitle, kKeepOtherBars, kMarkScreens, kBrightAll, kBright, kVolumeCapsule, kBrightCapsule, kShowStart,
+             kShowWindows, kToggleCount };
 struct ToggleText {
     const wchar_t* label;
     const wchar_t* sub;  // 可以为空
@@ -84,15 +85,17 @@ const ToggleText kToggleText[kToggleCount] = {
     {L"标出其它屏幕上的窗口", L"图标右上角显示屏幕编号"},
     {L"所有屏幕亮度一起调", nullptr},
     {L"显示亮度调节", nullptr},
-    {L"竖排", nullptr},  // 音量、亮度各一个小胶囊，只在底部时有
-    {L"竖排", nullptr},
+    {L"胶囊", nullptr},  // 音量、亮度各一个小胶囊：胶囊样式，不然是细槽加圆滑块
+    {L"胶囊", nullptr},
+    {L"显示开始按钮", nullptr},  // 这两项只在底部和侧边一起、又是自由布局时有（可以放到另一条上）
+    {L"显示窗口", nullptr},
 };
 
 // 滑块
 // 快捷键的长按时长：kPopupHoldMs + HotkeyId
 enum SliderId {
     kLongPressMs, kRadius, kPopupHoldMs, kPinHoldMs, kMoveHoldMs, kNextHoldMs, kBottomHoldMs, kSideHoldMs, kGlassAlpha, kIconSize,
-    kIconGap, kSliderCount
+    kIconGap, kRadius2, kSliderCount
 };
 static_assert(kPopupHoldMs + kHotkeyCount == kGlassAlpha, "每个快捷键一个长按时长");
 struct SliderSpec {
@@ -111,12 +114,13 @@ const SliderSpec kSliderSpec[kSliderCount] = {
     {L"透明度", 0, 100, 5},
     {L"图标大小", kMinIconSize, kMaxIconSize, 5},
     {L"图标间距", 0, kMaxIconGap, 1},
+    {L"侧边圆角", 0, kMaxPopupRadius, 2},  // 底部和侧边一起时侧边那条的（这时 kRadius 叫“底部圆角”）
 };
 
 // 几选一（分段按钮）
 enum SegId {
     kSegStyle, kSegTheme, kSegTray, kSegAlign, kSegEdge, kSegLang, kSegMonitor, kSegTint, kSegAccent, kSegSide, kSegWindows,
-    kSegCount
+    kSegAlign2, kSegCount
 };
 struct SegSpec {
     const wchar_t* label;
@@ -132,8 +136,10 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"弹在", {L"鼠标所在屏幕", L"前台窗口所在屏幕"}},  // 下标是 PopupMonitor
     {L"底色", {L"跟随颜色", L"自定义"}},
     {L"强调色", {L"跟随系统", L"自定义"}},
-    {L"迷你任务栏在", {L"底部", L"侧边"}},  // 下标是 ModuleSide：“状态和控制”页的开关改的是哪一份（只是换着看，不存）
+    {L"设置哪一条", {L"底部", L"侧边"}},  // 下标是 ModuleSide：“状态和控制”页的开关改的是哪一份（底部和侧边一起时才有，不存）
     {L"显示的窗口", {L"跟随系统", L"所有屏幕", L"这块屏幕"}},  // 下标是 PopupWindows
+    // 底部和侧边一起时侧边那条的位置：1 是在编辑模式里拖过（Settings::secondAlign 是 kAlignCustom），只在选着时出现
+    {L"侧边对齐", {L"居中", L"自定义"}},
 };
 constexpr int kSegStride = 8;  // 分段按钮的 Item::index = 第几组 * kSegStride + 第几项
 
@@ -186,8 +192,10 @@ struct SideToggle {
 const SideToggle kSideToggles[] = {{kTray, &ModuleSet::tray},
                                    {kVolume, &ModuleSet::volume},
                                    {kBright, &ModuleSet::brightness},
-                                   {kVolumeVertical, &ModuleSet::volumeVertical},
-                                   {kBrightVertical, &ModuleSet::brightVertical},
+                                   {kVolumeCapsule, &ModuleSet::volumeCapsule},
+                                   {kBrightCapsule, &ModuleSet::brightCapsule},
+                                   {kShowStart, &ModuleSet::start},
+                                   {kShowWindows, &ModuleSet::windows},
                                    {kRadios, &ModuleSet::radios},
                                    {kMedia, &ModuleSet::media},
                                    {kIme, &ModuleSet::ime},
@@ -222,11 +230,14 @@ bool MultiScreen() { return GetSystemMetrics(SM_CMONITORS) > 1; }
 void ShowPlace() {
     s_v.seg[kSegEdge] = s_v.edge;
     s_v.seg[kSegAlign] = s_v.align;
-    if (!s_v.on[kPerScreen]) return;
-    if (const ScreenPlace* p = FindScreenPlace(s_v.screens, s_screenKey)) {
-        s_v.seg[kSegEdge] = p->edge;
-        s_v.seg[kSegAlign] = p->align;
-    }
+    if (s_v.on[kPerScreen])
+        if (const ScreenPlace* p = FindScreenPlace(s_v.screens, s_screenKey)) {
+            s_v.seg[kSegEdge] = p->edge;
+            s_v.seg[kSegAlign] = p->align;
+        }
+    // 只有一条时“状态和控制”页改的是这条的那份（两条一起时页上有“设置哪一条”）
+    int side = ModuleSideOf(s_v.seg[kSegEdge]);
+    if (!DualEdge(s_v.seg[kSegEdge]) && s_v.seg[kSegSide] != side) ShowSide(side);
 }
 
 // 点了位置或对齐：记到所有屏幕共用的，或者设置窗口所在屏幕自己的那一份上
@@ -340,7 +351,7 @@ bool SliderEnabled(int which) {
 std::wstring SliderText(int which) {
     wchar_t text[32];
     if (which == kGlassAlpha || which == kIconSize) swprintf(text, 32, L"%d%%", s_v.slider[which]);
-    else if (which == kRadius || which == kIconGap) swprintf(text, 32, Tr(L"%d 像素"), s_v.slider[which]);
+    else if (which == kRadius || which == kRadius2 || which == kIconGap) swprintf(text, 32, Tr(L"%d 像素"), s_v.slider[which]);
     else swprintf(text, 32, Tr(L"%d 毫秒"), s_v.slider[which]);
     return text;
 }
@@ -380,16 +391,25 @@ float ToggleRow(int which, float x, float y, float w) {
     return h;
 }
 
-// 音量、亮度：开关左边一个“竖排”小胶囊（迷你任务栏在底部、开着时才有；侧边时总是竖着）
-float LevelRow(int which, int vertical, float x, float y, float w) {
+// 音量、亮度：开关左边一个“胶囊”小胶囊（开着时才有）。横着竖着跟着位置和编辑模式里拉的样子，这里只选样式
+float LevelRow(int which, int capsule, float x, float y, float w) {
     float h = ToggleRow(which, x, y, w);
-    if (s_v.seg[kSegSide] == kSideBottom && s_v.on[which]) {
-        float cw = MeasureWidth(Tr(kToggleText[vertical].label), Px(12.5f)) + Px(28), ch = Px(kChipH);
+    if (s_v.on[which]) {
+        float cw = MeasureWidth(Tr(kToggleText[capsule].label), Px(12.5f)) + Px(28), ch = Px(kChipH);
         float cx = x + w - Px(kRowPad) - Px(40) - Px(12) - cw;
-        s_items.push_back({kToggleChip, vertical, RectF(cx, y + (h - ch) / 2, cw, ch)});
+        s_items.push_back({kToggleChip, capsule, RectF(cx, y + (h - ch) / 2, cw, ch)});
     }
     return h;
 }
+
+// 底部和侧边一起显示（设置窗口所在屏幕的位置）
+bool DualNow() { return DualEdge(s_v.seg[kSegEdge]); }
+
+// 滑块的名字：底部和侧边一起时圆角分底部、侧边两个
+const wchar_t* SliderLabel(int which) { return which == kRadius && DualNow() ? L"底部圆角" : kSliderSpec[which].label; }
+
+// 分段按钮的名字：底部和侧边一起时对齐分底部、侧边两个
+const wchar_t* SegLabel(int which) { return which == kSegAlign && DualNow() ? L"底部对齐" : kSegSpec[which].label; }
 
 float SliderRow(int which, float x, float y, float w) {
     float h = Px(56);
@@ -407,8 +427,10 @@ float SegRow(int which, float x, float y, float w) {
     float h = Px(50), bh = Px(30);
     const SegSpec& spec = kSegSpec[which];
     std::vector<int> options;  // 对齐的“自定义”只在选着时出现（在迷你任务栏的编辑模式里拖出来的）
-    for (int i = 0; i < static_cast<int>(spec.options.size()); ++i)
-        if (which != kSegAlign || i != kAlignCustom || s_v.seg[which] == kAlignCustom) options.push_back(i);
+    for (int i = 0; i < static_cast<int>(spec.options.size()); ++i) {
+        int custom = which == kSegAlign ? kAlignCustom : which == kSegAlign2 ? 1 : -1;
+        if (i != custom || s_v.seg[which] == custom) options.push_back(i);
+    }
     std::vector<float> widths;
     float total = 0;
     for (int option : options) {
@@ -417,13 +439,13 @@ float SegRow(int which, float x, float y, float w) {
     }
     // 每项左右留白，放不下就留少一点，别压到左边的名字
     float pad = Px(3);
-    float room = w - 2 * Px(kRowPad) - MeasureWidth(Tr(spec.label), Px(13.5f)) - Px(12) - 2 * pad - total;
+    float room = w - 2 * Px(kRowPad) - MeasureWidth(Tr(SegLabel(which)), Px(13.5f)) - Px(12) - 2 * pad - total;
     float extra = std::clamp(room / widths.size(), Px(10), Px(22));
     for (float& width : widths) width += extra;
     total += extra * widths.size();
     RectF track(x + w - Px(kRowPad) - total - 2 * pad, y + (h - bh) / 2, total + 2 * pad, bh);
     s_segTrack[which] = track;
-    s_texts.push_back({Tr(spec.label), RectF(x + Px(kRowPad), y, track.X - x - Px(kRowPad) - Px(4), h), 4});
+    s_texts.push_back({Tr(SegLabel(which)), RectF(x + Px(kRowPad), y, track.X - x - Px(kRowPad) - Px(4), h), 4});
     float cx = track.X + pad;
     for (size_t i = 0; i < widths.size(); ++i) {
         s_items.push_back({kSegment, which * kSegStride + options[i], RectF(cx, track.Y + pad, widths[i], bh - 2 * pad)});
@@ -619,12 +641,20 @@ float BuildPage(int page, float x, float y) {
             return AddGroup(x, y, L"显示", {[](float x, float y, float w) { return ToggleRow(kPinned, x, y, w); }});
         }
         case kPageControls: {
-            // 迷你任务栏在底部、侧边时各显示哪些：先选改哪一份。托盘图标关着时收起它的样式
-            std::vector<RowFn> shown = {[](float x, float y, float w) { return SegRow(kSegSide, x, y, w); },
-                                        [](float x, float y, float w) { return ToggleRow(kTray, x, y, w); }};
+            // 迷你任务栏在底部、侧边时各显示哪些：改的是现在的位置那一份，底部和侧边一起时先选改哪一条。
+            // 开始按钮、窗口只在两条一起、那条又是自由布局时能关（放到另一条上）。托盘图标关着时收起它的样式
+            std::vector<RowFn> shown;
+            if (DualNow()) {
+                shown.push_back([](float x, float y, float w) { return SegRow(kSegSide, x, y, w); });
+                if (g_settings.modules[s_v.seg[kSegSide]].free) {
+                    shown.push_back([](float x, float y, float w) { return ToggleRow(kShowStart, x, y, w); });
+                    shown.push_back([](float x, float y, float w) { return ToggleRow(kShowWindows, x, y, w); });
+                }
+            }
+            shown.push_back([](float x, float y, float w) { return ToggleRow(kTray, x, y, w); });
             if (s_v.on[kTray]) shown.push_back([](float x, float y, float w) { return SegRow(kSegTray, x, y, w); });
-            shown.push_back([](float x, float y, float w) { return LevelRow(kVolume, kVolumeVertical, x, y, w); });
-            shown.push_back([](float x, float y, float w) { return LevelRow(kBright, kBrightVertical, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return LevelRow(kVolume, kVolumeCapsule, x, y, w); });
+            shown.push_back([](float x, float y, float w) { return LevelRow(kBright, kBrightCapsule, x, y, w); });
             shown.push_back([](float x, float y, float w) { return ToggleRow(kRadios, x, y, w); });
             shown.push_back([](float x, float y, float w) { return ToggleRow(kMedia, x, y, w); });
             shown.push_back([](float x, float y, float w) { return ToggleRow(kIme, x, y, w); });
@@ -644,9 +674,10 @@ float BuildPage(int page, float x, float y) {
             if (MultiScreen() || s_v.on[kPerScreen])
                 place.push_back([](float x, float y, float w) { return ToggleRow(kPerScreen, x, y, w); });
             place.push_back([](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); });
-            // 只在侧边时收起对齐（底部和侧边一起时是底部那条的对齐）
-            if (s_v.seg[kSegEdge] == kEdgeBottom || DualEdge(s_v.seg[kSegEdge]))
+            // 只在侧边时收起对齐；底部和侧边一起时底部、侧边各一行
+            if (s_v.seg[kSegEdge] == kEdgeBottom || DualNow())
                 place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });
+            if (DualNow()) place.push_back([](float x, float y, float w) { return SegRow(kSegAlign2, x, y, w); });
             if (s_v.on[kPerScreen]) place.push_back(ScreenRow);
             return AddGroup(x, y, L"位置", place);
         }
@@ -669,6 +700,7 @@ float BuildPage(int page, float x, float y) {
                           [](float x, float y, float w) { return SegRow(kSegLang, x, y, w); }});
             std::vector<RowFn> mini = {[](float x, float y, float w) { return SegRow(kSegTint, x, y, w); },
                                        [](float x, float y, float w) { return SliderRow(kRadius, x, y, w); }};
+            if (DualNow()) mini.push_back([](float x, float y, float w) { return SliderRow(kRadius2, x, y, w); });
             if (s_v.seg[kSegStyle] == kGlassLiquid)  // 只有液态玻璃能调透明度
                 mini.push_back([](float x, float y, float w) { return SliderRow(kGlassAlpha, x, y, w); });
             return AddGroup(x, y, L"迷你任务栏", mini);
@@ -855,8 +887,8 @@ void DrawToggleRow(Graphics& g, const Item& it) {
     float textW = r.Width - 2 * Px(kRowPad) - Px(50);
     if (it.index == kUpdates)
         if (const Item* check = FindItem({kCheckNow, 0})) textW = check->rect.X - r.X - Px(kRowPad) - Px(6);
-    if (it.index == kVolume || it.index == kBright)  // 别压到“竖排”
-        if (const Item* chip = FindItem({kToggleChip, it.index == kVolume ? kVolumeVertical : kBrightVertical}))
+    if (it.index == kVolume || it.index == kBright)  // 别压到“胶囊”
+        if (const Item* chip = FindItem({kToggleChip, it.index == kVolume ? kVolumeCapsule : kBrightCapsule}))
             textW = chip->rect.X - r.X - Px(kRowPad) - Px(6);
     if (t.sub) {
         float x = r.X + Px(kRowPad);
@@ -888,7 +920,7 @@ void DrawSliderRow(Graphics& g, const Item& it) {
     const SliderSpec& spec = kSliderSpec[it.index];
     bool enabled = SliderEnabled(it.index);
     Color text = enabled ? pal.text : pal.subtle;
-    DrawText(g, Tr(spec.label), Px(13.5f), FontStyleRegular, sg.label, text);
+    DrawText(g, Tr(SliderLabel(it.index)), Px(13.5f), FontStyleRegular, sg.label, text);
     DrawText(g, SliderText(it.index), Px(12.5f), FontStyleRegular, sg.label, enabled ? pal.subtle : pal.separator,
              StringAlignmentFar);
 
@@ -1111,10 +1143,15 @@ void DrawContent(Graphics& g) {
                 break;
             case 2: DrawText(g, t.text, Px(17), FontStyleBold, t.rect, pal.text); break;
             case 4: DrawText(g, t.text, Px(13.5f), FontStyleRegular, t.rect, pal.text); break;
-            case 5: {
-                std::wstring size = g_settings.popupLength > 0
-                                        ? TrF(L"%d%%，长度 %d%%", g_settings.popupScale, (g_settings.popupLength + 5) / 10)
-                                        : TrF(L"%d%%", g_settings.popupScale);
+            case 5: {  // 现在的大小和长度（编辑模式里拖边改的），两条一起时两条的长度都写上
+                auto length = [](int l) { return l > 0 ? TrF(L"%d%%", (l + 5) / 10) : std::wstring(Tr(L"自动")); };
+                const Settings& st = g_settings;
+                std::wstring size =
+                    DualNow() && (st.popupLength > 0 || st.secondLength > 0)
+                        ? TrF(L"%d%%，长度：底部 %ls，侧边 %ls", st.popupScale, length(st.popupLength).c_str(),
+                              length(st.secondLength).c_str())
+                    : st.popupLength > 0 ? TrF(L"%d%%，长度 %d%%", st.popupScale, (st.popupLength + 5) / 10)
+                                         : TrF(L"%d%%", st.popupScale);
                 DrawText(g, size, Px(12.5f), FontStyleRegular, t.rect, pal.subtle, StringAlignmentFar);
                 break;
             }
@@ -1615,7 +1652,9 @@ void SetPage(int page) {
 }
 
 // 调这个滑块时弹出迷你任务栏预览
-bool PreviewsPopup(int which) { return which == kRadius || which == kGlassAlpha || which == kIconSize || which == kIconGap; }
+bool PreviewsPopup(int which) {
+    return which == kRadius || which == kRadius2 || which == kGlassAlpha || which == kIconSize || which == kIconGap;
+}
 
 // 窗口里现在选的外观
 PopupLook DraftLook() {
@@ -1626,6 +1665,7 @@ PopupLook DraftLook() {
     look.light = look.customTint ? ColorLuma(s_v.tint) > 150 : ThemeIsLight(s_v.seg[kSegTheme], true);
     look.transparency = s_v.slider[kGlassAlpha];
     look.radius = s_v.slider[kRadius];
+    look.radius2 = s_v.slider[kRadius2];
     look.iconSize = s_v.slider[kIconSize];
     look.iconGap = s_v.slider[kIconGap];
     look.showTitle = s_v.on[kShowTitle];
@@ -1639,6 +1679,7 @@ PopupLook DraftLook() {
     look.clockWeekday = s_v.on[kClockWeekday];
     look.clockDate = s_v.on[kClockDate];
     look.trayStyle = s_v.seg[kSegTray];
+    if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) Popup_FitTrayBoxes(look.modules, look.trayStyle);  // 和存下以后一样
     return look;
 }
 
@@ -1659,6 +1700,7 @@ void SetSlider(int which, int value) {
     const SliderSpec& spec = kSliderSpec[which];
     value = spec.minValue + (value - spec.minValue + spec.step / 2) / spec.step * spec.step;
     s_v.slider[which] = std::clamp(value, spec.minValue, spec.maxValue);
+    if (which == kRadius && !DualNow()) s_v.slider[kRadius2] = s_v.slider[kRadius];  // 只有一条时两个圆角一起改
     if (PreviewsPopup(which)) PreviewPopup(s_drag == which);  // 弹出迷你任务栏看看大小、透明度
 }
 
@@ -1943,8 +1985,10 @@ Values ValuesFromSettings() {
     v.on[kMarkScreens] = st.markScreens;
     v.on[kBrightAll] = st.brightnessAllScreens;
     v.seg[kSegWindows] = st.popupWindows;
+    v.seg[kSegAlign2] = st.secondAlign == kAlignCustom ? 1 : 0;
     v.slider[kLongPressMs] = st.longPressMs;
     v.slider[kRadius] = st.popupRadius;
+    v.slider[kRadius2] = st.secondRadius;
     v.slider[kGlassAlpha] = st.glassTransparency;
     v.slider[kIconSize] = st.iconSize;
     v.slider[kIconGap] = st.iconGap;
@@ -1995,7 +2039,8 @@ void Reload(ReloadMode mode) {
     ShowSide(s_v.seg[kSegSide]);
     AnimateKnobs();
     for (int i = 0; i < kSliderCount; ++i)
-        Take(s_v.slider[i], s_initial.slider[i], fresh.slider[i], all || (look && in(i, {kRadius, kGlassAlpha, kIconSize, kIconGap})));
+        Take(s_v.slider[i], s_initial.slider[i], fresh.slider[i],
+             all || (look && in(i, {kRadius, kRadius2, kGlassAlpha, kIconSize, kIconGap})));
     for (int i = 0; i < kSegCount; ++i)
         if (i != kSegEdge && i != kSegAlign && i != kSegSide)  // 这几项是显示用的，见 ShowPlace、ShowSide
             Take(s_v.seg[i], s_initial.seg[i], fresh.seg[i],
@@ -2176,6 +2221,7 @@ void Apply() {
     if (changed(kUpdates)) g_settings.checkUpdates = s_v.on[kUpdates];
     if (s_v.slider[kLongPressMs] != s_initial.slider[kLongPressMs]) g_settings.longPressMs = s_v.slider[kLongPressMs];
     if (s_v.slider[kRadius] != s_initial.slider[kRadius]) g_settings.popupRadius = s_v.slider[kRadius];
+    if (s_v.slider[kRadius2] != s_initial.slider[kRadius2]) g_settings.secondRadius = s_v.slider[kRadius2];
     if (s_v.slider[kGlassAlpha] != s_initial.slider[kGlassAlpha]) g_settings.glassTransparency = s_v.slider[kGlassAlpha];
     if (s_v.slider[kIconSize] != s_initial.slider[kIconSize]) g_settings.iconSize = s_v.slider[kIconSize];
     if (s_v.slider[kIconGap] != s_initial.slider[kIconGap]) g_settings.iconGap = s_v.slider[kIconGap];
@@ -2188,7 +2234,10 @@ void Apply() {
             g_settings.hotkeyHoldMs[i] = s_v.slider[kPopupHoldMs + i];
     if (s_v.seg[kSegStyle] != s_initial.seg[kSegStyle]) g_settings.glassStyle = s_v.seg[kSegStyle];
     if (s_v.seg[kSegTheme] != s_initial.seg[kSegTheme]) g_settings.theme = s_v.seg[kSegTheme];
-    if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) g_settings.trayStyle = s_v.seg[kSegTray];
+    if (s_v.seg[kSegTray] != s_initial.seg[kSegTray]) {  // 自由布局里托盘的框跟着拉长或缩短
+        g_settings.trayStyle = s_v.seg[kSegTray];
+        Popup_FitTrayBoxes(g_settings.modules, g_settings.trayStyle);
+    }
     if (s_v.align != s_initial.align) g_settings.popupAlign = s_v.align;
     if (s_v.offset != s_initial.offset) g_settings.popupOffset = s_v.offset;
     if (s_v.edge != s_initial.edge) g_settings.popupEdge = s_v.edge;
@@ -2198,6 +2247,7 @@ void Apply() {
     if (changed(kMarkScreens)) g_settings.markScreens = s_v.on[kMarkScreens];
     if (changed(kBrightAll)) g_settings.brightnessAllScreens = s_v.on[kBrightAll];
     if (s_v.seg[kSegWindows] != s_initial.seg[kSegWindows]) g_settings.popupWindows = s_v.seg[kSegWindows];
+    if (s_v.seg[kSegAlign2] != s_initial.seg[kSegAlign2]) g_settings.secondAlign = s_v.seg[kSegAlign2] ? kAlignCustom : kAlignSystem;
     for (const ScreenPlace& p : s_v.screens) {  // 只改动过的屏幕
         ScreenPlace* before = FindScreenPlace(s_initial.screens, p.key);
         if (before && *before == p) continue;
@@ -2250,8 +2300,9 @@ void Activate(const Item& it) {
             }
             s_v.seg[group] = pick;
             // 换材质时圆角还是原来那种的默认值：跟着换成新材质的（Win11 原版是 8）
-            if (group == kSegStyle && s_v.slider[kRadius] == DefaultPopupRadius(old))
-                s_v.slider[kRadius] = DefaultPopupRadius(s_v.seg[group]);
+            for (int radius : {kRadius, kRadius2})
+                if (group == kSegStyle && s_v.slider[radius] == DefaultPopupRadius(old))
+                    s_v.slider[radius] = DefaultPopupRadius(s_v.seg[group]);
             if (group == kSegEdge || group == kSegAlign) StorePlace();
             // 换了底部、侧边（或者把位置换到了另一种）：开关换成那一份
             if (group == kSegSide || (group == kSegEdge && ModuleSideOf(s_v.seg[kSegEdge]) != s_v.seg[kSegSide])) {
@@ -2265,7 +2316,7 @@ void Activate(const Item& it) {
             }
             // 竖排时收起对齐那一行；Win11 原版时收起透明度；换语言字的宽度变了；自定义颜色时多一个色块
             if (group == kSegEdge || group == kSegStyle || group == kSegLang || group == kSegTint || group == kSegAccent ||
-                group == kSegAlign || group == kSegSide || group == kSegWindows)
+                group == kSegAlign || group == kSegSide || group == kSegWindows || group == kSegAlign2)
                 Relayout(true);
             if (group == kSegEdge || group == kSegAlign || group == kSegStyle || group == kSegTheme || group == kSegTint ||
                 group == kSegAccent || group == kSegSide || group == kSegTray)

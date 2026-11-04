@@ -150,8 +150,9 @@ struct Slider {
     float a0, a1;    // 槽的两端：a0 是 0%，a1 是 100%（横着是 x，竖着是 y，下边是 0%）
     float c;         // 槽的中线（横着是 y，竖着是 x）
     bool vertical = false;
-    bool pill = false;
-    RectF box;  // 胖竖条整根的位置
+    bool pill = false;     // 放在图标那一行的单独模块（按模块原大小排，画的时候和模块一起放大缩小）
+    bool capsule = false;  // 胶囊样式（不是细槽加圆滑块），见 MakeCapsule
+    RectF box;             // 胶囊整根的位置
 };
 
 // 鼠标下的调节条部件
@@ -290,7 +291,7 @@ std::unique_ptr<FontFamily> s_fontFamily;  // 两条共用
 
 // 音量和亮度
 bool s_sliderOn[2] = {true, true};  // 这次弹出显不显示音量、亮度调节条（弹出时按设置定下来）
-bool s_sliderPill[2] = {};          // 横排时竖着放在图标那一行
+bool s_sliderPill[2] = {};          // 胶囊样式：横排时单独放在图标那一行，侧边时在最下面那块里
 Slider s_sliders[2];
 HMONITOR s_monitor = nullptr;  // 弹窗所在的屏幕，亮度调的是它
 HMONITOR s_forceMonitor = nullptr;  // 不为空：这次弹在这块屏幕上（快捷键“在下一块屏幕弹出”）
@@ -406,8 +407,8 @@ Color OnAccent() {
     return ColorLuma(RGB(a.GetR(), a.GetG(), a.GetB())) > 150 ? Color(235, 0, 0, 0) : Color(255, 255, 255, 255);
 }
 
-// 圆角半径（像素，按 100% 大小算）
-int PopupRadius() { return s_look.radius; }
+// 圆角半径（像素，按 100% 大小算）：主的那条、另一条（底部和侧边一起时侧边那条）各一个
+int PopupRadius() { return s_cur ? s_look.radius2 : s_look.radius; }
 
 // 横排、不显示标题行：名字显示在面板上方的小牌子里
 bool BubbleTitle() { return s_edge == kEdgeBottom && !s_compact && !s_look.showTitle; }
@@ -424,11 +425,17 @@ bool CanHideApps() { return s_dual && FreeLayout(); }
 bool StartShown() { return !CanHideApps() || Mods().start; }
 bool WindowsShown() { return !CanHideApps() || Mods().windows; }
 
+// 自由布局的框按换成自由布局时的图标大小算（见 ModuleSet::freeScale），按顺序排时按现在的图标大小
+int LayoutIconSize() { return FreeLayout() && Mods().freeScale > 0 ? Mods().freeScale : s_look.iconSize; }
+
+// 格子里的图标画多大（格子边长的一半再乘这个）：自由布局里改图标大小只改图标，格子、面板不变
+float GlyphK() { return FreeLayout() ? std::clamp(static_cast<float>(s_look.iconSize) / LayoutIconSize(), 0.5f, 1.9f) : 1.0f; }
+
 // 读图标用的大小（像素）：格子边长的三分之二，图标大小、窗口格子调大了也清楚
 int IconPx() {
     const ModuleSet& mods = Mods();
     float k = std::max(1.0f, mods.scale[kModWindows] / 100.0f);
-    if (FreeLayout()) {  // 自由布局：窗口格子按框的粗细（不超过长度）定大小，框的单位跟着图标大小变
+    if (FreeLayout()) {  // 自由布局：窗口格子按框的粗细（不超过长度）定大小
         const FreeBox& b = mods.box[kModWindows];
         k = std::max(1.0f, std::min(b.w, b.h) / 48);
     }
@@ -483,11 +490,23 @@ void ClockSize(float& w, float& h) {
     w = std::max(lines > 1 ? Px(72) : Px(56), measured.Width + Px(12));
 }
 
-// 调节条：竖着放在图标那一行的（横排才有），在下面那一行（横排）或最下面那块（侧边）的
+// 调节条：胶囊样式的横排时单独放在图标那一行（算模块），别的在下面那一行（横排）或最下面那块（侧边）
 bool PillSlider(int i) { return s_sliderOn[i] && s_sliderPill[i] && !Vertical(); }
 bool RowSlider(int i) { return s_sliderOn[i] && !PillSlider(i); }
 int RowSliderCount() { return RowSlider(0) + RowSlider(1); }
-constexpr float kPillW = 30, kPillGap = 8;  // 胖竖条的宽、两根挨着时的间隔
+constexpr float kPillW = 30, kPillGap = 8;  // 胶囊的粗细、两根挨着时的间隔
+
+// 胶囊样式：整根是 box，图标在 0% 那头（竖着在下面、横着在左边），从那头往另一头填强调色
+void MakeCapsule(Slider& sl, const RectF& box, bool vertical) {
+    float t = vertical ? box.Width : box.Height;
+    sl.box = box;
+    sl.vertical = vertical;
+    sl.capsule = true;
+    sl.icon = vertical ? RectF(box.X, box.GetBottom() - t, t, t) : RectF(box.X, box.Y, t, t);
+    sl.a0 = vertical ? box.GetBottom() : box.X;
+    sl.a1 = vertical ? box.Y : box.GetRight();
+    sl.c = vertical ? box.X + t / 2 : box.Y + t / 2;
+}
 // 竖着放在图标那一行的音量、亮度各是一个模块
 bool PillModule(int m) { return m == kModVolume || m == kModBright; }
 int PillModuleOf(int slider) { return slider == 0 ? kModVolume : kModBright; }
@@ -735,7 +754,7 @@ void ComputeSequence() {
     bool vertical = Vertical();
     L.margin = Px(24);  // 给阴影留位置，也是面板离屏幕边的距离
     L.pad = s_compact ? Px(4) : Px(8);
-    L.tile = Px(48.0f * s_look.iconSize / 100 * s_tileGrow);
+    L.tile = Px(48.0f * LayoutIconSize() / 100 * s_tileGrow);
     L.gap = Px(GapNow());
     for (int m = 0; m < kModuleCount; ++m) L.modK[m] = FreeLayout() ? 1.0f : ModK(m);
     float kw = L.modK[kModWindows];  // 窗口格子的大小
@@ -858,6 +877,11 @@ void ComputeSequence() {
         bool both = rowSliders == 2;
         s_sliders[0] = make(both ? L.colX + half / 2 : L.colX + half);
         s_sliders[1] = make(both ? L.colX + half + half / 2 : L.colX + half);
+        for (int i = 0; i < 2; ++i) {  // 胶囊样式：两根时各占半边
+            if (!s_sliderPill[i]) continue;
+            float w = std::min(Px(kPillW), (both ? half : L.tile) - Px(4)), cx = s_sliders[i].c;
+            MakeCapsule(s_sliders[i], RectF(cx - w / 2, L.sliderY, w, L.sliderH), true);
+        }
         for (int k = 0; k < s_radioCount; ++k)
             s_radioRects[k] = RectF(L.colX + (L.tile - L.radioW) / 2, L.sliderY + L.sliderH + Px(8) + k * (L.radioH + L.radioGap),
                                     L.radioW, L.radioH);
@@ -961,13 +985,8 @@ void ComputeSequence() {
     for (int i = 0; i < 2; ++i) {
         if (!PillSlider(i)) continue;
         Slider& sl = s_sliders[i];
-        float x = L.modPos[PillModuleOf(i)];
-        sl.box = RectF(x, L.tileY, Px(kPillW), L.tile);
-        sl.icon = RectF(x, L.tileY + L.tile - Px(kPillW), Px(kPillW), Px(kPillW));
-        sl.a0 = sl.box.GetBottom();
-        sl.a1 = sl.box.Y;
-        sl.c = x + Px(kPillW) / 2;
-        sl.vertical = sl.pill = true;
+        MakeCapsule(sl, RectF(L.modPos[PillModuleOf(i)], L.tileY, Px(kPillW), L.tile), true);
+        sl.pill = true;
     }
 
     s_width = static_cast<int>(std::ceil(L.panelW + 2 * L.margin));
@@ -977,12 +996,16 @@ void ComputeSequence() {
 
 void ApplyFreeLayout(Layout& L);
 
-// 托盘图标这次怎么排：设置里的样式；设的是堆叠、自由布局里托盘的框又沿着排列方向拉到了两倍粗以上时，换成一行大图标
+// 自由布局里托盘的框沿排列方向拉到了两倍粗以上
+bool TrayBoxLong(const FreeBox& b, bool vertical) { return b.w > 0 && b.h > 0 && (vertical ? b.h >= 2 * b.w : b.w >= 2 * b.h); }
+
+// 托盘图标这次怎么排：设置里的样式；设的是堆叠、自由布局里托盘的框又拉长了时，换成一行大图标。
+// 编辑模式里改了托盘的框，设置跟着框的样子（SyncTrayStyle）；设置里换了样式，框跟着拉长或缩短（Popup_FitTrayBoxes）
 int TrayStyleNow() {
-    if (s_look.trayStyle != kTrayStacked || !FreeLayout()) return s_look.trayStyle;
-    const FreeBox& b = Mods().box[kModTray];
-    if (b.w <= 0 || b.h <= 0) return kTrayStacked;
-    return (Vertical() ? b.h >= 2 * b.w : b.w >= 2 * b.h) ? kTrayRow : kTrayStacked;
+    if (!FreeLayout()) return s_look.trayStyle;
+    bool shaping = s_editing && s_scaleModule == kModTray;  // 正在拖托盘框的圆点：只看框的样子，缩短了马上换回堆叠
+    if (s_look.trayStyle != kTrayStacked && !shaping) return s_look.trayStyle;
+    return TrayBoxLong(Mods().box[kModTray], Vertical()) ? kTrayRow : kTrayStacked;
 }
 
 // 排好布局：按顺序排，自由布局时再把各样东西挪到它的框里
@@ -1160,8 +1183,8 @@ int ControlAt(int x, int y) {
     for (int i = 0; i < 2; ++i) {
         if (!s_sliderOn[i]) continue;
         const Slider& sl = s_sliders[i];
-        if (sl.pill) {  // 胖竖条：音量的图标那一格点了静音，别处都是槽（按原大小比）
-            PointF p = ModToBase(PillModuleOf(i), fx, fy);
+        if (sl.capsule) {  // 胶囊：音量的图标那一格点了静音，别处都是槽（单独的模块按原大小比）
+            PointF p = sl.pill ? ModToBase(PillModuleOf(i), fx, fy) : PointF(fx, fy);
             if (i == 0 && sl.icon.Contains(p)) return kVolumeIcon;
             if (sl.box.Contains(p)) return i == 0 ? kVolumeTrack : kBrightTrack;
             continue;
@@ -1365,8 +1388,8 @@ bool s_freePresent[kFreeItems];  // 这次有没有这一样（ApplyFreeLayout �
 // 媒体开着却没在放时，它那一段从区域里去掉：沿排列方向在 s_mediaCutAt 以后的都往前挪 s_mediaCut（单位见 FreeUnit）
 float s_mediaCutAt = 0, s_mediaCut = 0;
 
-// 框的一个单位是多少像素：100% 大小时的一像素，再跟着图标大小变（设置里调图标大小，自由布局整个跟着变）
-float FreeUnit() { return Px(s_look.iconSize / 100.0f); }
+// 框的一个单位是多少像素：100% 大小时的一像素，再乘换成自由布局时的图标大小（之后改图标大小框不变）
+float FreeUnit() { return Px(LayoutIconSize() / 100.0f); }
 
 // 框在窗口里画在哪
 RectF FreeToActual(const FreeBox& b) {
@@ -1424,10 +1447,10 @@ SizeF NaturalSize(const Layout& L, int item) {
             int n = ItemCount();
             return oriented(n == 0 ? L.emptyW : std::min(n, 6) * (L.tile + L.gap) - L.gap, L.tile);
         }
-        case kModTray: {  // 按设置里的样式（框拉长时自动换成的一行不算，双击恢复时回到原来的样子）
+        case kModTray: {  // 按设置里的样式；一行大图标至少两倍长（不然又成了小图标堆叠，见 TrayStyleNow）
             if (s_look.trayStyle != kTrayRow) return oriented(L.tile, L.tile);
             float cell = L.tile * 40 / 48;  // 一行大图标的格子沿排列方向的长度（见 ComputeSequence）
-            return oriented(std::clamp(TrayCells(), 1, kMaxTrayRow) * cell, L.tile);
+            return oriented(std::max(2 * L.tile, std::clamp(TrayCells(), 1, kMaxTrayRow) * cell), L.tile);
         }
         case kModVolume:
         case kModBright: return SizeF(Px(kPillW) / u, L.tile / u);
@@ -1438,10 +1461,10 @@ SizeF NaturalSize(const Layout& L, int item) {
     }
 }
 
-// 框最小多小：一般是原来的一半；开始按钮、窗口格子半个格子见方；调节条那一行要放得下图标
+// 框最小多小：一般是原来的一半；开始按钮、窗口格子、托盘（一行大图标时也能缩回堆叠）半个格子见方；调节条那一行要放得下图标
 SizeF MinBoxSize(const Layout& L, int item) {
     float u = FreeUnit();
-    if (item == kModStart || item == kModWindows) return SizeF(L.tile / 2 / u, L.tile / 2 / u);
+    if (item == kModStart || item == kModWindows || item == kModTray) return SizeF(L.tile / 2 / u, L.tile / 2 / u);
     if (item == kFreeLevels) return SizeF(Px(RowSliderCount() == 2 ? 48.0f : 34.0f) / u, Px(34) / u);
     SizeF n = NaturalSize(L, item);
     float least = Px(14) / u;
@@ -1654,16 +1677,14 @@ void ApplyFreeLayout(Layout& L) {
             L.trayW = std::min(TrayCells(), s_trayRowMax) * cell;
             s_trayFirst = std::clamp(s_trayFirst, 0, std::max(0, TrayCells() - s_trayRowMax));
         }
-        if (PillModule(m)) {  // 竖着的音量、亮度条：框的宽定粗细（宽过高时和高一样粗），高度拉满
+        if (PillModule(m)) {  // 胶囊样式的音量、亮度：框横着长就横着放，按框的窄边定粗细，长边拉满
             Slider& sl = s_sliders[m == kModVolume ? 0 : 1];
+            bool across = B.Width > B.Height;
             float w = Px(kPillW), k = std::max(0.02f, std::min(B.Width, B.Height) / w);
-            float h = B.Height / k, x = sl.box.X, y = sl.box.Y;
-            sl.box = RectF(x, y, w, h);
-            sl.icon = RectF(x, y + h - w, w, w);
-            sl.a0 = y + h;
-            sl.a1 = y;
+            float len = (across ? B.Width : B.Height) / k, x = sl.box.X, y = sl.box.Y;
+            MakeCapsule(sl, across ? RectF(x, y, len, w) : RectF(x, y, w, len), !across);
             L.modK[m] = k;
-            L.modT[m] = PointF(B.X + (B.Width - w * k) / 2 - x * k, B.Y - y * k);
+            L.modT[m] = PointF(B.X - x * k, B.Y - y * k);
             continue;
         }
         RectF base = FreeBaseRect(L, m);
@@ -1680,14 +1701,19 @@ void ApplyFreeLayout(Layout& L) {
             if (RowSlider(i)) idx[cnt++] = i;
         for (int k = 0; k < cnt; ++k) {
             Slider& sl = s_sliders[idx[k]];
+            bool capsule = s_sliderPill[idx[k]];  // 胶囊样式（侧边时才在这一行）：粗细不超过 kPillW
             if (B.Width >= B.Height) {
                 float gap = Px(16), seg = (B.Width - (cnt - 1) * gap) / cnt, x0 = B.X + k * (seg + gap), x1 = x0 + seg;
                 float cy = B.Y + B.Height / 2, icon = Px(30);
                 sl = Slider{RectF(x0, cy - icon / 2, icon, icon), x0 + icon + Px(10), x1 - Px(10), cy};
+                float t = std::min(B.Height, Px(kPillW));
+                if (capsule) MakeCapsule(sl, RectF(x0, cy - t / 2, seg, t), false);
             } else {
                 float icon = Px(24), cx = B.X + B.Width * (2 * k + 1) / (2 * cnt), iconY = B.GetBottom() - icon;
                 sl = Slider{RectF(cx - icon / 2, iconY, icon, icon), iconY - Px(10), B.Y + Px(10), cx};
                 sl.vertical = true;
+                float t = std::min(B.Width / cnt - Px(6), Px(kPillW));
+                if (capsule) MakeCapsule(sl, RectF(cx - t / 2, B.Y, t, B.Height), true);
             }
         }
     }
@@ -1844,9 +1870,10 @@ void DrawTile(Graphics& g, int idx) {
     const Palette& pal = Colors();
     RectF r = TileRect(idx);
     float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+    float glyph = GlyphK();
     if (idx == 0) {
         // Windows 标志（跟着格子大小变）
-        float sq = r.Width / 6, gap = r.Width / 24;
+        float sq = r.Width / 6 * glyph, gap = r.Width / 24 * glyph;
         float x0 = cx - sq - gap / 2, y0 = cy - sq - gap / 2;
         SolidBrush b(pal.accent);
         g.FillRectangle(&b, x0, y0, sq, sq);
@@ -1863,7 +1890,7 @@ void DrawTile(Graphics& g, int idx) {
         bg.Inflate(-0.5f, -0.5f);
         FillRound(g, bg, PillRadius(), UrgentColor(s_glass.Light() ? 70 : 80));
     }
-    float is = r.Width / 2;
+    float is = std::min(r.Width / 2 * glyph, r.Width - Px(2));
     RectF iconRect(cx - is / 2, cy - is / 2, is, is);
     if (item.icon) g.DrawImage(item.icon.get(), iconRect);
     else FillRound(g, iconRect, Px(4), pal.separator);
@@ -1910,8 +1937,8 @@ void SyncSliders(bool query) {
     bool was[2] = {s_sliderOn[0], s_sliderOn[1]};
     s_sliderOn[0] = mods.volume && !s_compact;
     s_sliderOn[1] = mods.brightness && !s_compact;
-    s_sliderPill[0] = mods.volumeVertical;
-    s_sliderPill[1] = mods.brightVertical;
+    s_sliderPill[0] = mods.volumeCapsule;
+    s_sliderPill[1] = mods.brightCapsule;
     if (query && s_sliderOn[0] && !was[0]) RefreshVolume();
     if (query && s_sliderOn[1] && !was[1]) Brightness_Query(s_hwnd, s_monitor);
 }
@@ -1958,7 +1985,7 @@ void SetSliderAt(int which, int x, int y) {
     float span = sl.a1 - sl.a0;
     if (std::fabs(span) < 1) return;
     PointF p(static_cast<REAL>(x), static_cast<REAL>(y));
-    if (sl.pill) p = ModToBase(PillModuleOf(which), p.X, p.Y);  // 胖竖条按原大小排
+    if (sl.pill) p = ModToBase(PillModuleOf(which), p.X, p.Y);  // 单独的模块按原大小排
     SetSlider(which, ((sl.vertical ? p.Y : p.X) - sl.a0) / span);
 }
 
@@ -2011,38 +2038,41 @@ void DrawSun(Graphics& g, const RectF& box, const Color& c) {
     }
 }
 
-// 胖竖条：一根圆头的槽，从下往上填强调色，图标在底下（填到的地方图标是强调色上的颜色）
-void DrawPillSlider(Graphics& g, int which, bool hot) {
+// 胶囊：一根圆头的槽，从图标那头（竖着是下面、横着是左边）往另一头填强调色（填到的地方图标是强调色上的颜色）
+void DrawCapsule(Graphics& g, int which, bool hot) {
     const Palette& pal = Colors();
     const Slider& sl = s_sliders[which];
     bool enabled = SliderEnabled(which);
     const RectF& box = sl.box;
-    float r = box.Width / 2;
+    float t = sl.vertical ? box.Width : box.Height;
     GraphicsPath path;
-    AddRoundRect(path, box, r);
+    AddRoundRect(path, box, t / 2);
     SolidBrush back(pal.track);
     g.FillPath(&back, &path);
     if (hot && enabled) {
         SolidBrush glow(pal.pillTop);
         g.FillPath(&glow, &path);
     }
-    float top = box.GetBottom();
+    float pos = sl.a0;
     bool dim = which == 0 && s_muted;
     if (enabled) {
-        top = sl.a0 + (sl.a1 - sl.a0) * SliderValue(which);
-        if (top < box.GetBottom() - 0.5f) {
+        pos = sl.a0 + (sl.a1 - sl.a0) * SliderValue(which);
+        if (std::fabs(pos - sl.a0) > 0.5f) {
             GraphicsState state = g.Save();
             g.SetClip(&path);
             SolidBrush fill(dim ? pal.subtle : pal.accent);
-            g.FillRectangle(&fill, box.X, top, box.Width, box.GetBottom() - top);
+            if (sl.vertical) g.FillRectangle(&fill, box.X, pos, box.Width, box.GetBottom() - pos);
+            else g.FillRectangle(&fill, box.X, box.Y, pos - box.X, box.Height);
             g.Restore(state);
         }
     }
     if (which == 0 && s_hoverControl == kVolumeIcon && s_hasVolume) {  // 喇叭能点
-        float d = box.Width - Px(4);
-        FillRound(g, RectF(sl.icon.X + Px(2), sl.icon.Y + (sl.icon.Height - d) / 2, d, d), d / 2, pal.pillTop);
+        float d = t - Px(4);
+        FillRound(g, RectF(sl.icon.X + (sl.icon.Width - d) / 2, sl.icon.Y + (sl.icon.Height - d) / 2, d, d), d / 2,
+                  pal.pillTop);
     }
-    bool onFill = enabled && !dim && top <= sl.icon.Y + sl.icon.Height / 2;
+    float mid = sl.vertical ? sl.icon.Y + sl.icon.Height / 2 : sl.icon.X + sl.icon.Width / 2;
+    bool onFill = enabled && !dim && (sl.vertical ? pos <= mid : pos >= mid);
     Color iconColor = !enabled ? pal.subtle : onFill ? OnAccent() : pal.text;
     if (which == 0) DrawSpeaker(g, sl.icon, iconColor);
     else DrawSun(g, sl.icon, iconColor);
@@ -2053,8 +2083,8 @@ void DrawSlider(Graphics& g, int which) {
     const Slider& sl = s_sliders[which];
     bool enabled = SliderEnabled(which);
     bool hot = s_drag != kNone ? SliderOf(s_drag) == which : (s_hoverControl != kNone && SliderOf(s_hoverControl) == which);
-    if (sl.pill) {
-        DrawPillSlider(g, which, hot);
+    if (sl.capsule) {
+        DrawCapsule(g, which, hot);
         return;
     }
 
@@ -2331,10 +2361,11 @@ void DrawTray(Graphics& g) {
         r.Inflate(-Px(1), -Px(1));
         FillRound(g, r, row ? Px(10) : Px(6), pal.pillTop);
     }
-    float icon = row ? s_L.tile / 2 : s_L.tile / 3;
+    float icon = (row ? s_L.tile / 2 : s_L.tile / 3) * GlyphK();
     auto drawIcon = [&](int i, float dx) {
         RectF r = TrayCellRect(i);
-        RectF iconRect(r.X + dx + (r.Width - icon) / 2, r.Y + (r.Height - icon) / 2, icon, icon);
+        float size = std::min(icon, std::min(r.Width, r.Height) - Px(2));
+        RectF iconRect(r.X + dx + (r.Width - size) / 2, r.Y + (r.Height - size) / 2, size, size);
         if (s_tray[i].icon) g.DrawImage(s_tray[i].icon.get(), iconRect);
         else FillRound(g, iconRect, Px(3), pal.separator);
     };
@@ -2510,9 +2541,12 @@ void DrawContent(Graphics& g) {
         } else if (s_drag != kNone || s_hoverControl != kNone) {
             int which = SliderOf(s_drag != kNone ? s_drag : s_hoverControl);
             const Slider& sl = s_sliders[which];
-            anchor = vertical ? (sl.a0 + sl.a1) / 2
-                     : sl.pill ? ModToActual(PillModuleOf(which), PointF(sl.c, 0)).X
-                               : (sl.icon.X + sl.a1) / 2;
+            // 调节条的中心：胶囊是整根的中心，细槽是图标加槽（竖着时只算槽）
+            PointF c = sl.capsule    ? PointF(sl.box.X + sl.box.Width / 2, sl.box.Y + sl.box.Height / 2)
+                       : sl.vertical ? PointF(sl.c, (sl.a0 + sl.a1) / 2)
+                                     : PointF((sl.icon.X + sl.a1) / 2, sl.c);
+            if (sl.pill) c = ModToActual(PillModuleOf(which), c);
+            anchor = vertical ? c.Y : c.X;
         } else if (s_hoverRadio >= 0) {
             anchor = mid(s_radioRects[s_hoverRadio]);
         } else if (s_hoverExtra != kExtraNone) {
@@ -4195,6 +4229,7 @@ void ConvertToFree() {
         }
     }
     mods.free = true;
+    mods.freeScale = s_look.iconSize;  // 框的单位是按现在的图标大小算的（u 是换之前的 FreeUnit）
     mods.freeW = std::max(16.0f, W);
     mods.freeH = std::max(16.0f, H);
     std::copy(boxes, boxes + kFreeItems, mods.box);
@@ -4912,6 +4947,22 @@ void SetModuleScale(int m, int percent) {
     });
 }
 
+// 编辑模式里改了自由布局里托盘的框：设置里的托盘样式跟着框的样子（拉长了是一行大图标，缩短了是小图标堆叠）
+void SyncTrayStyle() {
+    const FreeBox& b = Mods().box[kModTray];
+    if (!FreeLayout() || b.w <= 0) return;
+    int style = TrayBoxLong(b, Vertical()) ? kTrayRow : kTrayStacked;
+    if (style == g_settings.trayStyle) return;
+    g_settings.trayStyle = s_look.trayStyle = style;
+    Log(L"编辑模式里改了托盘的框，托盘图标换成了%ls", style == kTrayRow ? L"一行大图标" : L"小图标堆叠");
+    EditRelayout();
+    if (OtherOpen()) {  // 另一条上的托盘也换
+        InPanel other(Other());
+        s_look.trayStyle = style;
+        EditRelayout();
+    }
+}
+
 // 双击自由布局里的圆点：框恢复原来的大小（中心不动；那里放不下就找最近的空位）
 void ResetFreeBox(int item) {
     ModuleSet& mods = Mods();
@@ -4926,6 +4977,7 @@ void ResetFreeBox(int item) {
     if (want.w <= 0 || (want.x == b.x && want.y == b.y && want.w == b.w && want.h == b.h)) return;
     SetFreeBox(item, want);
     Log(L"双击恢复了%ls的大小", PartName(item));
+    if (item == kModTray) SyncTrayStyle();
     SaveSettings();
     SettingsDialog_SettingsChanged();
 }
@@ -5042,6 +5094,7 @@ void EndScaleDrag() {
         const FreeBox& b = Mods().box[m];
         if (b.x != s_scaleBox0.x || b.y != s_scaleBox0.y || b.w != s_scaleBox0.w || b.h != s_scaleBox0.h) {
             Log(L"拖圆点改了%ls的大小：%.0f × %.0f", PartName(m), b.w, b.h);
+            if (m == kModTray) SyncTrayStyle();
             SaveSettings();
             SettingsDialog_SettingsChanged();
         }
@@ -5078,6 +5131,7 @@ void WheelScale(int m, int notches) {
         }
         if (lo > 0.01f) SetFreeBox(m, boxAt(lo));
         s_wheelScaled = s_hoverModule = m;
+        if (m == kModTray) SyncTrayStyle();
         SaveSettings();
         SettingsDialog_SettingsChanged();
         Redraw();
@@ -6607,6 +6661,57 @@ void Popup_NextScreen() {
     ShowCompanion();
 }
 
+void Popup_FitTrayBoxes(ModuleSet sets[2], int style) {
+    int cells = static_cast<int>(std::max(s_tray.size(), s_away.v_s_tray.size()));
+    for (int side = 0; side < 2; ++side) {
+        ModuleSet& mods = sets[side];
+        FreeBox& b = mods.box[kModTray];
+        bool vertical = side == kSideEdge;  // 侧边那份是竖着排的
+        if (!mods.free || b.w <= 0 || b.h <= 0 || TrayBoxLong(b, vertical) == (style == kTrayRow)) continue;
+        float thick = vertical ? b.w : b.h, &len = vertical ? b.h : b.w, &at = vertical ? b.y : b.x;
+        float& area = vertical ? mods.freeH : mods.freeW;
+        if (style != kTrayRow) {  // 小图标堆叠：缩成正方形，中心不动
+            at += (len - thick) / 2;
+            len = thick;
+            continue;
+        }
+        // 这条边上显示着的别的东西（大概：隐藏的不算，没电池的电量这种还是算）
+        bool shown[kFreeItems] = {mods.start, mods.windows, mods.tray, mods.media, mods.ime, mods.battery, mods.clock,
+                                  !vertical && mods.volume && mods.volumeCapsule, !vertical && mods.brightness && mods.brightCapsule,
+                                  (mods.volume && (vertical || !mods.volumeCapsule)) ||
+                                      (mods.brightness && (vertical || !mods.brightCapsule)),
+                                  mods.radios};
+        auto fits = [&](float from, float length) {
+            if (from < -0.01f || from + length > area + 0.01f) return false;
+            FreeBox t = b;
+            (vertical ? t.y : t.x) = from;
+            (vertical ? t.h : t.w) = length;
+            for (int i = 0; i < kFreeItems; ++i) {
+                const FreeBox& o = mods.box[i];
+                if (i != kModTray && shown[i] && o.w > 0 && o.h > 0 && BoxesOverlap(t, o, 0)) return false;
+            }
+            return true;
+        };
+        // 一行大图标：拉长到放得下所有图标（至少两倍粗）。先试往后长、往前长、两头一起长，放不下就短一点（不短于两倍粗）；
+        // 还放不下就挪到区域最后面，区域加长
+        float want = std::max(2.0f, std::min(cells, kMaxTrayRow) * 40.0f / 48) * thick, least = 2 * thick;
+        bool done = false;
+        for (float to = want; to >= least - 0.01f && !done; to -= thick / 4)
+            for (float from : {at, at + len - to, at + (len - to) / 2})
+                if (fits(from, to)) {
+                    at = from;
+                    len = to;
+                    done = true;
+                    break;
+                }
+        if (!done) {
+            at = area + kFreeGap;
+            len = want;
+            area = at + len;
+        }
+    }
+}
+
 void Popup_DisplayChanged() {
     s_knownBrightness.clear();  // 屏幕的句柄可能换了，记着的亮度对不上
     for (int panel : {0, 1}) {
@@ -6622,6 +6727,7 @@ PopupLook LookFromSettings() {
     look.light = st.customTint ? ColorLuma(st.tintColor) > 150 : ThemeIsLight(st.theme, true);
     look.transparency = st.glassTransparency;
     look.radius = st.popupRadius;
+    look.radius2 = st.secondRadius;
     look.iconSize = st.iconSize;
     look.iconGap = st.iconGap;
     look.showTitle = st.showTitle;
@@ -6642,7 +6748,7 @@ namespace {
 
 bool SameModules(const ModuleSet& a, const ModuleSet& b) {
     return a.tray == b.tray && a.volume == b.volume && a.brightness == b.brightness &&
-           a.volumeVertical == b.volumeVertical && a.brightVertical == b.brightVertical && a.radios == b.radios &&
+           a.volumeCapsule == b.volumeCapsule && a.brightCapsule == b.brightCapsule && a.radios == b.radios &&
            a.media == b.media && a.ime == b.ime && a.battery == b.battery && a.clock == b.clock && a.start == b.start &&
            a.windows == b.windows && std::equal(a.order, a.order + kModuleCount, b.order) &&
            std::equal(a.scale, a.scale + kModuleCount, b.scale);

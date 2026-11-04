@@ -91,8 +91,9 @@ struct ModuleSet {
     bool tray = true;     // 系统托盘“隐藏的图标”里的那些
     bool volume = true;          // 音量调节条
     bool brightness = true;      // 亮度调节条
-    bool volumeVertical = false;  // 底部时音量条竖着放在图标那一行（侧边时总是竖着，不用这两项）
-    bool brightVertical = false;
+    // 音量、亮度条是胶囊样式（不是细槽加圆滑块）。底部时胶囊单独放在图标那一行（算模块），侧边时在最下面那块
+    bool volumeCapsule = false;
+    bool brightCapsule = false;
     bool radios = true;   // Wi-Fi 和蓝牙开关
     bool media = true;    // 正在播放的媒体
     bool ime = true;      // 输入法的中英文状态
@@ -105,6 +106,8 @@ struct ModuleSet {
     // freeW、freeH：放模块的那块区域多大（横排时不算标题那一行）
     bool free = false;
     float freeW = 0, freeH = 0;
+    // 换成自由布局时的图标大小（百分比）：框的单位按它算，之后再改图标大小只改格子里的图标，面板和框不变
+    int freeScale = 100;
     FreeBox box[kFreeItems];
 };
 enum ModuleSide { kSideBottom, kSideEdge };
@@ -129,6 +132,7 @@ struct Settings {
     int secondAlign = kAlignSystem;
     int secondOffset = 500;
     int secondLength = 0;
+    int secondRadius = 22;  // 另一条的圆角（只有一条时设置里的“圆角”两个一起改）
     int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
     bool popupPerScreen = false;        // 每块屏幕分别设置位置和对齐（screens），没设过的屏幕用上面两项
     std::vector<ScreenPlace> screens;
@@ -450,7 +454,7 @@ struct PopupLook {
     int style = kGlassLiquid;  // GlassStyle
     bool light = false;        // 浅色玻璃（自定义底色时按底色的深浅定）
     int transparency = kDefaultGlassTransparency;
-    int radius = 22;
+    int radius = 22, radius2 = 22;  // 主的那条、另一条的圆角（见 Settings::secondRadius）
     int iconSize = 100, iconGap = kDefaultIconGap;
     bool showTitle = true;
     bool customTint = false, customAccent = false;
@@ -463,6 +467,8 @@ struct PopupLook {
 PopupLook LookFromSettings();  // 现在的设置对应的外观
 void Popup_PreviewLook(const PopupLook& look);
 void Popup_EndPreview();  // 马上收起预览
+// 设置里换了托盘图标的样式：sets（底部、侧边两份）里自由布局的托盘框跟着拉长成一行或缩成正方形，免得框的样子又把样式换回去
+void Popup_FitTrayBoxes(ModuleSet sets[2], int style);
 void Popup_Configure();   // 按设置开关“鼠标停在屏幕边上时弹出”
 void Popup_Refresh();     // 开着的话重画（比如要提醒的窗口变了）
 HMONITOR Popup_Monitor();  // 迷你任务栏开着（不算预览）时在哪块屏幕上，没开着为空

@@ -38,19 +38,19 @@ When the taskbar is hidden, a short press of Win first raises a one-row mini tas
 
 ### Tray icons
 
-The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. In edit mode, stretching the tray to twice its thickness switches it to a row too. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu. While the taskbar is hidden, clicking a hidden icon makes the system taskbar and the hidden-icons panel transparent first, so they don't flash on screen.
+The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. In edit mode, stretching the tray to twice its thickness switches it to a row too, and shrinking it switches it back; the setting follows along. Changing the style in Settings stretches or shrinks a tray you've arranged in edit mode to match. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu. While the taskbar is hidden, clicking a hidden icon makes the system taskbar and the hidden-icons panel transparent first, so they don't flash on screen.
 
 ![Hidden tray icons: scroll to flip pages, right-click for the app's menu](docs/demo/en/tray.webp)
 
 ### Volume, brightness, Wi-Fi and Bluetooth
 
-Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list. Volume and brightness can be turned off separately on the Status & controls page of Settings. With the mini taskbar at the bottom, click "Vertical" to make one a tall bar that sits in the icon row.
+Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list. Volume and brightness can be turned off separately on the Status & controls page of Settings, and the "Capsule" button next to each switches it to a thick capsule instead of a thin track with a round thumb. At the bottom, a capsule is as tall as the icons and sits in the icon row. Whether a control lies across or stands up follows the shape of its box in edit mode, in either style.
 
 ![Drag to set the volume, click to turn Wi-Fi off and on, right-click for the network list](docs/demo/en/quick.webp)
 
 ### Media, input mode and battery
 
-Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size (also when you have arranged items yourself: it takes no room while nothing plays and slots back into its place when something does). There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings. The bottom and the screen sides each keep their own choice (pick Bottom or Side under "Mini taskbar at" first), and the mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
+Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size (also when you have arranged items yourself: it takes no room while nothing plays and slots back into its place when something does). There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings; it changes the bar on the current edge. When the bottom and side bars show together, pick Bottom or Side under "Settings for" first; a bar you've arranged in edit mode can also turn off its Start button and window icons there. The mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 
@@ -86,7 +86,7 @@ Set hotkeys to open the mini taskbar, open only the bottom bar, open only the si
 
 ### Appearance
 
-Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. The accent color follows Windows unless you pick your own, and the mini taskbar can have its own tint. Corner radius, transparency, icon size and spacing preview live as you change them. You can also turn off the title row; window names then show above the panel.
+Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. The accent color follows Windows unless you pick your own, and the mini taskbar can have its own tint. Corner radius, transparency, icon size and spacing preview live as you change them, and when the bottom and side bars show together each has its own corner radius. Once you've arranged items in edit mode, icon size only changes the icons; the panel and the items' boxes stay the same. You can also turn off the title row; window names then show above the panel.
 
 ![Liquid glass, light or dark, transparency all preview live](docs/demo/en/appearance.webp)
 
@@ -109,7 +109,7 @@ On the Presets & backup page in Settings, save the current look as a preset (up 
 
 ### Position and alignment
 
-Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge, or pick "Bottom + left" or "Bottom + right" to show two bars together: the side bar sits above the bottom one, each bar has its own set of items, and they open and close together. At the bottom it can follow the system, or be centered, left or right aligned, and in edit mode you can drag it anywhere. You can also give the bottom bar and the side bar a hotkey each to open or close just that bar (with only one edge set, the other hotkey still brings up a bar on the other edge).
+Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge, or pick "Bottom + left" or "Bottom + right" to show two bars together: the side bar sits above the bottom one, each bar has its own set of items, and they open and close together. At the bottom it can follow the system, or be centered, left or right aligned, and in edit mode you can drag it anywhere. Settings shows the position and length you set in edit mode; with two bars, click Center under "Side alignment" to put a dragged side bar back. You can also give the bottom bar and the side bar a hotkey each to open or close just that bar (with only one edge set, the other hotkey still brings up a bar on the other edge).
 
 ![The mini taskbar at the bottom, on the left or on the right](docs/demo/en/side.webp)
 

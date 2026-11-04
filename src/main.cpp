@@ -3,6 +3,7 @@
 //   2. 长按 Win 键，从屏幕底部中央弹出迷你任务栏（含固定在任务栏的应用）
 #include "common.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cwchar>
 #include <exception>
@@ -447,19 +448,20 @@ std::wstring ModuleScaleText(const int scale[kModuleCount]) {
     return text;
 }
 
-// 底部那份用原来的键，侧边那份在键前面加 Side；侧边没写过的跟着底部。
-// oldKey：旧版本音量、亮度共用一个开关 ShowLevels，新键没写过时照它
+// 底部那份用原来的键，侧边那份在键前面加 Side；侧边没写过的跟着底部（sideFollows 为 false 的用默认值）。
+// oldKey：新键没写过时照的旧键（旧版本音量、亮度共用一个开关 ShowLevels；胶囊样式以前叫竖排，只有底部有）
 struct ModuleKey {
     const wchar_t* key;
     bool ModuleSet::*item;
     bool def = true;
     const wchar_t* oldKey = nullptr;
+    bool sideFollows = true;
 };
 const ModuleKey kModuleSetKeys[] = {{L"TrayIcons", &ModuleSet::tray},
                                     {L"ShowVolume", &ModuleSet::volume, true, L"ShowLevels"},
                                     {L"ShowBrightness", &ModuleSet::brightness, true, L"ShowLevels"},
-                                    {L"VolumeVertical", &ModuleSet::volumeVertical, false},
-                                    {L"BrightVertical", &ModuleSet::brightVertical, false},
+                                    {L"VolumeCapsule", &ModuleSet::volumeCapsule, false, L"VolumeVertical", false},
+                                    {L"BrightCapsule", &ModuleSet::brightCapsule, false, L"BrightVertical", false},
                                     {L"ShowRadios", &ModuleSet::radios},
                                     {L"ShowMedia", &ModuleSet::media},
                                     {L"ShowIme", &ModuleSet::ime},
@@ -497,7 +499,8 @@ COLORREF ParseColor(const std::wstring& text, COLORREF fallback) {
 
 int ClampOffset(int offset) { return std::clamp(offset, 0, kMaxPopupOffset); }
 
-// 自由布局：“宽,高|模块:x,y,宽,高|…”（按 100% 大小的像素），不是自由布局时是空的。调节条那行叫 levels，Wi-Fi 蓝牙叫 radios
+// 自由布局：“宽,高,图标大小|模块:x,y,宽,高|…”（按 100% 大小、那个图标大小时的像素），不是自由布局时是空的。
+// 调节条那行叫 levels，Wi-Fi 蓝牙叫 radios；旧版本没写图标大小，按现在的算
 const wchar_t* FreeItemKey(int item) {
     if (item == kFreeLevels) return L"levels";
     if (item == kFreeRadios) return L"radios";
@@ -514,7 +517,7 @@ std::wstring Number(float v) {
 
 std::wstring FreeLayoutText(const ModuleSet& mods) {
     if (!mods.free) return L"";
-    std::wstring text = Number(mods.freeW) + L"," + Number(mods.freeH);
+    std::wstring text = Number(mods.freeW) + L"," + Number(mods.freeH) + L"," + std::to_wstring(mods.freeScale);
     for (int i = 0; i < kFreeItems; ++i) {
         const FreeBox& b = mods.box[i];
         if (b.w <= 0 || b.h <= 0) continue;
@@ -536,9 +539,12 @@ void ParseFreeLayout(const std::wstring& text, ModuleSet& mods) {
         parts.push_back(ToLower(text.substr(start, end - start)));
         start = end + 1;
     }
-    if (parts.empty() || swscanf(parts[0].c_str(), L"%f,%f", &mods.freeW, &mods.freeH) != 2 || mods.freeW < 8 ||
+    float scale = 0;
+    if (parts.empty() || swscanf(parts[0].c_str(), L"%f,%f,%f", &mods.freeW, &mods.freeH, &scale) < 2 || mods.freeW < 8 ||
         mods.freeH < 8 || mods.freeW > 20000 || mods.freeH > 20000)
         return;
+    int icon = static_cast<int>(std::lround(scale));
+    mods.freeScale = icon >= kMinIconSize && icon <= kMaxIconSize ? icon : g_settings.iconSize;
     for (size_t i = 1; i < parts.size(); ++i) {
         size_t colon = parts[i].find(L':');
         if (colon == std::wstring::npos) continue;
@@ -582,7 +588,7 @@ bool ParseModuleSetText(const std::wstring& text, ModuleSet& mods) {
             for (const ModuleKey& k : kModuleSetKeys) out.*k.item = false;
             ForEachPart(value, [&](const std::wstring& name) {
                 for (const ModuleKey& k : kModuleSetKeys)
-                    if (name == ToLower(k.key)) out.*k.item = true;
+                    if (name == ToLower(k.key) || (k.oldKey && name == ToLower(k.oldKey))) out.*k.item = true;
             });
         } else if (key == L"order") {
             ParseModuleOrder(value, out.order);
@@ -614,8 +620,9 @@ void LoadSettings() {
         int def = k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", k.oldKey, k.def, f.c_str())) : k.def;
         bool bottom = GetPrivateProfileIntW(L"General", k.key, def, f.c_str()) != 0;
         g_settings.modules[kSideBottom].*k.item = bottom;
-        int sideDef = k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", SideKey(k.oldKey).c_str(), bottom, f.c_str()))
-                               : bottom;
+        int sideDef = !k.sideFollows ? k.def
+                      : k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", SideKey(k.oldKey).c_str(), bottom, f.c_str()))
+                                 : bottom;
         g_settings.modules[kSideEdge].*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), sideDef, f.c_str()) != 0;
     }
     for (const AppModuleKey& k : kAppModuleKeys) {
@@ -674,6 +681,8 @@ void LoadSettings() {
     g_settings.glassStyle = style == 1 || style == 2 ? kGlassWin11 : kGlassLiquid;  // 1 是以前的毛玻璃，2 是上一版的 Win11 原版
     int radius = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupRadius", DefaultPopupRadius(g_settings.glassStyle), f.c_str()));
     g_settings.popupRadius = std::max(0, std::min(radius, kMaxPopupRadius));
+    radius = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondRadius", g_settings.popupRadius, f.c_str()));
+    g_settings.secondRadius = std::max(0, std::min(radius, kMaxPopupRadius));
     int length = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupLength", 0, f.c_str()));
     g_settings.popupLength = std::max(0, std::min(length, kMaxPopupLength));
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
@@ -831,6 +840,7 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PinTopmost", g_settings.pinTopmost ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupRadius", std::to_wstring(g_settings.popupRadius).c_str(), f.c_str());
+    WritePrivateProfileStringW(L"General", L"SecondRadius", std::to_wstring(g_settings.secondRadius).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupLength", std::to_wstring(g_settings.popupLength).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassTransparency", std::to_wstring(g_settings.glassTransparency).c_str(), f.c_str());
@@ -868,7 +878,8 @@ const wchar_t* const kLookKeys[] = {
     L"SideShowLevels",  L"SideShowRadios", L"PopupPerScreen", L"ScreenPlaces", L"ShowVolume", L"ShowBrightness",
     L"VolumeVertical", L"BrightVertical", L"SideShowVolume", L"SideShowBrightness", L"SideVolumeVertical", L"SideBrightVertical",
     L"ModuleScale", L"SideModuleScale", L"FreeLayout", L"SideFreeLayout", L"ShowStart", L"ShowWindows", L"SideShowStart",
-    L"SideShowWindows", L"SecondAlign", L"SecondOffset", L"SecondLength"};
+    L"SideShowWindows", L"SecondAlign", L"SecondOffset", L"SecondLength", L"SecondRadius", L"VolumeCapsule", L"BrightCapsule",
+    L"SideVolumeCapsule", L"SideBrightCapsule"};
 
 std::wstring LookSection(int slot) { return L"Look" + std::to_wstring(slot); }
 
