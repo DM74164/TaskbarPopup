@@ -90,7 +90,10 @@ const ToggleText kToggleText[kToggleCount] = {
 
 // 滑块
 // 快捷键的长按时长：kPopupHoldMs + HotkeyId
-enum SliderId { kLongPressMs, kRadius, kPopupHoldMs, kPinHoldMs, kMoveHoldMs, kNextHoldMs, kGlassAlpha, kIconSize, kIconGap, kSliderCount };
+enum SliderId {
+    kLongPressMs, kRadius, kPopupHoldMs, kPinHoldMs, kMoveHoldMs, kNextHoldMs, kBottomHoldMs, kSideHoldMs, kGlassAlpha, kIconSize,
+    kIconGap, kSliderCount
+};
 static_assert(kPopupHoldMs + kHotkeyCount == kGlassAlpha, "每个快捷键一个长按时长");
 struct SliderSpec {
     const wchar_t* label;
@@ -99,6 +102,8 @@ struct SliderSpec {
 const SliderSpec kSliderSpec[kSliderCount] = {
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"圆角", 0, kMaxPopupRadius, 2},
+    {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
+    {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
     {L"长按时长", kMinLongPressMs, kMaxLongPressMs, 100},
@@ -122,7 +127,7 @@ const SegSpec kSegSpec[kSegCount] = {
     {L"颜色", {L"跟随系统", L"浅色", L"深色"}},
     {L"托盘图标", {L"小图标堆叠", L"横向完整展示"}},  // 下标是 TrayStyle
     {L"对齐", {L"跟随系统", L"居中", L"靠左", L"靠右", L"自定义"}},  // 下标是 PopupAlign；“自定义”只在编辑模式里拖过时出现
-    {L"位置", {L"底部", L"左侧", L"右侧"}},  // 下标是 PopupEdge
+    {L"位置", {L"底部", L"左侧", L"右侧", L"底部和左侧", L"底部和右侧"}},  // 下标是 PopupEdge
     {L"语言", {L"跟随系统", L"中文", L"English"}},  // 下标是 Language；“中文”“English”不翻译
     {L"弹在", {L"鼠标所在屏幕", L"前台窗口所在屏幕"}},  // 下标是 PopupMonitor
     {L"底色", {L"跟随颜色", L"自定义"}},
@@ -138,6 +143,8 @@ const ToggleText kHotkeyText[kHotkeyCount] = {
     {L"固定前台的小窗口", L"再按一次取消；鼠标键固定鼠标下的窗口"},
     {L"把前台窗口移到下一块屏幕", L"鼠标键移的是鼠标下的窗口"},
     {L"在下一块屏幕弹出迷你任务栏", L"再按一次换到再下一块"},
+    {L"弹出底部迷你任务栏", L"只弹出底部那条，再按一次收起"},
+    {L"弹出侧边迷你任务栏", L"只弹出侧边那条，再按一次收起"},
 };
 const wchar_t* const kHotkeyModes[2] = {L"单按", L"长按"};  // 快捷键的 kHotkeyMode：Item::index = 第几个 * kSegStride + 这个下标
 
@@ -637,7 +644,9 @@ float BuildPage(int page, float x, float y) {
             if (MultiScreen() || s_v.on[kPerScreen])
                 place.push_back([](float x, float y, float w) { return ToggleRow(kPerScreen, x, y, w); });
             place.push_back([](float x, float y, float w) { return SegRow(kSegEdge, x, y, w); });
-            if (s_v.seg[kSegEdge] == kEdgeBottom) place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });  // 竖排时收起对齐
+            // 只在侧边时收起对齐（底部和侧边一起时是底部那条的对齐）
+            if (s_v.seg[kSegEdge] == kEdgeBottom || DualEdge(s_v.seg[kSegEdge]))
+                place.push_back([](float x, float y, float w) { return SegRow(kSegAlign, x, y, w); });
             if (s_v.on[kPerScreen]) place.push_back(ScreenRow);
             return AddGroup(x, y, L"位置", place);
         }
@@ -672,7 +681,9 @@ float BuildPage(int page, float x, float y) {
                             {[](float x, float y, float w) { return HotkeyRow(kHotkeyPopup, x, y, w); },
                              [](float x, float y, float w) { return HotkeyRow(kHotkeyPin, x, y, w); },
                              [](float x, float y, float w) { return HotkeyRow(kHotkeyMove, x, y, w); },
-                             [](float x, float y, float w) { return HotkeyRow(kHotkeyNextScreen, x, y, w); }});
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeyNextScreen, x, y, w); },
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeyBottom, x, y, w); },
+                             [](float x, float y, float w) { return HotkeyRow(kHotkeySide, x, y, w); }});
         default:
             return AddGroup(x, y, nullptr,
                             {[](float x, float y, float w) { return ToggleRow(kAutoStart, x, y, w); },
@@ -1634,7 +1645,7 @@ PopupLook DraftLook() {
 // 预览弹在哪条边：在“状态和控制”页看的是“迷你任务栏在”选的那种（选了侧边、位置却在底部时弹在左边）
 int PreviewEdge() {
     int edge = s_v.seg[kSegEdge];
-    if (s_page != kPageControls || ModuleSideOf(edge) == s_v.seg[kSegSide]) return edge;
+    if (s_page != kPageControls || DualEdge(edge) || ModuleSideOf(edge) == s_v.seg[kSegSide]) return edge;
     return s_v.seg[kSegSide] == kSideBottom ? kEdgeBottom : kEdgeLeft;
 }
 

@@ -85,7 +85,8 @@ bool UsesRegisterHotKey(int id, UINT want) {
 
 const wchar_t* ActionName(int id) {
     static const wchar_t* const kNames[kHotkeyCount] = {L"弹出迷你任务栏", L"固定小窗口", L"把窗口移到下一块屏幕",
-                                                         L"在下一块屏幕弹出迷你任务栏"};
+                                                         L"在下一块屏幕弹出迷你任务栏", L"弹出底部迷你任务栏",
+                                                         L"弹出侧边迷你任务栏"};
     return kNames[id];
 }
 
@@ -218,6 +219,9 @@ void Hotkeys_Run(int id, HWND target) {
         MoveToNextScreen(target);
     } else if (id == kHotkeyNextScreen) {
         Popup_NextScreen();
+    } else if (id == kHotkeyBottom || id == kHotkeySide) {
+        Log(L"按了弹出%ls迷你任务栏的快捷键", id == kHotkeySide ? L"侧边" : L"底部");
+        Popup_ToggleEdge(id == kHotkeySide);
     }
 }
 

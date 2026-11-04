@@ -38,7 +38,7 @@ When the taskbar is hidden, a short press of Win first raises a one-row mini tas
 
 ### Tray icons
 
-The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu.
+The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. In edit mode, stretching the tray to twice its thickness switches it to a row too. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu.
 
 ![Hidden tray icons: scroll to flip pages, right-click for the app's menu](docs/demo/en/tray.webp)
 
@@ -58,7 +58,7 @@ While the taskbar is hidden, when a program flashes on the taskbar (a new messag
 
 ### Open by resting the mouse on the edge
 
-Turn it on in Settings. While the taskbar is hidden, rest the mouse on the bottom edge of the screen (or the side the mini taskbar is on) and the mini taskbar appears without taking focus from your window. If you don't click it, it closes when the mouse moves away.
+Turn it on in Settings. While the taskbar is hidden, rest the mouse on the bottom edge of the screen (or the side the mini taskbar is on; with two bars, the edge you rest on opens its bar) and the mini taskbar appears without taking focus from your window. If you don't click it, it closes when the mouse moves away.
 
 ### Type to filter
 
@@ -80,7 +80,7 @@ Double-click a small floating window (or use a hotkey) and it stays on top even 
 
 ### Hotkeys
 
-Set hotkeys to open the mini taskbar, pin a small window, move the active window to the next display, and open the mini taskbar on the next display. Key combos, single keys and mouse buttons all work, triggered by a tap or a hold. None are set by default.
+Set hotkeys to open the mini taskbar, open only the bottom bar, open only the side bar, pin a small window, move the active window to the next display, and open the mini taskbar on the next display. Key combos, single keys and mouse buttons all work, triggered by a tap or a hold. None are set by default.
 
 ![Hotkeys can be key combos, single keys or mouse buttons](docs/demo/en/hotkeys.webp)
 
@@ -95,7 +95,8 @@ Choose liquid glass or the original Windows 11 look (the system's acrylic: a sol
 Press F2 while the mini taskbar is open, or click "Edit" on the Size & position page of Settings, to arrange it your way:
 
 - Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it. Scrolling over empty space changes the size too.
-- Drag the Start button, window icons, tray icons, media, input mode, battery, clock, volume and brightness, or the Wi-Fi and Bluetooth toggles anywhere on the panel, and they stay where you drop them. A dashed outline shows where the item will land; it lines up with nearby items and the panel's center, and if it would cover another item it lands in the nearest free spot. Drag an item off the panel to hide it (not the Start button or the window icons). The bottom and the screen sides remember this separately.
+- Drag the Start button, window icons, tray icons, media, input mode, battery, clock, volume and brightness, or the Wi-Fi and Bluetooth toggles anywhere on the panel, and they stay where you drop them. A dashed outline shows where the item will land; it lines up with nearby items and the panel's center, and if it would cover another item it lands in the nearest free spot. Drag an item off the panel to hide it (the Start button and the window icons only when the bottom and side bars show together). The bottom and the screen sides remember this separately.
+- When the bottom and side bars show together, both enter edit mode. Drop an item on the other bar to move it there; the other bar shows where it will land.
 - Once you've moved an item, the panel's edges change the size of the area the items sit in. Double-click an edge to trim the empty space.
 - Point at an item and a small dot appears on its corner: drag the dot to size that item, or scroll over the item. Double-click the dot to reset. Once you've moved an item, width and height change separately (hold Shift to keep the shape): longer window icons show more windows and thicker ones get bigger icons, a longer tray shows more icons, volume, brightness and the Wi-Fi and Bluetooth toggles line up across or down to fit, and other items scale to fit.
 - Point at the window icons and small bars appear in the gaps between them: drag one to change the icon spacing, or scroll over a gap. Double-click to reset.
@@ -108,7 +109,7 @@ On the Presets & backup page in Settings, save the current look as a preset (up 
 
 ### Position and alignment
 
-Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge. At the bottom it can follow the system, or be centered, left or right aligned, and in edit mode you can drag it anywhere.
+Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge, or pick "Bottom + left" or "Bottom + right" to show two bars together: the side bar sits above the bottom one, each bar has its own set of items, and they open and close together. At the bottom it can follow the system, or be centered, left or right aligned, and in edit mode you can drag it anywhere. You can also give the bottom bar and the side bar a hotkey each to open or close just that bar (with only one edge set, the other hotkey still brings up a bar on the other edge).
 
 ![The mini taskbar at the bottom, on the left or on the right](docs/demo/en/side.webp)
 

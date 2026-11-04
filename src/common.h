@@ -39,14 +39,17 @@ namespace app {
 // 液态玻璃 / Win11 原版（平的亚克力，细边框）。以前的毛玻璃（1）由 Win11 原版顶替
 enum GlassStyle { kGlassLiquid, kGlassWin11 };
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
-// 弹出迷你任务栏 / 固定前台的小窗口 / 把窗口移到下一块屏幕 / 在下一块屏幕弹出迷你任务栏
-enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyMove, kHotkeyNextScreen, kHotkeyCount };
+// 弹出迷你任务栏 / 固定前台的小窗口 / 把窗口移到下一块屏幕 / 在下一块屏幕弹出迷你任务栏 / 只弹出底部的 / 只弹出侧边的
+enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyMove, kHotkeyNextScreen, kHotkeyBottom, kHotkeySide, kHotkeyCount };
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
 // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右 / 自定义（编辑模式里拖到的位置，见 popupOffset）。
 // 竖排时只看是不是自定义，别的都是上下居中
 enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight, kAlignCustom };
 enum Language { kLangSystem, kLangChinese, kLangEnglish };  // 界面语言
-enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight };  // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排
+// 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排 / 底部和左边、底部和右边两条一起弹出（各放各的模块）
+enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight, kEdgeBottomLeft, kEdgeBottomRight };
+inline bool DualEdge(int edge) { return edge == kEdgeBottomLeft || edge == kEdgeBottomRight; }
+inline int DualSide(int edge) { return edge == kEdgeBottomRight ? kEdgeRight : kEdgeLeft; }  // 两条一起时侧边那条在哪边
 enum PopupMonitor { kPopupAtCursor, kPopupAtActive };  // 迷你任务栏弹在哪块屏幕上：鼠标所在的 / 前台窗口所在的
 // 迷你任务栏列哪些屏幕上的窗口：跟着系统任务栏的设置 / 所有屏幕上的 / 只列它所在那块屏幕上的
 enum PopupWindows { kWindowsSystem, kWindowsAll, kWindowsOwnScreen };
@@ -82,6 +85,9 @@ struct FreeBox {
 constexpr int kFreeLevels = kModuleCount, kFreeRadios = kModuleCount + 1, kFreeItems = kModuleCount + 2;
 // 迷你任务栏显示哪些、按什么顺序：放在底部和侧边时各一份（Settings::modules 的下标见 ModuleSide）
 struct ModuleSet {
+    // 开始按钮、窗口格子：只有底部和侧边两条一起弹出、又是自由布局时才能隐藏（放到另一条上），别的时候总是显示
+    bool start = true;
+    bool windows = true;
     bool tray = true;     // 系统托盘“隐藏的图标”里的那些
     bool volume = true;          // 音量调节条
     bool brightness = true;      // 亮度调节条
@@ -102,7 +108,8 @@ struct ModuleSet {
     FreeBox box[kFreeItems];
 };
 enum ModuleSide { kSideBottom, kSideEdge };
-inline int ModuleSideOf(int edge) { return edge == kEdgeBottom ? kSideBottom : kSideEdge; }
+// 这条边用哪一份。底部和侧边一起（设置窗口里选的位置）时先说底部那份
+inline int ModuleSideOf(int edge) { return edge == kEdgeBottom || DualEdge(edge) ? kSideBottom : kSideEdge; }
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool alwaysHideTaskbar = false;    // 一直隐藏任务栏：没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出
@@ -118,6 +125,10 @@ struct Settings {
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
     int popupOffset = 500;          // 自定义位置：面板中心在那条屏幕边上的千分之几处（横排从左数，竖排从上数）
+    // 另一条迷你任务栏（底部和侧边一起时侧边那条，或者快捷键单独呼出的另一条边上的）自己的对齐、自定义位置、长度
+    int secondAlign = kAlignSystem;
+    int secondOffset = 500;
+    int secondLength = 0;
     int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
     bool popupPerScreen = false;        // 每块屏幕分别设置位置和对齐（screens），没设过的屏幕用上面两项
     std::vector<ScreenPlace> screens;
@@ -130,7 +141,7 @@ struct Settings {
     UINT hotkey[kHotkeyCount] = {};       // 快捷键（见 MakeHotkey），下标是 HotkeyId，0 = 没设
     bool hotkeyHold[kHotkeyCount] = {};   // 长按触发，否则单按
     int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs,
-                                      kDefaultLongPressMs};  // 长按要按住多久
+                                      kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     int glassTransparency = kDefaultGlassTransparency;  // 迷你任务栏液态玻璃的透明度，百分比，深浅色共用
@@ -423,6 +434,9 @@ void Popup_Destroy();
 void Popup_Show();
 void Popup_Hide();
 void Popup_Toggle();
+// 只弹出 / 收起底部（side 为 false）或侧边的那一条（快捷键）。底部和侧边一起时就是其中一条，
+// 只设了一条边时另一条边弹出另一份模块
+void Popup_ToggleEdge(bool side);
 void Popup_Edit();  // 弹出来直接进编辑模式（设置里的“编辑”按钮）
 // 任务栏藏着时短按了 Win：先弹出迷你任务栏，弹完再打开开始菜单（开始菜单开着时迷你任务栏一直在）；
 // 任务栏没藏着、开始菜单已经开着时照常补发 Win
