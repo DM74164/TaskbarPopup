@@ -213,6 +213,10 @@ float s_resizeDist = 1;    // 开始拖时鼠标离固定的那条屏幕边多�
 float s_resizeLen = 0;     // 开始拖时面板的长度，像素（改长度用）
 POINT s_resizeAt = {};     // 开始拖时鼠标在屏幕上的位置
 bool s_resizePinned = false;  // 开始拖时自定义位置的面板顶着屏幕的一头（另一头不跟着动）
+// 自由布局里居中（或自定义位置）时拖改长度的边：只动拖的那一头，另一头钉在屏幕上这里（窗口的边，没钉：LONG_MIN）
+LONG s_resizeFixed = LONG_MIN;
+bool s_resizeFixedLow = false;  // 钉住的是左（上）头
+float s_resizeExtra = 0;        // 窗口比自由布局区域长出来的像素（边距）
 DWORD s_edgeClickAt = 0;   // 上一次在边上（或者挪面板的地方）按下的时间和位置：双击恢复
 POINT s_edgeClickPt = {};
 // 编辑模式里鼠标下、正在拖的东西：模块（Module）、调节条、Wi-Fi 蓝牙按钮，或者边、别的地方（挪面板）、
@@ -1089,10 +1093,17 @@ int CustomPlace(LONG from, LONG to, int size) {
 }
 
 void UpdatePlacement() {
+    // 拖边改自由布局的长度时：钉住的那一头不动（不超出屏幕）
+    auto pinned = [](LONG from, LONG to, int size, int at) {
+        if (s_resizeFixed == LONG_MIN) return at;
+        LONG p = s_resizeFixedLow ? s_resizeFixed : s_resizeFixed - size;
+        return static_cast<int>(std::max<LONG>(from, std::min<LONG>(p, to - size)));
+    };
     if (Vertical()) {
         int x = s_edge == kEdgeLeft ? s_bounds.left : s_bounds.right - s_width;
         int y = std::max<int>(s_bounds.top, s_bounds.top + (s_bounds.bottom - s_bounds.top - s_height) / 2);
         if (s_align == kAlignCustom && s_height < s_bounds.bottom - s_bounds.top) y = CustomPlace(s_bounds.top, s_bounds.bottom, s_height);
+        y = pinned(s_bounds.top, s_bounds.bottom, s_height, y);
         s_pos = {x, y};
         s_baseValid = false;
         return;
@@ -1102,6 +1113,7 @@ void UpdatePlacement() {
     if (align == kAlignLeft) x = s_bounds.left;
     else if (align == kAlignRight) x = s_bounds.right - s_width;
     else if (align == kAlignCustom && s_width < s_bounds.right - s_bounds.left) x = CustomPlace(s_bounds.left, s_bounds.right, s_width);
+    if (align == kAlignCenter || align == kAlignCustom) x = pinned(s_bounds.left, s_bounds.right, s_width, x);
     s_pos = {x, s_bounds.bottom - s_height};
     s_baseValid = false;
 }
@@ -3032,7 +3044,7 @@ bool s_scaleLayout = false;
     X(s_first) X(s_visible) X(s_hover) X(s_sel) X(s_open) X(s_preview)\
     X(s_previewPercent) X(s_previewAlign) X(s_previewEdge) X(s_previewLook) X(s_look) X(s_edge)\
     X(s_align) X(s_offset) X(s_shownAt) X(s_editing) X(s_resize) X(s_resizeFrom)\
-    X(s_resizeLenFrom) X(s_resizeDist) X(s_resizeLen) X(s_resizeAt) X(s_resizePinned) X(s_edgeClickAt)\
+    X(s_resizeLenFrom) X(s_resizeDist) X(s_resizeLen) X(s_resizeAt) X(s_resizePinned) X(s_resizeFixed) X(s_resizeFixedLow) X(s_resizeExtra) X(s_edgeClickAt)\
     X(s_edgeClickPt) X(s_editHover) X(s_hoverModule) X(s_scaleModule) X(s_hoverGap) X(s_gapDrag)\
     X(s_gapFromValue) X(s_gapAt) X(s_wheelGap) X(s_scaleFromPercent) X(s_scaleFromK) X(s_scaleAnchor)\
     X(s_scaleDiag) X(s_wheelScaled) X(s_moveModule) X(s_moveOut) X(s_movePanel) X(s_moveAt)\
@@ -5276,7 +5288,7 @@ void FitFreeArea(int edges) {
     EditRelayout();
 }
 
-// 自由布局里拖边：改那块区域的大小，里面的东西在屏幕上不动（面板往拖的那边长，居中时两头一起长），
+// 自由布局里拖边：改那块区域的大小，里面的东西在屏幕上不动（面板只往拖的那边长，居中时另一头钉住），
 // 不能小到放不下里面的东西；最厚 kMaxFreeThick，最长到屏幕
 void DragFreeArea(POINT screen) {
     ModuleSet& mods = Mods();
@@ -5290,11 +5302,6 @@ void DragFreeArea(POINT screen) {
         if (!(s_resize & (low | high))) continue;
         bool lowEdge = (s_resize & low) != 0, lengthAxis = (axis == 1) == v;
         float moved = lowEdge ? -d[axis] : d[axis], grow = moved, f = lowEdge ? 1.0f : 0.0f;  // f：框跟着挪多少
-        bool centered = (v || EffectiveAlign() == kAlignCenter || EffectiveAlign() == kAlignCustom) && !s_resizePinned;
-        if (lengthAxis && centered) {
-            grow = 2 * moved;
-            f = 0.5f;
-        }
         float s0 = size[axis], least = 16 - s0;
         for (int i = 0; i < kFreeItems; ++i) {
             const FreeBox& b = from.box[i];
@@ -5304,6 +5311,10 @@ void DragFreeArea(POINT screen) {
             if (f < 1) least = std::max(least, (p + len - s0) / (1 - f));
         }
         float most = (lengthAxis ? (ScreenSide() - 2 * s_L.margin - 2 * s_L.pad) / u : kMaxFreeThick) - s0;
+        if (lengthAxis && s_resizeFixed != LONG_MIN) {  // 一头钉住：另一头最多长到屏幕边
+            LONG limit = v ? (s_resizeFixedLow ? s_bounds.bottom : s_bounds.top) : (s_resizeFixedLow ? s_bounds.right : s_bounds.left);
+            most = std::min(most, (std::abs(limit - s_resizeFixed) - s_resizeExtra) / u - s0);
+        }
         grow = std::clamp(grow, least, std::max(least, most));
         size[axis] = s0 + grow;
         shift[axis] = f * grow;
@@ -5337,6 +5348,16 @@ void BeginResize(int edges, POINT screen) {
         s_freeFrom.w = mods.freeW;
         s_freeFrom.h = mods.freeH;
         std::copy(mods.box, mods.box + kFreeItems, s_freeFrom.box);
+        // 居中、自定义位置时拖长度的边：另一头钉住（不然两头一起动，东西堆在一头时就缩不了）
+        int align = EffectiveAlign();
+        bool v = Vertical();
+        s_resizeFixed = LONG_MIN;
+        if ((edges & LengthEdges()) && (v || align == kAlignCenter || align == kAlignCustom)) {
+            s_resizeFixedLow = (edges & (v ? kResizeBottom : kResizeRight)) != 0;
+            LONG lo = v ? s_pos.y : s_pos.x, size = v ? s_height : s_width;
+            s_resizeFixed = s_resizeFixedLow ? lo : lo + size;
+            s_resizeExtra = size - (v ? mods.freeH : mods.freeW) * FreeUnit();
+        }
     } else if (twice) {
         int percent = edges & ScaleEdges() ? kDefaultPopupScale : g_settings.popupScale;
         int length = edges & LengthEdges() ? 0 : PanelLength();
@@ -5411,7 +5432,20 @@ void EndResize() {
     if (GetCapture() == s_hwnd) ReleaseCapture();
     const ModuleSet& mods = Mods();
     if (FreeLayout()) {
-        if (mods.freeW != s_freeFrom.w || mods.freeH != s_freeFrom.h) {
+        bool changed = mods.freeW != s_freeFrom.w || mods.freeH != s_freeFrom.h;
+        if (s_resizeFixed != LONG_MIN && changed) {
+            // 钉住一头改了长度：面板中心挪了，记成自定义位置
+            bool v = Vertical();
+            LONG from = v ? s_bounds.top : s_bounds.left, to = v ? s_bounds.bottom : s_bounds.right;
+            double center = (v ? s_pos.y + s_height / 2.0 : s_pos.x + s_width / 2.0);
+            s_align = kAlignCustom;
+            s_offset = std::clamp(static_cast<int>(std::lround((center - from) * kMaxPopupOffset / std::max<LONG>(1, to - from))), 0,
+                                  kMaxPopupOffset);
+            StorePlace();
+        }
+        s_resizeFixed = LONG_MIN;
+        UpdatePlacement();
+        if (changed) {
             Log(L"拖边改了自由布局的区域：%.0f × %.0f", mods.freeW, mods.freeH);
             SaveSettings();
             SettingsDialog_SettingsChanged();
