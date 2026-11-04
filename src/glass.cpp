@@ -253,6 +253,7 @@ void Glass::Adopt(GlassShot&& shot, float scale) {
     m_h = shot.h;
     m_raw.swap(shot.raw);
     m_blur.swap(shot.blur);
+    ++m_version;
 }
 
 void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float radius) {
@@ -361,34 +362,93 @@ void Glass::Render(DWORD* pixels, POINT origin, int slide, int slideX) const {
     for (std::thread& t : pool) t.join();
 }
 
+Glass::Tint Glass::TintNow() const {
+    const bool win11 = m_style == kGlassWin11;
+    Tint t;
+    // Win11 原版用系统亚克力的灰：深色 #202020，浅色 #F3F3F3，着色浓，背景只透出一点
+    t.luma = win11 ? (m_light ? 243.0f : 32.0f) : (m_light ? 252.0f : 16.0f);
+    t.rgb[0] = t.rgb[1] = t.luma;
+    t.rgb[2] = win11 ? t.luma : (m_light ? 255.0f : 20.0f);
+    if (m_customTint) {  // 自己选的底色（m_light 已经按它的深浅定了）
+        t.rgb[0] = GetRValue(m_tint);
+        t.rgb[1] = GetGValue(m_tint);
+        t.rgb[2] = GetBValue(m_tint);
+        t.luma = ColorLuma(m_tint);
+    }
+    t.alpha = win11 ? (m_light ? 0.9f : 0.93f) : (m_light ? 0.36f : 0.38f);
+    // 液态玻璃的透明度：默认（60%）时 k = 1；更透明时着色变淡，下面看得清文字的保底也跟着放松
+    t.guard = 1;
+    if (m_style == kGlassLiquid) {
+        float k = (100 - std::clamp(m_transparency, 0, 100)) / static_cast<float>(100 - kDefaultGlassTransparency);
+        t.alpha = std::min(0.94f, t.alpha * k);
+        t.guard = std::min(1.0f, k);
+    }
+    // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清。Win11 原版要求更严
+    t.bound = win11 ? (m_light ? 0.82f * 255 : 0.2f * 255) : (m_light ? 0.72f * 255 : 0.30f * 255);
+    // 自己选的底色本身就越过了这条线（比如偏亮的深色）：线跟着往外挪一点，不然下面的公式算反了
+    if (m_customTint) t.bound = m_light ? std::min(t.bound, t.luma - 20) : std::max(t.bound, t.luma + 20);
+    return t;
+}
+
+float Glass::BaseLuma(const Gdiplus::RectF& rect, POINT origin) const {
+    Tint t = TintNow();
+    if (m_blur.empty() || rect.Width <= 0 || rect.Height <= 0) return t.luma;
+    const int offX = origin.x - m_area.left, offY = origin.y - m_area.top;
+    float step = std::max(2.0f, std::max(rect.Width, rect.Height) / 24);
+    double sum = 0;
+    int n = 0;
+    for (float y = rect.Y + step / 2; y < rect.Y + rect.Height; y += step) {
+        for (float x = rect.X + step / 2; x < rect.X + rect.Width; x += step) {
+            DWORD p = Fetch(static_cast<int>(x) + offX, static_cast<int>(y) + offY);
+            float c[3] = {static_cast<float>((p >> 16) & 0xFF), static_cast<float>((p >> 8) & 0xFF),
+                          static_cast<float>(p & 0xFF)};
+            for (int k = 0; k < 3; ++k) c[k] += (t.rgb[k] - c[k]) * t.alpha;
+            sum += 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
+            ++n;
+        }
+    }
+    return n ? static_cast<float>(sum / n) : t.luma;
+}
+
+// 面板静止时窗口里 (tx, ty) 这个像素的字和主题反过来了多少、离反过来的地方多近（SetFlip 那两张表双线性取样）
+void Glass::FlipAt(int tx, int ty, float& flip, float& nearby) const {
+    float fx = (tx + 0.5f) / m_flipCell - 0.5f, fy = (ty + 0.5f) / m_flipCell - 0.5f;
+    fx = std::clamp(fx, 0.0f, static_cast<float>(m_flipW - 1));
+    fy = std::clamp(fy, 0.0f, static_cast<float>(m_flipH - 1));
+    int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
+    int x1 = std::min(x0 + 1, m_flipW - 1), y1 = std::min(y0 + 1, m_flipH - 1);
+    float ax = fx - x0, ay = fy - y0;
+    auto sample = [&](const std::vector<float>& grid) {
+        const float* r0 = &grid[static_cast<size_t>(y0) * m_flipW];
+        const float* r1 = &grid[static_cast<size_t>(y1) * m_flipW];
+        float top = r0[x0] + (r0[x1] - r0[x0]) * ax, bottom = r1[x0] + (r1[x1] - r1[x0]) * ax;
+        return top + (bottom - top) * ay;
+    };
+    flip = sample(m_flip);
+    nearby = sample(m_near);
+}
+
 void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int rowBegin, int rowEnd) const {
     const int w = m_texW, h = m_texH;
     const bool win11 = m_style == kGlassWin11;
-    // Win11 原版用系统亚克力的灰：深色 #202020，浅色 #F3F3F3，着色浓，背景只透出一点
-    float tintL = win11 ? (m_light ? 243.0f : 32.0f) : (m_light ? 252.0f : 16.0f);
-    float tint[3] = {tintL, tintL, win11 ? tintL : (m_light ? 255.0f : 20.0f)};
-    if (m_customTint) {  // 自己选的底色（m_light 已经按它的深浅定了）
-        tint[0] = GetRValue(m_tint);
-        tint[1] = GetGValue(m_tint);
-        tint[2] = GetBValue(m_tint);
-        tintL = ColorLuma(m_tint);
-    }
-    float tintAlpha = win11 ? (m_light ? 0.9f : 0.93f) : (m_light ? 0.36f : 0.38f);
-    // 液态玻璃的透明度：默认（60%）时 k = 1；更透明时着色变淡，下面看得清文字的保底也跟着放松
-    float guard = 1;
-    if (m_style == kGlassLiquid) {
-        float k = (100 - std::clamp(m_transparency, 0, 100)) / static_cast<float>(100 - kDefaultGlassTransparency);
-        tintAlpha = std::min(0.94f, tintAlpha * k);
-        guard = std::min(1.0f, k);
-    }
+    const Tint tn = TintNow();
+    const float* tint = tn.rgb;
+    const float tintL = tn.luma, tintAlpha = tn.alpha, guard = tn.guard, bound = tn.bound;
     const float shadowAlpha = win11 ? (m_light ? 0.16f : 0.3f) : (m_light ? 0.22f : 0.32f);
     // Win11 原版的边框：深色时叠白，浅色时叠黑
     const float borderTo = m_light ? 0.0f : 255.0f, borderAlpha = (m_light ? 0.1f : 0.12f) / 255.0f;
     const float sheen = (m_light ? 0.12f : 0.07f) / 255.0f;
-    // 深浅和背景不搭（浅色玻璃压在深色背景上，或者反过来）时着色加浓，保证上面的文字看得清。Win11 原版要求更严
-    float bound = win11 ? (m_light ? 0.82f * 255 : 0.2f * 255) : (m_light ? 0.72f * 255 : 0.30f * 255);
-    // 自己选的底色本身就越过了这条线（比如偏亮的深色）：线跟着往外挪一点，不然下面的公式算反了
-    if (m_customTint) bound = m_light ? std::min(bound, tintL - 20) : std::max(bound, tintL + 20);
+    // 字和主题反过来的地方（见 SetFlip）：浅色主题上的白字，下面压到不比 flipBound 亮（往默认的深色着色推）；
+    // 深色主题上的深色字，下面提到不比它暗（往默认的浅色着色推）。两种字在这两条线上都差不多清楚（对比度 5 左右），
+    // 比主题自己的保底松，玻璃少变点样；挨着反过来的地方，照主题的保底也放松到这么多（looseBound），
+    // 免得一边压得很暗、一边提得很亮
+    const bool flips = !m_flip.empty() && m_flipW > 0 && m_flipH > 0;
+    const float flipTo[3] = {m_light ? 16.0f : 252.0f, m_light ? 16.0f : 252.0f, m_light ? 20.0f : 255.0f};
+    const float flipL = m_light ? 16.5f : 252.3f, flipBound = m_light ? 110.0f : 140.0f;
+    float looseBound = m_light ? 140.0f : 110.0f;
+    if (m_customTint) looseBound = m_light ? std::min(looseBound, tintL - 20) : std::max(looseBound, tintL + 20);
+    // 照主题的保底不能比原来更严
+    looseBound = m_light ? std::min(looseBound, bound) : std::max(looseBound, bound);
     // 窗口像素 → 背景截图里的坐标
     const int offX = origin.x - m_area.left, offY = origin.y - m_area.top;
 
@@ -421,8 +481,11 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
                 c[2] = static_cast<float>(p & 0xFF);
             }
             float lum = 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
+            float flip = 0, nearby = 0;
+            if (flips) FlipAt(tx, ty, flip, nearby);
+            float b = nearby > 0 ? bound + (looseBound - bound) * nearby : bound;
             float ta = tintAlpha;
-            if (m_light ? lum < bound : lum > bound) ta = std::min(0.94f, std::max(ta, (bound - lum) / (tintL - lum) * guard));
+            if (m_light ? lum < b : lum > b) ta = std::min(0.94f, std::max(ta, (b - lum) / (tintL - lum) * guard));
             float light = std::min(1.0f, t.light / 255.0f + t.gloss * sheen), cover = t.cover / 255.0f;
             float a = cover + t.shadow * shadowAlpha / 255.0f * (1 - cover);
             DWORD out = static_cast<DWORD>(a * 255 + 0.5f) << 24;
@@ -433,8 +496,18 @@ void Glass::RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int r
                 grain = static_cast<float>(static_cast<int>((n ^ (n >> 16)) & 255u) - 128) * (2.5f / 128);
                 light = 0;
             }
+            float alt[3] = {};
+            if (flip > 0.001f) {  // 照反过来的字算一遍：先照常着色，再往另一边推到看得清
+                for (int k = 0; k < 3; ++k) alt[k] = c[k] + (tint[k] - c[k]) * tintAlpha;
+                float lumB = 0.299f * alt[0] + 0.587f * alt[1] + 0.114f * alt[2];
+                if (m_light ? lumB > flipBound : lumB < flipBound) {
+                    float g = std::min(0.94f, (flipBound - lumB) / (flipL - lumB) * guard);
+                    for (int k = 0; k < 3; ++k) alt[k] += (flipTo[k] - alt[k]) * g;
+                }
+            }
             for (int k = 0; k < 3; ++k) {
                 float col = c[k] + (tint[k] - c[k]) * ta;
+                if (flip > 0.001f) col += (alt[k] - col) * flip;
                 col += (255 - col) * light;
                 if (win11) col += (borderTo - col) * (t.light * borderAlpha) + grain;
                 out |= static_cast<DWORD>(std::clamp(col * cover, 0.0f, 255.0f) + 0.5f) << (16 - 8 * k);

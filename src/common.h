@@ -621,18 +621,47 @@ public:
     // 换上一张截好的背景
     void Adopt(GlassShot&& shot, float scale);
     const std::vector<DWORD>& Raw() const { return m_raw; }
-    void SetLight(bool light) { m_light = light; }        // 浅色玻璃配深色文字，深色玻璃配浅色文字
+    void SetLight(bool light) {  // 浅色玻璃配深色文字，深色玻璃配浅色文字
+        m_light = light;
+        ++m_version;
+    }
     bool Light() const { return m_light; }
     void SetScale(float scale) { m_scale = scale; }  // 只换边缘、阴影等的尺寸，背景不重新截
     // 材质（GlassStyle）。Win11 原版：没有边缘折射和高光，再模糊一些，浓浓的系统灰色着色，一圈细边框
-    void SetStyle(int style) { m_style = style; }
+    void SetStyle(int style) {
+        m_style = style;
+        ++m_version;
+    }
     int Style() const { return m_style; }
     // 液态玻璃的透明度（0 – 100%）：越透明着色越淡。默认 kDefaultGlassTransparency
-    void SetTransparency(int percent) { m_transparency = percent; }
+    void SetTransparency(int percent) {
+        m_transparency = percent;
+        ++m_version;
+    }
     // 自己选的底色（着色），custom 为 false 时按深浅色用默认的
     void SetTint(bool custom, COLORREF color) {
         m_customTint = custom;
         m_tint = color;
+        ++m_version;
+    }
+    // 背景、深浅、材质、透明度、底色改过一次就加一（拿来判断下面 BaseLuma 的结果还能不能用）
+    unsigned Version() const { return m_version; }
+    // 面板静止时，窗口里 rect 这块玻璃只着色、不加保底时的平均亮度（0 – 255）。origin：窗口左上角在屏幕上的位置
+    float BaseLuma(const Gdiplus::RectF& rect, POINT origin) const;
+    // 液态玻璃上字的颜色跟着底下变：flip = 哪些地方的字和主题的深浅反过来了（0 = 照主题，1 = 反过来，中间是过渡），
+    // 那里的保底改成往另一边推（深色字下面提亮，白字下面压暗）；nearby = 离反过来的地方多近（0 – 1），越近照主题的
+    // 保底越松，两边的玻璃不至于一块很暗一块很亮。一格 cell 像素，按面板静止时窗口里的位置。
+    // 空的就都照主题。和原来的一样时返回 false
+    bool SetFlip(std::vector<float> flip, std::vector<float> nearby, int gw, int gh, float cell) {
+        cell = std::max(1.0f, cell);
+        if (flip == m_flip && nearby == m_near && (flip.empty() || (gw == m_flipW && gh == m_flipH && cell == m_flipCell)))
+            return false;
+        m_flip.swap(flip);
+        m_near.swap(nearby);
+        m_flipW = gw;
+        m_flipH = gh;
+        m_flipCell = cell;
+        return true;
     }
     const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
@@ -652,6 +681,13 @@ private:
         BYTE bevel = 0;        // 1 = 在边缘弯曲的一圈里，要折射取样
     };
     void RenderRows(DWORD* pixels, POINT origin, int slide, int slideX, int rowBegin, int rowEnd) const;
+    // 着色：颜色、它的亮度、浓度，看得清文字的保底（bound）和保底打几折（guard，液态玻璃更透明时放松）
+    struct Tint {
+        float rgb[3];
+        float luma, alpha, guard, bound;
+    };
+    Tint TintNow() const;
+    void FlipAt(int tx, int ty, float& flip, float& nearby) const;
     void SampleBevel(float x, float y, const Texel& t, float rgb[3]) const;
     DWORD Fetch(int x, int y) const;
 
@@ -665,6 +701,10 @@ private:
     int m_transparency = kDefaultGlassTransparency;
     bool m_customTint = false;
     COLORREF m_tint = 0;
+    unsigned m_version = 0;
+    std::vector<float> m_flip, m_near;  // 见 SetFlip
+    int m_flipW = 0, m_flipH = 0;
+    float m_flipCell = 1;
 
     std::vector<Texel> m_texels;  // 面板静止时窗口里每个像素的材质
     int m_texW = 0, m_texH = 0;

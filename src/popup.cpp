@@ -387,16 +387,66 @@ float PopupScale(HMONITOR monitor) {
 
 bool Win11Style() { return s_glass.Style() == kGlassWin11; }
 
+// ---- 液态玻璃上字的深浅跟着底下变 ----
+// 标题行、每个模块、每个窗口格子、每根调节条各算一块，看它底下的玻璃（只着色、不加保底）有多亮：和主题的深浅
+// 明显相反就换成另一套配色（亮的地方深色字，暗的地方白字），玻璃的保底也照新的字色往另一边推（Glass::SetFlip）
+struct ToneRegion {
+    RectF rect;  // 窗口里的位置（面板静止时）
+    bool light;  // 用浅色玻璃那套配色（深色字）
+};
+std::vector<ToneRegion> s_tones;  // 空的 = 都照主题（Win11 原版、还没算）
+unsigned s_toneVersion = 0;       // 算的时候玻璃的 Version()
+int s_toneLight = -1;             // 正在画的这块：-1 = 照主题，0 = 深色配色，1 = 浅色配色（两条共用，只在画的时候设）
+
+// 正在画的这块用不用浅色玻璃那套配色
+bool ToneLight() { return s_toneLight >= 0 ? s_toneLight != 0 : s_glass.Light(); }
+
+// rect 这块用哪套配色：和它重叠最多的那块；都不重叠时离它中心最近的那块
+int ToneAt(const RectF& r) {
+    int best = -1;
+    float bestArea = 0, bestDist = 1e30f;
+    PointF c(r.X + r.Width / 2, r.Y + r.Height / 2);
+    for (size_t i = 0; i < s_tones.size(); ++i) {
+        const RectF& t = s_tones[i].rect;
+        RectF both;
+        float area = RectF::Intersect(both, r, t) ? both.Width * both.Height : 0;
+        if (area > bestArea) {
+            bestArea = area;
+            best = static_cast<int>(i);
+        } else if (bestArea <= 0) {
+            float dx = std::max({t.X - c.X, 0.0f, c.X - (t.X + t.Width)});
+            float dy = std::max({t.Y - c.Y, 0.0f, c.Y - (t.Y + t.Height)});
+            if (dx * dx + dy * dy < bestDist) {
+                bestDist = dx * dx + dy * dy;
+                best = static_cast<int>(i);
+            }
+        }
+    }
+    return best < 0 ? -1 : s_tones[best].light ? 1 : 0;
+}
+
+// 在这一段里画的东西用 rect 那块的配色（light 给 -1 = 照主题）
+struct Tone {
+    int saved;
+    explicit Tone(int light) : saved(s_toneLight) { s_toneLight = light; }
+    explicit Tone(const RectF& r) : saved(s_toneLight) { s_toneLight = ToneAt(r); }
+    ~Tone() { s_toneLight = saved; }
+    Tone(const Tone&) = delete;
+    Tone& operator=(const Tone&) = delete;
+};
+
 // 强调色：自己选的，或者系统的
 Color LookAccent() {
-    if (!s_look.customAccent) return SystemAccent(s_glass.Light());
+    if (!s_look.customAccent) return SystemAccent(ToneLight());
     return Color(255, GetRValue(s_look.accent), GetGValue(s_look.accent), GetBValue(s_look.accent));
 }
 
-const Palette& Colors() {
-    static Palette pal;
-    if (Win11Style()) pal = s_glass.Light() ? kWin11Light : kWin11Dark;
-    else pal = s_glass.Light() ? kLight : kDark;
+// 按值返回：一次画的东西里有几块配色不一样，不能共用一份
+Palette Colors() {
+    Palette pal;
+    bool light = ToneLight();
+    if (Win11Style()) pal = light ? kWin11Light : kWin11Dark;
+    else pal = light ? kLight : kDark;
     pal.accent = LookAccent();
     return pal;
 }
@@ -1823,7 +1873,7 @@ void DrawPill(Graphics& g) {
     GraphicsPath path;
     AddRoundRect(path, r, PillRadius());
     if (Win11Style()) {
-        bool light = s_glass.Light();
+        bool light = ToneLight();
         SolidBrush fill(light ? Color(165, 255, 255, 255) : Color(24, 255, 255, 255));
         g.FillPath(&fill, &path);
         Pen rim(light ? Color(20, 0, 0, 0) : Color(14, 255, 255, 255), std::max(1.0f, Px(1)));
@@ -1839,7 +1889,7 @@ void DrawPill(Graphics& g) {
 }
 
 // 在任务栏上闪着（来了消息）的窗口用的橙色
-Color UrgentColor(BYTE alpha = 255) { return s_glass.Light() ? Color(alpha, 235, 115, 0) : Color(alpha, 255, 150, 40); }
+Color UrgentColor(BYTE alpha = 255) { return ToneLight() ? Color(alpha, 235, 115, 0) : Color(alpha, 255, 150, 40); }
 
 bool IsUrgentItem(int i) { return s_items[i].hwnd && Attention_IsUrgent(s_items[i].hwnd); }
 
@@ -1849,7 +1899,7 @@ void DrawScreenBadge(Graphics& g, const RectF& tile, HWND hwnd) {
     HMONITOR m = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     int number = m == s_monitor ? 0 : MonitorNumber(m);
     if (number <= 0) return;
-    bool light = s_glass.Light();
+    bool light = ToneLight();
     float d = std::max(Px(14), tile.Width * 0.3f);
     RectF r(tile.X + tile.Width - d - Px(1), tile.Y + Px(1), d, d);
     FillRound(g, r, d / 2, light ? Color(235, 255, 255, 255) : Color(235, 48, 48, 54));
@@ -1888,7 +1938,7 @@ void DrawTile(Graphics& g, int idx) {
     if (urgent) {  // 和系统任务栏上闪烁的按钮一样垫一块橙色的底
         RectF bg = r;
         bg.Inflate(-0.5f, -0.5f);
-        FillRound(g, bg, PillRadius(), UrgentColor(s_glass.Light() ? 70 : 80));
+        FillRound(g, bg, PillRadius(), UrgentColor(ToneLight() ? 70 : 80));
     }
     float is = std::min(r.Width / 2 * glyph, r.Width - Px(2));
     RectF iconRect(cx - is / 2, cy - is / 2, is, is);
@@ -2313,7 +2363,7 @@ void DrawBattery(Graphics& g, const Font& font, const StringFormat& center) {
     if (!s_showBattery) return;
     const Palette& pal = Colors();
     const BatteryInfo& b = s_battery;
-    bool light = s_glass.Light();
+    bool light = ToneLight();
     RectF r = ExtraRect(kExtraBattery);
     float u = Px(1), bw = 20 * u, bh = 10 * u, textH = 14 * u;
     float top = r.Y + (r.Height - bh - 2 * u - textH) / 2;
@@ -2446,10 +2496,27 @@ float SearchBoxWidth(Graphics& g, const Font& font, float maxW) {
     return std::min(maxW, measured.Width + Px(30));
 }
 
+// 标题行（横排、显示标题行时）
+RectF TitleRect() {
+    const Layout& L = s_L;
+    return RectF(L.panelX + L.pad + Px(10), L.panelY + L.pad, L.panelW - 2 * L.pad - Px(20), L.titleH);
+}
+
+// 图标那一行以外的一根调节条占的地方：图标加槽，胶囊是整根
+RectF SliderRect(int i) {
+    const Slider& sl = s_sliders[i];
+    if (sl.capsule) return sl.box;
+    float lo = std::min(sl.a0, sl.a1), len = std::fabs(sl.a1 - sl.a0), w = Px(12);
+    RectF r, track = sl.vertical ? RectF(sl.c - w / 2, lo, w, len) : RectF(lo, sl.c - w / 2, len, w);
+    RectF::Union(r, track, sl.icon);
+    return r;
+}
+
 // 显示标题的小牌子：竖排时贴着面板里侧，上下对着 anchor（鼠标所指的格子、调节条等的中线）；
 // 横排不显示标题行时在面板上方，左右对着 anchor。实心底，放在什么背景上都看得清；打字筛选时前面是搜索框
 void DrawBubble(Graphics& g, float anchor, const std::wstring& title, const Font& font) {
     const Layout& L = s_L;
+    Tone theme(-1);  // 小牌子是实心底，照主题
     const Palette& pal = Colors();
     bool filtering = !s_filter.empty();
     if (title.empty() && !filtering) return;
@@ -2497,10 +2564,23 @@ std::wstring EditText();
 bool EditPartShown(int part);
 RectF EditPartRect(int part);
 
+// 顶部一行显示鼠标所指或选中项的标题；在调节条上时显示音量 / 亮度；编辑模式里说鼠标下的东西怎么拖
+std::wstring PanelTitle() {
+    int shown = s_hover >= 0 ? s_hover : s_sel;
+    if (s_editing) return EditText();
+    if (s_drag != kNone) return SliderText(SliderOf(s_drag));
+    if (s_hoverControl != kNone) return SliderText(SliderOf(s_hoverControl));
+    if (s_hoverRadio >= 0) return RadioText(s_radioIds[s_hoverRadio]);
+    if (s_hoverExtra != kExtraNone) return ExtraText(s_hoverExtra);
+    if (s_hoverTray >= 0 || s_overTray) return TrayTitle(s_hoverTray);
+    if (shown == 0) return Tr(L"开始");
+    if (shown > 0 && shown <= ItemCount()) return s_items[shown - 1].title;
+    return {};
+}
+
 // 面板上的内容（高亮块另外画，见 Render）
 void DrawContent(Graphics& g) {
     const Layout& L = s_L;
-    const Palette& pal = Colors();
     bool vertical = Vertical();
 
     Font titleFont(s_fontFamily.get(), Px(12), FontStyleRegular, UnitPixel);
@@ -2510,22 +2590,13 @@ void DrawContent(Graphics& g) {
     center.SetLineAlignment(StringAlignmentCenter);
     center.SetTrimming(StringTrimmingEllipsisCharacter);
 
-    // 顶部一行显示鼠标所指或选中项的标题；在调节条上时显示音量 / 亮度；编辑模式里说鼠标下的东西怎么拖
-    std::wstring title;
+    std::wstring title = PanelTitle();
     int shown = s_hover >= 0 ? s_hover : s_sel;
-    if (s_editing) title = EditText();
-    else if (s_drag != kNone) title = SliderText(SliderOf(s_drag));
-    else if (s_hoverControl != kNone) title = SliderText(SliderOf(s_hoverControl));
-    else if (s_hoverRadio >= 0) title = RadioText(s_radioIds[s_hoverRadio]);
-    else if (s_hoverExtra != kExtraNone) title = ExtraText(s_hoverExtra);
-    else if (s_hoverTray >= 0 || s_overTray) title = TrayTitle(s_hoverTray);
-    else if (shown == 0) title = Tr(L"开始");
-    else if (shown > 0 && shown <= ItemCount()) title = s_items[shown - 1].title;
     StringFormat oneLine(StringFormatFlagsNoWrap);
     oneLine.SetAlignment(StringAlignmentCenter);
     oneLine.SetLineAlignment(StringAlignmentCenter);
     oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
-    RectF titleRect(L.panelX + L.pad + Px(10), L.panelY + L.pad, L.panelW - 2 * L.pad - Px(20), L.titleH);
+    RectF titleRect = TitleRect();
     if (vertical || BubbleTitle()) {
         // 竖排（或者横排不显示标题行）：标题在面板旁边（上方）的小牌子上，对着它说的那一项。打字筛选时只在指着或选了一项时
         // 显示名字；开始菜单模式只在鼠标指着时显示；横排时只在指着、用键盘选或者打字时显示
@@ -2565,6 +2636,7 @@ void DrawContent(Graphics& g) {
         // 开始菜单模式没有标题这一行
     } else if (!s_filter.empty() && !s_editing) {
         // 打字筛选：左边一个搜索框显示打的字，右边是选中项的名字
+        Tone tone(titleRect);
         float boxW = SearchBoxWidth(g, titleFont, titleRect.Width * 0.5f);
         RectF box(titleRect.X - Px(6), titleRect.Y + Px(2), boxW, titleRect.Height - Px(4));
         DrawSearchBox(g, box, titleFont);
@@ -2572,16 +2644,18 @@ void DrawContent(Graphics& g) {
         if (!title.empty() && (s_hover >= 0 || s_sel > 0))
             DrawLabel(g, title.c_str(), titleFont,
                       RectF(restX, titleRect.Y, titleRect.X + titleRect.Width - restX, titleRect.Height), oneLine,
-                      pal.text);
+                      Colors().text);
     } else if (!title.empty()) {
-        DrawLabel(g, title.c_str(), titleFont, titleRect, oneLine, pal.text);
+        Tone tone(titleRect);
+        DrawLabel(g, title.c_str(), titleFont, titleRect, oneLine, Colors().text);
     }
 
     // 分隔线：横排是竖线，竖排是横线（占两行的媒体有自己的底，挨着它的不画；输入法、电量和时钟挨着时中间不画）
     // 编辑模式里拖着模块、模块还在滑的时候不画（它们挪到哪还没定）
-    Pen sepPen(pal.separator, 1.0f);
     for (int i = 0; i < L.sepCount && s_moveModule == kPartNone && !ModulesSliding(); ++i) {
         float at = L.sepAt[i] - L.sep / 2, half = std::max(Px(4), L.tile * L.sepK[i] / 2 - Px(10));
+        Tone tone(vertical ? RectF(L.rowC - half, at - 1, 2 * half, 2) : RectF(at - 1, L.rowC - half, 2, 2 * half));
+        Pen sepPen(Colors().separator, 1.0f);
         if (vertical) g.DrawLine(&sepPen, L.rowC - half, at, L.rowC + half, at);
         else g.DrawLine(&sepPen, at, L.rowC - half, at, L.rowC + half);
     }
@@ -2589,6 +2663,7 @@ void DrawContent(Graphics& g) {
     // 各模块。编辑模式里换顺序时画在滑动中的位置，拖着的那个跟着鼠标、画在最上面
     auto drawModule = [&](int m) {
         if ((m == kModStart || m == kModWindows) && !ModuleShown(m)) return;  // 放到了另一条上
+        Tone tone(EditPartRect(m));  // 窗口格子再一个个换
         PointF shift = ModuleShift(m);
         GraphicsState state = g.Save();
         g.TranslateTransform(shift.X, shift.Y);
@@ -2597,10 +2672,13 @@ void DrawContent(Graphics& g) {
         switch (m) {
             case kModStart: DrawTile(g, 0); break;
             case kModWindows: {
-                for (int idx = 1; idx <= ItemCount(); ++idx)
-                    if (IsTileVisible(idx)) DrawTile(g, idx);
+                for (int idx = 1; idx <= ItemCount(); ++idx) {
+                    if (!IsTileVisible(idx)) continue;
+                    Tone tile(TileRect(idx));
+                    DrawTile(g, idx);
+                }
                 // 窗口多到放不下时，两头的小三角提示还能滚动；那边有闪着要提醒的窗口时是橙色
-                SolidBrush hint(pal.subtle), urgentHint(UrgentColor());
+                SolidBrush hint(Colors().subtle), urgentHint(UrgentColor());
                 float tri = Px(4);
                 bool before = s_first > 0, after = s_first + s_visible < ItemCount();
                 bool urgentBefore = false, urgentAfter = false;
@@ -2625,10 +2703,10 @@ void DrawContent(Graphics& g) {
                     const wchar_t* empty = Tr(s_filter.empty() ? L"没有打开的窗口" : L"没有匹配的窗口或应用");
                     if (vertical) {
                         RectF r = FreeLayout() ? FreeRect(kModWindows) : RectF(L.panelX + Px(4), L.itemsY, L.panelW - Px(8), L.itemsW);
-                        DrawLabel(g, empty, smallFont, r, center, pal.subtle);
+                        DrawLabel(g, empty, smallFont, r, center, Colors().subtle);
                     } else {
                         DrawLabel(g, empty, titleFont, RectF(L.itemsX, L.modC[kModWindows] - L.wTile / 2, L.itemsW, L.wTile),
-                                  center, pal.subtle);
+                                  center, Colors().subtle);
                     }
                 }
                 break;
@@ -2648,7 +2726,7 @@ void DrawContent(Graphics& g) {
                 StringFormat clockFormat(StringFormatFlagsNoWrap | StringFormatFlagsNoClip);
                 clockFormat.SetAlignment(StringAlignmentCenter);
                 clockFormat.SetLineAlignment(StringAlignmentCenter);
-                DrawLabel(g, clock.c_str(), smallFont, clockRect, clockFormat, pal.text);
+                DrawLabel(g, clock.c_str(), smallFont, clockRect, clockFormat, Colors().text);
                 break;
             }
             case kModVolume:
@@ -2673,10 +2751,17 @@ void DrawContent(Graphics& g) {
         g.Restore(state);
     };
     drawShifted(kPartLevels, [&] {
-        for (int i = 0; i < 2; ++i)
-            if (RowSlider(i)) DrawSlider(g, i);
+        for (int i = 0; i < 2; ++i) {
+            if (!RowSlider(i)) continue;
+            Tone tone(SliderRect(i));
+            DrawSlider(g, i);
+        }
     });
-    drawShifted(kPartRadios, [&] { DrawRadios(g); });
+    drawShifted(kPartRadios, [&] {
+        if (s_radioCount <= 0) return;
+        Tone tone(EditPartRect(kPartRadios));
+        DrawRadios(g);
+    });
     if (s_editing) DrawEditFrame(g);
 }
 
@@ -2808,8 +2893,137 @@ void SyncThumb() {
     else KillTimer(s_hwnd, kTimerThumb);
 }
 
+// 液态玻璃上字的深浅分成哪几块：标题行、每个模块、每个窗口格子、图标那一行以外的每根调节条、Wi-Fi 蓝牙
+std::vector<RectF> ToneRects() {
+    std::vector<RectF> out;
+    // 标题行：只算字占的那段（整行算一块的话，字两边空着的地方也跟着它，和下面的格子不一样时像一道横条）
+    if (!Vertical() && !BubbleTitle() && s_L.titleH > 0) {
+        RectF row = TitleRect();
+        if (!s_filter.empty() && !s_editing) {
+            out.push_back(row);
+        } else if (std::wstring title = PanelTitle(); !title.empty()) {
+            static std::wstring measuredTitle;  // 每帧都会来问，同一个标题只量一次
+            static float measuredSize = 0, measuredW = 0;
+            if (title != measuredTitle || Px(12) != measuredSize) {
+                Bitmap one(1, 1, PixelFormat32bppPARGB);
+                Graphics g(&one);
+                SetupGraphics(g);
+                Font font(s_fontFamily.get(), Px(12), FontStyleRegular, UnitPixel);
+                StringFormat oneLine(StringFormatFlagsNoWrap);
+                RectF measured;
+                g.MeasureString(title.c_str(), -1, &font, PointF(0, 0), &oneLine, &measured);
+                measuredTitle = title;
+                measuredSize = Px(12);
+                measuredW = measured.Width;
+            }
+            float w = std::min(row.Width, measuredW + Px(16));
+            out.push_back(RectF(row.X + (row.Width - w) / 2, row.Y, w, row.Height));
+        }
+    }
+    for (int m = 0; m < kModuleCount; ++m) {
+        if (!EditPartShown(m)) continue;
+        if (m != kModWindows) {
+            out.push_back(EditPartRect(m));
+            continue;
+        }
+        size_t before = out.size();
+        for (int idx = 1; idx <= ItemCount(); ++idx)
+            if (IsTileVisible(idx)) out.push_back(TileRect(idx));
+        if (out.size() == before) out.push_back(EditPartRect(m));  // 没有窗口：那句“没有打开的窗口”
+    }
+    for (int i = 0; i < 2; ++i)
+        if (RowSlider(i)) out.push_back(SliderRect(i));
+    if (s_radioCount > 0) out.push_back(EditPartRect(kPartRadios));
+    return out;
+}
+
+// 重新看每块底下有多亮、用哪套配色，把“字和主题反过来”的地方交给玻璃（Glass::SetFlip）。位置和背景都没变就不算。
+// 返回：kTonesLayer = 内容要重画（有块换了配色），kTonesGlass = 玻璃也要重画（反过来的地方变了）
+enum { kTonesLayer = 1, kTonesGlass = 2 };
+int UpdateTones() {
+    std::vector<RectF> rects;
+    if (s_glass.Style() == kGlassLiquid) rects = ToneRects();
+    unsigned version = s_glass.Version();
+    if (version == s_toneVersion && rects.size() == s_tones.size()) {
+        bool same = true;
+        for (size_t i = 0; i < rects.size() && same; ++i) same = rects[i].Equals(s_tones[i].rect) != FALSE;
+        if (same) return 0;
+    }
+    s_toneVersion = version;
+    bool theme = s_glass.Light(), anyFlip = false;
+    std::vector<ToneRegion> tones;
+    tones.reserve(rects.size());
+    for (const RectF& r : rects) {
+        float luma = s_glass.BaseLuma(r, s_pos);
+        // 上次这块已经反过来了：要多越回去一点才换回主题，背景在分界附近变来变去时字色不跟着闪
+        bool was = false;
+        for (const ToneRegion& t : s_tones)
+            if (t.rect.Equals(r)) {
+                was = t.light != theme;
+                break;
+            }
+        // 白字、深色字在多亮的底上一样清楚：大约 122。偏向主题一点，差不多的时候不换
+        bool flip = theme ? luma < (was ? 126.0f : 116.0f) : luma > (was ? 118.0f : 128.0f);
+        tones.push_back({r, flip != theme});
+        anyFlip |= flip;
+    }
+    bool before = std::any_of(s_tones.begin(), s_tones.end(), [&](const ToneRegion& t) { return t.light != theme; });
+    bool relit = before != anyFlip || (anyFlip && tones.size() != s_tones.size());  // 都照主题时位置变了没关系
+    for (size_t i = 0; i < tones.size() && !relit && anyFlip; ++i) relit = tones[i].light != s_tones[i].light;
+    s_tones.swap(tones);
+    int result = relit ? kTonesLayer : 0;
+
+    // 玻璃那张表：面板上每一格跟离它最近的那块走（在哪块里面就是那块），再糊一下，两块交界处慢慢过渡
+    if (!anyFlip) return s_glass.SetFlip({}, {}, 0, 0, 1) ? result | kTonesGlass : result;
+    float cell = std::max(4.0f, Px(6));
+    int gw = std::max(1, static_cast<int>(std::ceil(s_width / cell))), gh = std::max(1, static_cast<int>(std::ceil(s_height / cell)));
+    std::vector<float> grid(static_cast<size_t>(gw) * gh), tmp(grid.size());
+    for (int gy = 0; gy < gh; ++gy) {
+        for (int gx = 0; gx < gw; ++gx) {
+            float px = (gx + 0.5f) * cell, py = (gy + 0.5f) * cell, best = 1e30f;
+            bool flip = false;
+            for (const ToneRegion& t : s_tones) {
+                float dx = std::max({t.rect.X - px, 0.0f, px - (t.rect.X + t.rect.Width)});
+                float dy = std::max({t.rect.Y - py, 0.0f, py - (t.rect.Y + t.rect.Height)});
+                if (dx * dx + dy * dy < best) {
+                    best = dx * dx + dy * dy;
+                    flip = t.light != theme;
+                }
+            }
+            grid[static_cast<size_t>(gy) * gw + gx] = flip ? 1.0f : 0.0f;
+        }
+    }
+    // 横竖各糊几遍（3 格平均）：反过来的那张糊两遍，交界处十来个像素慢慢过渡；“离得多近”那张多糊几遍、放大，
+    // 挨着反过来的格子大半块都算近
+    auto blur = [&](std::vector<float>& v, int passes) {
+        for (int pass = 0; pass < passes; ++pass) {
+            for (int gy = 0; gy < gh; ++gy)
+                for (int gx = 0; gx < gw; ++gx) {
+                    const float* row = &v[static_cast<size_t>(gy) * gw];
+                    tmp[static_cast<size_t>(gy) * gw + gx] =
+                        (row[std::max(gx - 1, 0)] + row[gx] + row[std::min(gx + 1, gw - 1)]) / 3;
+                }
+            for (int gy = 0; gy < gh; ++gy)
+                for (int gx = 0; gx < gw; ++gx)
+                    v[static_cast<size_t>(gy) * gw + gx] = (tmp[static_cast<size_t>(std::max(gy - 1, 0)) * gw + gx] +
+                                                            tmp[static_cast<size_t>(gy) * gw + gx] +
+                                                            tmp[static_cast<size_t>(std::min(gy + 1, gh - 1)) * gw + gx]) /
+                                                           3;
+        }
+    };
+    std::vector<float> nearby = grid;
+    blur(grid, 2);
+    blur(nearby, 5);
+    for (float& n : nearby) n = std::min(1.0f, n * 3);
+    return s_glass.SetFlip(std::move(grid), std::move(nearby), gw, gh, cell) ? result | kTonesGlass : result;
+}
+
 void Render(float slide, BYTE alpha) {
     if (!s_hwnd || s_width <= 0 || s_height <= 0 || !EnsureCanvas()) return;
+    if (int tones = UpdateTones()) {
+        if (tones & kTonesGlass) s_baseValid = false;
+        s_layerValid = false;
+    }
 
     // 横排时往下滑出去，竖排时往屏幕边那一侧滑出去
     int moved = static_cast<int>(std::lround(slide)), dx = 0, dy = moved;
@@ -2844,6 +3058,8 @@ void Render(float slide, BYTE alpha) {
         Graphics g(&canvas);
         SetupGraphics(g);
         g.TranslateTransform(static_cast<REAL>(dx), static_cast<REAL>(dy));
+        RectF at = TileRect(s_pillIndex);
+        Tone tone(RectF(s_pillAt.X, s_pillAt.Y, at.Width, at.Height));
         DrawPill(g);
     }
     BlendLayer(dx, dy);
@@ -3151,7 +3367,7 @@ bool s_scaleLayout = false;
     X(s_bits) X(s_canvasW) X(s_canvasH) X(s_pillIndex) X(s_pillAt) X(s_pillFrom)\
     X(s_pillTo) X(s_pillStart) X(s_boxFrom) X(s_boxStart) X(s_freePresent) X(s_mediaCutAt) X(s_mediaCut) X(s_layer)\
     X(s_layerValid) X(s_excluded) X(s_excludedAt) X(s_still) X(s_shotSeq) X(s_shotThread)\
-    X(s_scaleLayout)
+    X(s_scaleLayout) X(s_tones) X(s_toneVersion)
 
 struct PanelVars {
 #define TP_PANEL_DECL(n) std::remove_cv_t<decltype(n)> v_##n;
@@ -5565,7 +5781,7 @@ void EndResize() {
 // 编辑模式：面板四周一圈虚线，能拖的边中间一个小把手
 void DrawEditFrame(Graphics& g) {
     const Layout& L = s_L;
-    const Color& accent = Colors().accent;
+    const Color accent = Colors().accent;
     float inset = Px(1.5f);
     RectF r(L.panelX + inset, L.panelY + inset, L.panelW - 2 * inset, L.panelH - 2 * inset);
     GraphicsPath path;
@@ -5592,6 +5808,7 @@ void DrawEditFrame(Graphics& g) {
                            : part == s_editHover || s_editHover == kPartHandle + part;
         Color c = part == s_moveModule && s_moveOut ? Color(255, 232, 72, 72) : accent;
         RectF m = EditPartRect(part);
+        Tone tone(m);
         PointF shift = ModuleShift(part);  // 跟着模块画的地方走（在滑、在拖）
         m.Offset(shift.X, shift.Y);
         GraphicsPath mp;

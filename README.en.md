@@ -86,7 +86,7 @@ Set hotkeys to open the mini taskbar, open only the bottom bar, open only the si
 
 ### Appearance
 
-Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. The accent color follows Windows unless you pick your own, and the mini taskbar can have its own tint. Corner radius, transparency, icon size and spacing preview live as you change them, and when the bottom and side bars show together each has its own corner radius. Once you've arranged items in edit mode, icon size only changes the icons; the panel and the items' boxes stay the same. You can also turn off the title row; window names then show above the panel.
+Choose liquid glass or the original Windows 11 look (the system's acrylic: a solid tint, crisp text and a thin border), and a system, light or dark theme. On liquid glass the text color follows what's behind it: each icon and item checks how bright the background is and uses dark text on bright areas and white text on dark ones, so it stays readable on a half-bright wallpaper or at high transparency. The accent color follows Windows unless you pick your own, and the mini taskbar can have its own tint. Corner radius, transparency, icon size and spacing preview live as you change them, and when the bottom and side bars show together each has its own corner radius. Once you've arranged items in edit mode, icon size only changes the icons; the panel and the items' boxes stay the same. You can also turn off the title row; window names then show above the panel.
 
 ![Liquid glass, light or dark, transparency all preview live](docs/demo/en/appearance.webp)
 
