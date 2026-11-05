@@ -247,8 +247,8 @@ constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // 检查更新的线程通知
 constexpr UINT WM_APP_TRAY_LAUNCH = WM_APP + 7;   // 点托盘图标的线程通知：找不到图标，再启动一次程序，交给 Tray_OnMessage
 constexpr UINT WM_APP_WINTAP = WM_APP + 8;        // 钩子线程通知：任务栏藏着时短按了 Win（wParam 是键码），交给 Popup_StartMenu
 constexpr UINT WM_APP_TRAY_MENU = WM_APP + 9;     // 点托盘图标的线程通知：程序自己的菜单弹不出来（发给 Tray_Click 的 notify）
-constexpr UINT WM_APP_TRAY_PEEK = WM_APP + 10;    // 点托盘图标的线程要求：wParam 非 0 = 临时显示藏着的任务栏 lParam，0 = 藏回去。
-                                                  // 交给 Fullscreen_PeekTaskbar，返回 1 = 是本程序藏的
+constexpr UINT WM_APP_TRAY_PEEK = WM_APP + 10;    // 点托盘图标的线程要求：wParam 1 = 临时显示藏着的任务栏 lParam，0 = 藏回去，
+                                                  // 2 = 只记下（资源管理器会自己把它升上来）。交给 Fullscreen_PeekTaskbar，返回 1 = 是本程序藏的
 
 // ---------------- 最大化 / 全屏时隐藏任务栏 ----------------
 void Fullscreen_SetEnabled(bool enabled);
@@ -259,9 +259,10 @@ void Fullscreen_OnTaskbarCreated();                  // 资源管理器（重新
 void Fullscreen_QuietStartMenu();                    // 接下来打开的开始菜单是迷你任务栏点的：不把藏着的任务栏放出来
 bool Fullscreen_TaskbarHidden();                     // 本程序现在藏着任务栏（有窗口最大化或全屏）
 void Fullscreen_DisplayChanged();                    // 接上、拔掉屏幕，改了分辨率或排列（WM_DISPLAYCHANGE）
-// 托盘图标那边要去“隐藏的图标”里点：show 时临时显示本程序藏着的任务栏 tb（UI 自动化看不到藏着的窗口里的按钮），
-// 否则把它藏回去。都不放动画。tb 不是本程序藏着的返回 false
-bool Fullscreen_PeekTaskbar(HWND tb, bool show);
+// 托盘图标那边要去“隐藏的图标”里点：mode 1 临时显示本程序藏着的任务栏 tb（UI 自动化看不到藏着的窗口里的按钮），
+// 2 不显示、只记下（展开隐藏的图标时资源管理器会自己把它升上来，这时别当成“又冒出来了”去藏），0 藏回去。
+// 都不放动画。tb 不是本程序藏着的返回 false
+bool Fullscreen_PeekTaskbar(HWND tb, int mode);
 void Taskbar_RestoreAll();        // 启动、退出时：显示所有任务栏，关掉本程序打开的自动隐藏，窗口和桌面图标还原
 void Taskbar_EmergencyRestore(bool crash = true);  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
 bool Taskbar_IsShownOn(HMONITOR monitor);  // 这块屏幕上的任务栏现在是否显示着（没被本程序藏起来）

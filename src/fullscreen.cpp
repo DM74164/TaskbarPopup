@@ -1533,10 +1533,11 @@ void Fullscreen_DisplayChanged() {
     Evaluate(true);
 }
 
-bool Fullscreen_PeekTaskbar(HWND tb, bool show) {
+bool Fullscreen_PeekTaskbar(HWND tb, int mode) {
     Hidden* h = tb ? FindHidden(tb) : nullptr;
     if (!h || !IsWindow(tb)) return false;
-    if ((IsWindowVisible(tb) != FALSE) != show) {
+    bool show = mode != 0;
+    if (mode != 2 && (IsWindowVisible(tb) != FALSE) != show) {
         Log(show ? L"托盘：临时显示任务栏 %p，好找到里面的按钮" : L"托盘：把临时显示的任务栏 %p 藏回去",
             static_cast<void*>(tb));
         ShowWindowAsync(tb, show ? SW_SHOWNA : SW_HIDE);

@@ -596,6 +596,13 @@ bool AnyVeiled() {
     return !s_veiled.empty();
 }
 
+bool IsVeiled(HWND h) {
+    std::lock_guard<std::mutex> guard(s_veilLock);
+    for (const Veiled& v : s_veiled)
+        if (v.hwnd == h) return true;
+    return false;
+}
+
 void UnveilAll() {
     std::lock_guard<std::mutex> guard(s_veilLock);
     for (const Veiled& v : s_veiled) Unveil(v);
@@ -640,6 +647,14 @@ void Names(const wchar_t* where, const std::vector<Button>& buttons) {
     Log(L"托盘：%ls里的按钮 %d 个：%ls", where, static_cast<int>(buttons.size()), list.c_str());
 }
 
+// 再按一次“显示隐藏的图标”，把开着的隐藏的图标收起来
+void Collapse(IUIAutomation* uia, HWND tray) {
+    if (!OverflowShowing()) return;
+    std::vector<Button> buttons = TaskbarButtons(uia, tray);
+    Button legacyChevron;
+    if (const Button* chevron = FindChevron(uia, tray, buttons, legacyChevron)) Press(*chevron);
+}
+
 // 返回 true = 在系统托盘里点了（或者展开了隐藏的图标），false = 改成了别的办法
 bool RunJob(const Job& job) {
     Ref<IUIAutomation> uia;
@@ -680,6 +695,7 @@ bool RunJob(const Job& job) {
     // 藏着的任务栏（临时显示、资源管理器展开时自己升上来都看不见）和隐藏的图标那个窗口
     HWND overflow = OverflowWindow();
     bool veil = !job.overflowOnly;
+    bool expanded = false;  // 隐藏的图标是这次展开的
     if (veil && tray && !IsWindowVisible(tray)) Veil(tray);
     if (!overflow || !IsWindowVisible(overflow)) {
         if (veil) Veil(overflow);
@@ -700,23 +716,28 @@ bool RunJob(const Job& job) {
             Log(L"托盘：临时显示任务栏以后%ls“显示隐藏的图标”按钮", chevron ? L"找到了" : L"还是找不到");
             Names(L"临时显示的任务栏", onTaskbar);
         }
+        // 展开隐藏的图标时资源管理器会把藏着的任务栏升上来：先告诉主线程这是点托盘临时显示的（遮着），
+        // 别当成“又冒出来了”带动画地再藏（动画用的截图会闪一下），点完由 ClickThread 藏回去
+        if (chevron && veil && tray && !IsWindowVisible(tray) && IsVeiled(tray))
+            SendMessageTimeoutW(g_mainWnd, WM_APP_TRAY_PEEK, 2, reinterpret_cast<LPARAM>(tray), SMTO_ABORTIFHUNG, 1000,
+                                &ours);
         if (!chevron || !Press(*chevron)) {
             Log(L"托盘：没能展开隐藏的图标（%ls）", chevron ? L"按钮按不动" : L"找不到按钮");
             if (!job.overflowOnly) Instead(job);
             return false;
         }
-        for (int i = 0; i < 20; ++i) {  // 最多等 1 秒
-            Sleep(10);
+        for (int i = 0; i < 200; ++i) {  // 最多等 1 秒。勤着看：展开时才建出来的窗口要赶在画出第一帧前遮上
             overflow = OverflowWindow();
-            if (veil) Veil(overflow);  // 展开时才建出来的：一出来就遮
+            if (veil) Veil(overflow);
             if (overflow && IsWindowVisible(overflow)) break;
-            Sleep(40);
+            Sleep(5);
         }
         if (!overflow || !IsWindowVisible(overflow)) {
             Log(L"托盘：按了展开隐藏的图标，但没有展开");
             if (!job.overflowOnly) Instead(job);
             return false;
         }
+        expanded = true;
         Sleep(200);  // 等展开动画放完，按钮到位
     }
     if (job.overflowOnly) return true;
@@ -739,11 +760,7 @@ bool RunJob(const Job& job) {
             Log(L"托盘：展开后调用了 %ls 的托盘图标", b->name.c_str());
             // 真点时隐藏的图标会自己收起，“调用”的有时还开着：等一会儿（收起动画放完）还开着、程序也没弹菜单，就再按一次收起来
             for (int i = 0; i < 8 && OverflowShowing() && !MenuShowing(); ++i) Sleep(50);
-            if (OverflowShowing() && !MenuShowing() && !ForegroundIsApp(job.app.exe)) {
-                std::vector<Button> buttons = TaskbarButtons(uia.p, tray);
-                Button legacyChevron;
-                if (const Button* chevron = FindChevron(uia.p, tray, buttons, legacyChevron)) Press(*chevron);
-            }
+            if (OverflowShowing() && !MenuShowing() && !ForegroundIsApp(job.app.exe)) Collapse(uia.p, tray);
             return true;
         }
         Log(L"托盘：%ls隐藏图标里的 %ls（%ld,%ld - %ld,%ld）", job.right ? L"右键" : L"点", b->name.c_str(), r.left,
@@ -752,6 +769,8 @@ bool RunJob(const Job& job) {
         return true;
     }
     Log(L"托盘：隐藏的图标里找不到 %ls", job.app.name.c_str());
+    // 这次展开的：趁还遮着收起来（ClickThread 等它收好再放回不透明），不然一放回就露出来
+    if (expanded) Collapse(uia.p, tray);
     Instead(job);
     return false;
 }
@@ -765,15 +784,40 @@ DWORD WINAPI ClickThread(LPVOID param) {
     if (SUCCEEDED(co)) CoUninitialize();
     s_clicking = false;
     // 任务栏本来藏着：为了点隐藏的图标临时显示了，或者资源管理器展开隐藏的图标时自己把它显示了出来。
-    // 点了的话等隐藏的图标和程序的菜单都关了，没点成就马上，让主线程藏回去（不是本程序藏的、已经不用藏了的主线程不管）
+    // 点了的话等隐藏的图标和程序的菜单都关了，没点成就等这次展开的收起来，让主线程藏回去（不是本程序藏的、已经不用藏了的主线程不管）
     bool owed = s_hideOwed.exchange(false);
     if (trayHidden || owed) {
-        for (int i = 0; clicked && i < 600 && (OverflowShowing() || MenuShowing()); ++i) Sleep(100);  // 最多等 1 分钟
+        // 点了：等隐藏的图标和程序的菜单都关了（最多 1 分钟）。没点成：等遮着的隐藏的图标收起来（最多 2 秒）
+        for (int i = 0; i < (clicked ? 600 : 20); ++i) {
+            bool open = clicked ? OverflowShowing() || MenuShowing() : OverflowShowing() && IsVeiled(OverflowWindow());
+            if (!open) break;
+            Sleep(100);
+        }
         if (s_clicking) {
             s_hideOwed = true;
-        } else if (IsWindowVisible(tray)) {
-            PostMessageW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray));
-            for (int i = 0; i < 20 && AnyVeiled() && IsWindowVisible(tray); ++i) Sleep(50);  // 藏回去了再放回不透明
+        } else {
+            // 藏回去了再放回不透明。资源管理器收起隐藏的图标以后还可能自己把任务栏又显示出来：
+            // 藏好以后再遮半秒，冒出来就再藏（不是本程序藏的了就不管，马上放回）
+            for (int round = 0; round < 3 && !s_clicking; ++round) {
+                if (IsWindowVisible(tray) || round == 0) {  // 没显示出来也告诉主线程点完了（展开前记下的作废）
+                    if (round) Log(L"托盘：任务栏藏回去以后又被显示出来，遮着再藏一次");
+                    DWORD_PTR ours = 0;
+                    if (!SendMessageTimeoutW(g_mainWnd, WM_APP_TRAY_PEEK, 0, reinterpret_cast<LPARAM>(tray),
+                                             SMTO_ABORTIFHUNG, 1000, &ours) ||
+                        !ours)
+                        break;
+                    for (int i = 0; i < 20 && IsWindowVisible(tray); ++i) Sleep(50);
+                    if (IsWindowVisible(tray)) break;
+                }
+                if (!AnyVeiled()) break;  // 没遮（只是展开看看）：不用再等
+                int i = 0;
+                while (i < 10 && !IsWindowVisible(tray) && !s_clicking) {
+                    Sleep(50);
+                    ++i;
+                }
+                if (i == 10) break;  // 一直藏着
+            }
+            if (s_clicking) s_hideOwed = true;  // 等的时候又点了一个：留给那一次藏
         }
     } else {
         for (int i = 0; AnyVeiled() && i < 600 && OverflowShowing(); ++i) Sleep(100);  // 隐藏的图标收起来再放回
