@@ -13,8 +13,32 @@
 
 #include <map>
 
+// 系统设置“选择声音输出”用的接口，没有公开（Win7 到 Win11 一直是这样），声音切换工具都这么用。
+// 手写的 COM 接口不能放在匿名命名空间里（GCC 会把虚函数调用换成 __cxa_pure_virtual）
+namespace app::audio_abi {
+struct IPolicyConfig : public IUnknown {
+    // 前面这些用不着，只占位置，个数、顺序要对
+    virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, void**) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ResetDeviceFormat(PCWSTR) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDeviceFormat(PCWSTR, void*, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetProcessingPeriod(PCWSTR, INT, INT64*, INT64*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetProcessingPeriod(PCWSTR, INT64*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetShareMode(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetShareMode(PCWSTR, void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPropertyValue(PCWSTR, const PROPERTYKEY&, PROPVARIANT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetPropertyValue(PCWSTR, const PROPERTYKEY&, PROPVARIANT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR deviceId, ERole role) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, INT) = 0;
+};
+}  // namespace app::audio_abi
+
 namespace app {
 namespace {
+
+const GUID kClsidPolicyConfig = {0x870AF99C, 0x171D, 0x4F9E, {0xAF, 0x0D, 0xE6, 0x3D, 0xF4, 0x0C, 0x2B, 0xC9}};
+const GUID kIidPolicyConfig = {0xF8679F50, 0x850A, 0x41CF, {0x9C, 0x72, 0x43, 0x0F, 0x29, 0x02, 0x90, 0xC8}};
+const PROPERTYKEY kFriendlyName = {{0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 14};
 
 // GUID 自己定义一份，不依赖 uuid / wbemuuid 库里恰好有这些符号
 const GUID kClsidMMDeviceEnumerator = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}};
@@ -556,6 +580,64 @@ void Volume_SetMute(bool muted) {
 }
 
 void Volume_Release() { DropVolume(); }
+
+std::vector<AudioDevice> Volume_Devices() {
+    std::vector<AudioDevice> out;
+    Endpoint(true);  // 顺便建好 s_devices
+    if (!s_devices) return out;
+    std::wstring current;
+    IMMDevice* def = nullptr;
+    if (SUCCEEDED(s_devices->GetDefaultAudioEndpoint(eRender, eConsole, &def)) && def) {
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(def->GetId(&raw)) && raw) current = raw;
+        CoTaskMemFree(raw);
+        def->Release();
+    }
+    IMMDeviceCollection* all = nullptr;
+    if (FAILED(s_devices->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &all)) || !all) return out;
+    UINT count = 0;
+    all->GetCount(&count);
+    for (UINT i = 0; i < count; ++i) {
+        IMMDevice* device = nullptr;
+        if (FAILED(all->Item(i, &device)) || !device) continue;
+        AudioDevice d;
+        LPWSTR raw = nullptr;
+        if (SUCCEEDED(device->GetId(&raw)) && raw) d.id = raw;
+        CoTaskMemFree(raw);
+        IPropertyStore* props = nullptr;
+        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props) {
+            PROPVARIANT name;
+            PropVariantInit(&name);
+            if (SUCCEEDED(props->GetValue(kFriendlyName, &name)) && name.vt == VT_LPWSTR && name.pwszVal) d.name = name.pwszVal;
+            PropVariantClear(&name);
+            props->Release();
+        }
+        device->Release();
+        if (d.id.empty()) continue;
+        if (d.name.empty()) d.name = d.id;
+        d.current = d.id == current;
+        out.push_back(std::move(d));
+    }
+    all->Release();
+    return out;
+}
+
+bool Volume_SetDevice(const std::wstring& id) {
+    audio_abi::IPolicyConfig* policy = nullptr;
+    HRESULT hr = CoCreateInstance(kClsidPolicyConfig, nullptr, CLSCTX_ALL, kIidPolicyConfig, reinterpret_cast<void**>(&policy));
+    if (FAILED(hr) || !policy) {
+        Log(L"音量：换不了播放设备（错误 0x%08lX）", static_cast<unsigned long>(hr));
+        return false;
+    }
+    for (ERole role : {eConsole, eMultimedia, eCommunications}) {
+        HRESULT one = policy->SetDefaultEndpoint(id.c_str(), role);
+        if (FAILED(one) && SUCCEEDED(hr)) hr = one;
+    }
+    policy->Release();
+    if (FAILED(hr)) Log(L"音量：换播放设备没成功（错误 0x%08lX）", static_cast<unsigned long>(hr));
+    DropVolume();  // 音量条改用新的设备
+    return SUCCEEDED(hr);
+}
 
 void Brightness_Query(HWND notify, HMONITOR monitor) {
     Requests* r = EnsureThread();

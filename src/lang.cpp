@@ -207,6 +207,7 @@ const wchar_t* const kEnglish[][2] = {
     {L"第 %d/%d 页", L"Page %d/%d"},
     {L"%ls（第 %d/%d 页）", L"%ls (page %d/%d)"},
     {L"没有可用的播放设备", L"No playback device"},
+    {L"声音设置", L"Sound settings"},
     {L"已静音（点喇叭取消）", L"Muted (click the speaker to unmute)"},
     {L"音量 %d%%", L"Volume %d%%"},
     {L"正在读取亮度…", L"Reading brightness…"},

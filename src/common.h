@@ -528,6 +528,12 @@ bool Volume_Get(float& level, bool& muted);  // level 0~1；没有可用的播�
 void Volume_Set(float level);                 // 同时取消静音
 void Volume_SetMute(bool muted);
 void Volume_Release();                        // 退出前在主线程上释放缓存的 COM 对象
+struct AudioDevice {
+    std::wstring id, name;
+    bool current = false;  // 现在的默认播放设备
+};
+std::vector<AudioDevice> Volume_Devices();          // 启用着的播放设备（主线程）
+bool Volume_SetDevice(const std::wstring& id);      // 设成默认播放设备（和系统“选择声音输出”一样，通话也用它）
 
 // 亮度：笔记本内屏走 WMI，外接显示器走 DDC/CI。这两种都慢，所以放在后台线程上做，
 // 查询结果用 PostMessage(notify, WM_APP_BRIGHTNESS, 百分比 0~100（不支持时为 -1）, (LPARAM)monitor) 发回

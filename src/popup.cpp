@@ -3924,6 +3924,44 @@ POINT MenuAnchor(const RectF& r) {  // 客户区坐标
     return {static_cast<LONG>(x), static_cast<LONG>(r.Y)};
 }
 
+// 右键音量：列出播放设备，选一个设成默认（和系统快速设置里“选择声音输出”一样），音量条跟着换
+void ShowAudioMenu() {
+    enum { kCmdSound = 1, kCmdDevice = 100 };
+    std::vector<AudioDevice> devices = Volume_Devices();
+    HMENU menu = CreatePopupMenu();
+    if (devices.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, Tr(L"没有可用的播放设备"));
+    for (size_t i = 0; i < devices.size(); ++i)
+        AppendMenuW(menu, MF_STRING | (devices[i].current ? MF_CHECKED : 0), kCmdDevice + i, MenuText(devices[i].name).c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdSound, Tr(L"声音设置"));
+    const Slider& sl = s_sliders[0];
+    POINT at = MenuAnchor(sl.pill ? ModRect(kModVolume, sl.icon) : sl.icon);
+    ClientToScreen(s_hwnd, &at);
+    s_menuOpen = true;
+    HideThumb();
+    Redraw();
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | MenuAlign(), at.x, at.y, 0, s_hwnd,
+                              nullptr);
+    DestroyMenu(menu);
+    s_menuOpen = false;
+    if (cmd == kCmdSound) {
+        Launch(L"ms-settings:sound");
+        return;
+    }
+    if (cmd >= kCmdDevice && cmd < kCmdDevice + devices.size() && !devices[cmd - kCmdDevice].current) {
+        const AudioDevice& d = devices[cmd - kCmdDevice];
+        if (Volume_SetDevice(d.id)) Log(L"右键音量：换成播放设备 %ls", d.name.c_str());
+    }
+    if (!s_open) return;
+    RefreshVolume();
+    Redraw();
+    if (OtherOpen()) {
+        InPanel other(Other());
+        RefreshVolume();
+        Redraw();
+    }
+}
+
 // 右键格子：尽量和系统任务栏的右键菜单一样。
 // 运行中的窗口：跳转列表的“最近”项；应用名（再开一个）、以管理员身份运行、打开文件所在的位置；
 // 还原 / 最小化 / 最大化、移到另一块屏幕（不止两块时选哪一块）；“最大化时不隐藏任务栏”（关着“最大化或全屏时隐藏任务栏”时是“最大化时隐藏任务栏”）；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
@@ -6303,7 +6341,9 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             int hit = HitTest(pt.x, pt.y);
+            int control = hit < 0 ? ControlAt(pt.x, pt.y) : kNone;
             if (hit >= 0) ShowItemMenu(hit, pt);
+            else if (control == kVolumeIcon || control == kVolumeTrack) ShowAudioMenu();
             else if (int radio = RadioAt(pt.x, pt.y); radio >= 0) OpenRadioPanel(radio);
             else ActivateTray(TrayAt(pt.x, pt.y), true);
             return 0;  // 不交给 DefWindowProc，免得它再发一次 WM_CONTEXTMENU

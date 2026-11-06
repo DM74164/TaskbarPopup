@@ -44,7 +44,7 @@ The icons hidden in the system tray are in the mini taskbar too, stacked four at
 
 ### Volume, brightness, Wi-Fi and Bluetooth
 
-Drag or scroll to set volume and brightness. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list. Volume and brightness can be turned off separately on the Status & controls page of Settings, and the "Capsule" button next to each switches it to a thick capsule instead of a thin track with a round thumb. At the bottom, a capsule is as tall as the icons and sits in the icon row. Whether a control lies across or stands up follows the shape of its box in edit mode, in either style.
+Drag or scroll to set volume and brightness. Right-click the volume control to pick a playback device, for example to switch between speakers and headphones. Click the Wi-Fi or Bluetooth button to turn it on or off; right-click it for the system's network list or Bluetooth device list. Volume and brightness can be turned off separately on the Status & controls page of Settings, and the "Capsule" button next to each switches it to a thick capsule instead of a thin track with a round thumb. At the bottom, a capsule is as tall as the icons and sits in the icon row. Whether a control lies across or stands up follows the shape of its box in edit mode, in either style.
 
 ![Drag to set the volume, click to turn Wi-Fi off and on, right-click for the network list](docs/demo/en/quick.webp)
 
@@ -131,6 +131,7 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Mouse wheel | Scroll the icons; over a slider, adjust volume / brightness |
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
 | Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
+| Volume | Click the speaker to mute; right-click to switch the playback device |
 | Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the system's network list or Bluetooth device list (Bluetooth on Windows 10 opens Settings) |
 | Media | Click the cover for previous, pause / play and next; they hide when the mouse leaves |
 | Input mode | Click to switch between native and English input |
