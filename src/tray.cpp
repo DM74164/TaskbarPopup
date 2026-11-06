@@ -57,7 +57,14 @@ std::mutex s_lock;
 std::vector<TrayApp> s_apps;       // 最近一次读到的（s_lock 保护）
 std::atomic<bool> s_loading{false};
 // 解好的图标：快照没变就接着用，不用每次都解 PNG（只在读的线程里用，同一时间只有一个在读）
-std::map<std::wstring, std::pair<std::vector<BYTE>, std::shared_ptr<Gdiplus::Bitmap>>> s_iconCache;
+struct CachedIcon {
+    std::vector<BYTE> png;
+    std::shared_ptr<Gdiplus::Bitmap> icon, large;
+};
+std::map<std::wstring, CachedIcon> s_iconCache;
+// 程序文件里的图标，按“程序|大小”存（只在读的线程里比较、复制，不交出去：交出去的是复制的那份，画的线程同时用也不冲突）
+std::map<std::wstring, std::shared_ptr<Gdiplus::Bitmap>> s_exeIconCache;
+constexpr int kLargeIconPx = 96;
 
 // REG_EXPAND_SZ 也会展开成 REG_SZ 返回（同时写 RRF_RT_REG_EXPAND_SZ 反而会失败）
 std::wstring RegString(HKEY key, const wchar_t* name) {
@@ -98,8 +105,8 @@ std::set<std::wstring> RunningExes() {
     return exes;
 }
 
-// PNG 快照 → 自己持有像素的位图（从流解出来的位图要一直拿着流）
-std::shared_ptr<Gdiplus::Bitmap> BitmapFromPng(const std::vector<BYTE>& png, int px) {
+// PNG 快照 → 自己持有像素的位图（从流解出来的位图要一直拿着流），原来的大小
+std::shared_ptr<Gdiplus::Bitmap> BitmapFromPng(const std::vector<BYTE>& png) {
     HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, png.size());
     if (!mem) return nullptr;
     memcpy(GlobalLock(mem), png.data(), png.size());
@@ -112,12 +119,14 @@ std::shared_ptr<Gdiplus::Bitmap> BitmapFromPng(const std::vector<BYTE>& png, int
     std::shared_ptr<Gdiplus::Bitmap> result;
     {
         Gdiplus::Bitmap decoded(stream);
-        if (decoded.GetLastStatus() == Gdiplus::Ok && decoded.GetWidth() > 0) {
-            result = std::make_shared<Gdiplus::Bitmap>(px, px, PixelFormat32bppPARGB);
+        int w = static_cast<int>(decoded.GetWidth()), h = static_cast<int>(decoded.GetHeight());
+        if (decoded.GetLastStatus() == Gdiplus::Ok && w > 0 && h > 0) {
+            result = std::make_shared<Gdiplus::Bitmap>(w, h, PixelFormat32bppPARGB);
             Gdiplus::Graphics g(result.get());
-            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
             g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-            g.DrawImage(&decoded, 0, 0, px, px);
+            g.DrawImage(&decoded, Gdiplus::Rect(0, 0, w, h));
         }
     }
     stream->Release();
@@ -130,6 +139,85 @@ std::shared_ptr<Gdiplus::Bitmap> ExeIcon(const std::wstring& exe) {
     auto bmp = BitmapFromIcon(info.hIcon);
     DestroyIcon(info.hIcon);
     return bmp;
+}
+
+// 程序文件里的主图标，按 px 大小取（有大图的程序取大的是清楚的）。读的线程自己留着，不交出去
+Gdiplus::Bitmap* ExeIconAt(const std::wstring& exe, int px) {
+    std::wstring key = Lower(exe) + L"|" + std::to_wstring(px);
+    auto found = s_exeIconCache.find(key);
+    if (found != s_exeIconCache.end()) return found->second.get();
+    std::shared_ptr<Gdiplus::Bitmap> bmp;
+    HICON icon = nullptr;
+    if (SHDefExtractIconW(exe.c_str(), 0, 0, &icon, nullptr, px) == S_OK && icon) {
+        bmp = BitmapFromIcon(icon);
+        DestroyIcon(icon);
+    }
+    s_exeIconCache[key] = bmp;
+    return bmp.get();
+}
+
+// 两个图标是不是同一张图：large 缩到 small 的大小（一样大就不缩），按预乘过透明度的颜色逐像素比
+bool LooksSame(Gdiplus::Bitmap* small, Gdiplus::Bitmap* large) {
+    int w = static_cast<int>(small->GetWidth()), h = static_cast<int>(small->GetHeight());
+    if (w < 8 || h < 8) return false;
+    Gdiplus::Bitmap a(w, h, PixelFormat32bppPARGB), b(w, h, PixelFormat32bppPARGB);
+    {
+        Gdiplus::Graphics g(&a);
+        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        g.DrawImage(small, Gdiplus::Rect(0, 0, w, h));
+    }
+    {
+        Gdiplus::Graphics g(&b);
+        g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        Gdiplus::ImageAttributes wrap;
+        wrap.SetWrapMode(Gdiplus::WrapModeTileFlipXY);
+        g.DrawImage(large, Gdiplus::Rect(0, 0, w, h), 0, 0, static_cast<int>(large->GetWidth()),
+                    static_cast<int>(large->GetHeight()), Gdiplus::UnitPixel, &wrap);
+    }
+    Gdiplus::Rect rect(0, 0, w, h);
+    Gdiplus::BitmapData da, db;
+    if (a.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &da) != Gdiplus::Ok) return false;
+    if (b.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &db) != Gdiplus::Ok) {
+        a.UnlockBits(&da);
+        return false;
+    }
+    long long diff = 0, covered = 0;
+    for (int y = 0; y < h; ++y) {
+        const BYTE* pa = static_cast<const BYTE*>(da.Scan0) + y * da.Stride;
+        const BYTE* pb = static_cast<const BYTE*>(db.Scan0) + y * db.Stride;
+        for (int x = 0; x < w * 4; x += 4) {
+            if (pa[x + 3] < 16 && pb[x + 3] < 16) continue;
+            ++covered;
+            for (int c = 0; c < 4; ++c) diff += std::abs(pa[x + c] - pb[x + c]);
+        }
+    }
+    a.UnlockBits(&da);
+    b.UnlockBits(&db);
+    long long avg = covered ? diff / (covered * 4) : -1;
+    if (g_settings.debugLog) Log(L"托盘：%d×%d 的图标和程序本身同样大的图标平均差 %lld", w, h, avg);
+    // 系统画快照时可能有一点点出入；换了颜色、换了图案的（状态图标）差得多
+    return covered >= w * h / 8 && avg < 12;
+}
+
+// 托盘图标比较小时，看它是不是就是程序本身的图标（取程序同样大的图标逐像素比），是就交出一份高清的
+std::shared_ptr<Gdiplus::Bitmap> LargeFor(const std::wstring& exe, Gdiplus::Bitmap* icon) {
+    if (exe.empty() || !icon) return nullptr;
+    Gdiplus::Bitmap* large = ExeIconAt(exe, kLargeIconPx);
+    if (!large || large->GetWidth() <= icon->GetWidth()) return nullptr;
+    Gdiplus::Bitmap* same = ExeIconAt(exe, static_cast<int>(icon->GetWidth()));
+    if (!same || !LooksSame(icon, same)) return nullptr;
+    Gdiplus::Rect all(0, 0, static_cast<int>(large->GetWidth()), static_cast<int>(large->GetHeight()));
+    return std::shared_ptr<Gdiplus::Bitmap>(large->Clone(all, PixelFormat32bppPARGB));
+}
+
+void LogIcon(const TrayApp& app) {
+    if (!g_settings.debugLog) return;
+    Log(L"托盘：%ls 的图标 %u×%u%ls", app.name.c_str(), app.icon ? app.icon->GetWidth() : 0,
+        app.icon ? app.icon->GetHeight() : 0, app.iconLarge ? L"，放大时用程序本身的高清图标" : L"");
 }
 
 // Win10 及以前的托盘：老式工具栏，不是 Win11 的 XAML
@@ -180,14 +268,18 @@ std::vector<TrayApp> LoadFromSettings() {
                 if (RegQueryValueExW(key, L"IconSnapshot", nullptr, nullptr, png.data(), &bytes) == ERROR_SUCCESS) png.resize(bytes);
                 else png.clear();
             }
-            auto& cached = s_iconCache[lower];
-            if (!cached.second || cached.first != png) {
-                std::shared_ptr<Gdiplus::Bitmap> icon = png.empty() ? nullptr : BitmapFromPng(png, 48);
-                if (!icon) icon = ExeIcon(app.exe);
-                cached = {std::move(png), icon};
-            }
-            app.icon = cached.second;
             if (app.name.empty()) app.name = FileName(app.exe);
+            auto& cached = s_iconCache[lower];
+            if (!cached.icon || cached.png != png) {
+                std::shared_ptr<Gdiplus::Bitmap> icon = png.empty() ? nullptr : BitmapFromPng(png);
+                if (!icon) icon = ExeIcon(app.exe);
+                cached = {std::move(png), icon, icon ? LargeFor(app.exe, icon.get()) : nullptr};
+                app.icon = cached.icon;
+                app.iconLarge = cached.large;
+                LogIcon(app);
+            }
+            app.icon = cached.icon;
+            app.iconLarge = cached.large;
             apps.push_back(std::move(app));
         }
         RegCloseKey(key);
@@ -265,6 +357,7 @@ bool LoadFromToolbar(std::vector<TrayApp>& apps) {
         if (!seen.insert(Lower(app.exe) + L"|" + app.name).second) continue;
         if (data.icon) app.icon = BitmapFromIcon(data.icon);  // 句柄归资源管理器，不能 DestroyIcon
         if (!app.icon) app.icon = ExeIcon(app.exe);
+        if (app.icon) app.iconLarge = LargeFor(app.exe, app.icon.get());
         apps.push_back(std::move(app));  // 都在隐藏的图标里，promoted 是 false
     }
     if (!ok) Log(L"托盘：读不了隐藏的图标的工具栏（错误 %lu）", GetLastError());

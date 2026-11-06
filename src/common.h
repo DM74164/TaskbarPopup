@@ -415,7 +415,8 @@ void Thumb_Destroy();
 // ---------------- 系统托盘里隐藏的图标（tray.cpp）----------------
 struct TrayApp {
     std::wstring name, exe;
-    std::shared_ptr<Gdiplus::Bitmap> icon;
+    std::shared_ptr<Gdiplus::Bitmap> icon;       // 托盘上的图标，原来的大小（不缩放，画的时候按整像素缩放）
+    std::shared_ptr<Gdiplus::Bitmap> iconLarge;  // 程序本身的高清图标，和托盘图标看上去一样才有：比 icon 画得大时用
     bool promoted = false;  // 用户设成在任务栏上一直显示
     DWORD pid = 0;          // 图标属于的进程（Win10 读得到；Win11 只有程序路径，为 0）
 };

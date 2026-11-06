@@ -2386,6 +2386,63 @@ void DrawBattery(Graphics& g, const Font& font, const StringFormat& center) {
     DrawLabel(g, text, font, RectF(r.X, top + bh + 2 * u, r.Width, textH), center, pal.text);
 }
 
+// 托盘图标缩放到整像素大小（缩放只做一次存着，两条面板共用），画的时候一比一贴上去，小图标才不发糊。
+// 比托盘上的图标画得大时，用程序本身的高清图标（看上去一样的才有）
+struct ScaledIcon {
+    std::weak_ptr<Bitmap> src;
+    int px;
+    std::shared_ptr<Bitmap> bmp;
+};
+std::vector<ScaledIcon> s_scaledIcons;
+
+std::shared_ptr<Bitmap> TrayIconAt(const TrayApp& app, int px) {
+    std::shared_ptr<Bitmap> src = app.icon;
+    if (app.iconLarge && (!src || static_cast<int>(src->GetWidth()) < px)) src = app.iconLarge;
+    if (!src) return nullptr;
+    int w = static_cast<int>(src->GetWidth()), h = static_cast<int>(src->GetHeight());
+    if (w == px && h == px) return src;
+    for (const ScaledIcon& s : s_scaledIcons)
+        if (s.px == px && s.src.lock() == src) return s.bmp;
+    s_scaledIcons.erase(std::remove_if(s_scaledIcons.begin(), s_scaledIcons.end(),
+                                       [](const ScaledIcon& s) { return s.src.expired(); }),
+                        s_scaledIcons.end());
+    auto bmp = std::make_shared<Bitmap>(px, px, PixelFormat32bppPARGB);
+    {
+        Graphics g(bmp.get());
+        g.SetCompositingMode(CompositingModeSourceCopy);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.SetPixelOffsetMode(PixelOffsetModeHalf);
+        ImageAttributes wrap;  // 边上不混进外面的黑边
+        wrap.SetWrapMode(WrapModeTileFlipXY);
+        g.DrawImage(src.get(), Rect(0, 0, px, px), 0, 0, w, h, UnitPixel, &wrap);
+    }
+    s_scaledIcons.push_back({src, px, bmp});
+    return bmp;
+}
+
+// 按画出来的实际位置取整像素，一比一贴（模块缩放、滑动这些变换都算进去）
+void DrawTrayIcon(Graphics& g, const TrayApp& app, const RectF& r) {
+    Matrix m;
+    g.GetTransform(&m);
+    REAL e[6];
+    m.GetElements(e);
+    if (e[1] != 0 || e[2] != 0 || e[0] <= 0 || e[3] <= 0) {  // 不会有旋转，万一有就照常画
+        if (auto bmp = TrayIconAt(app, std::max(1, static_cast<int>(std::lround(r.Width))))) g.DrawImage(bmp.get(), r);
+        return;
+    }
+    float x = e[0] * r.X + e[4], y = e[3] * r.Y + e[5], w = e[0] * r.Width, h = e[3] * r.Height;
+    int px = std::max(1, static_cast<int>(std::lround(std::min(w, h))));
+    std::shared_ptr<Bitmap> bmp = TrayIconAt(app, px);
+    if (!bmp) return;
+    GraphicsState state = g.Save();
+    g.ResetTransform();
+    g.SetInterpolationMode(InterpolationModeNearestNeighbor);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    g.DrawImage(bmp.get(), Rect(static_cast<int>(std::lround(x + (w - px) / 2)), static_cast<int>(std::lround(y + (h - px) / 2)),
+                                px, px));
+    g.Restore(state);
+}
+
 // 托盘图标。一行大图标放不下时两头画个小三角，表示那边还有（滚轮滚着看）；
 // 堆叠时只画当前这一页，垫一块淡淡的底，不止一页时底边画几个小点表示第几页，翻页时新一页从旁边滑进来
 void DrawTray(Graphics& g) {
@@ -2417,7 +2474,7 @@ void DrawTray(Graphics& g) {
         RectF r = TrayCellRect(i);
         float size = std::min(icon, std::min(r.Width, r.Height) - Px(2));
         RectF iconRect(r.X + dx + (r.Width - size) / 2, r.Y + (r.Height - size) / 2, size, size);
-        if (s_tray[i].icon) g.DrawImage(s_tray[i].icon.get(), iconRect);
+        if (s_tray[i].icon || s_tray[i].iconLarge) DrawTrayIcon(g, s_tray[i], iconRect);
         else FillRound(g, iconRect, Px(3), pal.separator);
     };
     if (row) {
