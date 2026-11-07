@@ -120,11 +120,27 @@ const wchar_t* const kShellUiClasses[] = {
     L"TopLevelWindowForOverflowXamlIsland",
 };
 
+// 上面的 CoreWindow 只有这几个程序的才是开始菜单、搜索、通知中心。别的（Win+Shift+S 截图时盖住屏幕的那层等）不用任务栏
+const wchar_t* const kShellUiHosts[] = {
+    L"startmenuexperiencehost.exe", L"searchhost.exe", L"searchapp.exe",
+    L"searchui.exe",                L"shellexperiencehost.exe", L"shellhost.exe",
+};
+
 template <size_t N>
 bool InList(const std::wstring& cls, const wchar_t* const (&list)[N]) {
     for (const wchar_t* item : list)
         if (cls == item) return true;
     return false;
+}
+
+// 前台是要用任务栏的系统界面（开始菜单、搜索、通知中心、托盘溢出区、任务栏本身）
+bool NeedsTaskbar(HWND fg) {
+    std::wstring cls = GetClassNameStr(fg);
+    if (!InList(cls, kShellUiClasses)) return false;
+    if (cls != L"Windows.UI.Core.CoreWindow") return true;
+    std::wstring path = GetProcessPath(fg);
+    if (path.empty()) return true;  // 查不到是哪个程序：照旧当开始菜单
+    return InList(ToLower(path.substr(path.find_last_of(L'\\') + 1)), kShellUiHosts);
 }
 
 // 主屏任务栏是 Shell_TrayWnd，其他屏幕是 Shell_SecondaryTrayWnd
@@ -1075,7 +1091,8 @@ void ShowForShellUi(HWND fg) {
     for (const Hidden& h : s_hidden) {
         if (!IsWindow(h.taskbar) || IsWindowVisible(h.taskbar)) continue;
         if (only && TaskbarMonitor(h.taskbar) != only) continue;
-        Log(L"开始菜单等系统界面在前台，显示任务栏 %p", static_cast<void*>(h.taskbar));
+        Log(L"开始菜单等系统界面在前台（%ls %ls），显示任务栏 %p", GetClassNameStr(fg).c_str(), GetProcessPath(fg).c_str(),
+            static_cast<void*>(h.taskbar));
         ShowWindowAsync(h.taskbar, SW_SHOWNA);
     }
 }
@@ -1195,7 +1212,7 @@ void EvaluateNow(bool enforce) {
         // 除非让任务栏隐藏的那个窗口已经最小化、关掉或还原了：
         // 最小化最后一个窗口后，前台常常落到正隐藏着的任务栏上，不处理的话任务栏就一直出不来
         if (!s_targetMonitor || g_settings.alwaysHideTaskbar || GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
-            if (s_targetMonitor && fg && !quiet && InList(GetClassNameStr(fg), kShellUiClasses)) ShowForShellUi(fg);
+            if (s_targetMonitor && fg && !quiet && NeedsTaskbar(fg)) ShowForShellUi(fg);
             return;
         }
         fg = nullptr;
