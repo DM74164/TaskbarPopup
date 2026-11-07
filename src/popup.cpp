@@ -3370,6 +3370,8 @@ void HideNow() {
     EndStartMode();
     EndTrayMode();
     EndHoverOpen();
+    if (s_open && !s_preview)
+        Log(L"迷你任务栏%ls收起（开了 %.0f 毫秒）", s_cur ? L"另一条" : L"", NowMs() - s_shownAt);
     s_open = false;
     s_preview = false;
     KillTimer(s_hwnd, kTimerPreview);
@@ -3507,20 +3509,37 @@ void ScaleRelayout() {
     s_layerValid = false;
 }
 
+// 诊断：弹出动画放完时窗口在不在屏幕上、中间那一点是不是被别的窗口盖着
+void LogShown() {
+    RECT wr = {};
+    GetWindowRect(s_hwnd, &wr);
+    RECT panel = PanelRectAt(s_L, s_pos);
+    POINT mid = {(panel.left + panel.right) / 2, (panel.top + panel.bottom) / 2};
+    HWND top = WindowFromPoint(mid);
+    HWND topRoot = top ? GetAncestor(top, GA_ROOT) : nullptr;
+    Log(L"迷你任务栏%ls弹出动画放完：窗口%ls (%ld,%ld)-(%ld,%ld)，不透明度 %d，中间那一点上是 %ls", s_cur ? L"另一条" : L"",
+        IsWindowVisible(s_hwnd) ? L"显示着" : L"没显示", wr.left, wr.top, wr.right, wr.bottom, s_lastAlpha,
+        topRoot == s_hwnd ? L"它自己" : (GetClassNameStr(topRoot) + L" " + GetProcessPath(topRoot)).c_str());
+}
+
 // 动画的一帧：按时间算出位置画出来，还没播完就等下一次屏幕刷新再画下一帧
 void Frame() {
     double now = NowMs();
     float slide = 0;
     BYTE alpha = 255;
-    bool more = false, start = false;
+    bool more = false, start = false, shown = false;
     bool on = AnimationsOn();  // 系统里关了动画效果：一下子出来、收起
     if (s_anim == Anim::Showing) {
         double t = on ? std::min(1.0, (now - s_animStart) / (s_compact ? kStartShowMs : kShowMs)) : 1.0;
         slide = static_cast<float>((1 - EaseOutBack(t)) * SlideDistance());
         alpha = static_cast<BYTE>(std::lround(255 * std::min(1.0, t * 3)));
         start = s_startPending && t >= kStartAt;  // 第二段：画完这一帧打开开始菜单
-        if (t >= 1) s_anim = Anim::None;
-        else more = true;
+        if (t >= 1) {
+            s_anim = Anim::None;
+            shown = !s_preview;
+        } else {
+            more = true;
+        }
     } else if (s_anim == Anim::Hiding) {
         double t = on ? std::min(1.0, (now - s_animStart) / kHideMs) : 1.0;
         if (t >= 1) {
@@ -3543,6 +3562,7 @@ void Frame() {
     s_lastSlide = slide;
     s_lastAlpha = alpha;
     Render(slide, alpha);
+    if (shown) LogShown();
     if (start) BeginStart();
     if (more) {
         FrameWait();
@@ -6774,6 +6794,14 @@ void Open(bool preview, bool startMenu = false, bool hover = false, bool compani
     s_lastSlide = SlideDistance();  // 还没出现就收起的话从这里收
     s_lastAlpha = 0;
     Render(SlideDistance(), 0);
+    if (!preview) {
+        RECT panel = PanelRectAt(s_L, s_pos);
+        static const wchar_t* const kEdgeNames[] = {L"底边", L"左边", L"右边"};
+        Log(L"迷你任务栏%ls弹出在%ls：面板 (%ld,%ld)-(%ld,%ld)，能用的地方 (%ld,%ld)-(%ld,%ld)，窗口 %zu 个，托盘 %zu 个",
+            s_cur ? L"另一条" : L"", s_edge >= 0 && s_edge <= kEdgeRight ? kEdgeNames[s_edge] : L"?", panel.left,
+            panel.top, panel.right, panel.bottom, s_bounds.left, s_bounds.top, s_bounds.right, s_bounds.bottom,
+            s_items.size(), s_tray.size());
+    }
     if (preview || hover || companion) {
         ShowWindow(s_hwnd, SW_SHOWNOACTIVATE);
         if (hover) {
@@ -7140,6 +7168,7 @@ void HideOne() {
     EndStartMode();
     EndTrayMode();
     EndHoverOpen();
+    if (!s_preview) Log(L"迷你任务栏%ls收起（开了 %.0f 毫秒）", s_cur ? L"另一条" : L"", NowMs() - s_shownAt);
     s_open = false;
     bool atRest = s_anim == Anim::None;
     s_hideFromSlide = atRest ? 0 : s_lastSlide;
