@@ -14,7 +14,8 @@ permissions:
   actions: read
 
 jobs:
-  build:
+  build-x64:
+    name: Build x64
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -81,14 +82,80 @@ jobs:
       - name: Package
         run: cd dist && zip -r TaskbarPopup.zip TaskbarPopup
 
-      - name: Release
+      - name: Upload x64 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: TaskbarPopup-zip
+          path: dist/TaskbarPopup.zip
+
+  build-arm64:
+    name: Build arm64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from tag
         if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: echo "TP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Configure CMake
+        run: cmake -B build -A ARM64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist\TaskbarPopup"
+          Copy-Item "build\Release\TaskbarPopup.exe" -Destination "dist\TaskbarPopup\"
+          Copy-Item "README.md", "LICENSE" -Destination "dist\TaskbarPopup\"
+
+      - id: upload-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: TaskbarPopup-arm64
+          path: dist/TaskbarPopup/
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\TaskbarPopup" -DestinationPath "dist\TaskbarPopup-arm64.zip"
+
+      - name: Upload arm64 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: TaskbarPopup-arm64-zip
+          path: dist/TaskbarPopup-arm64.zip
+
+  release:
+    name: Release
+    needs: [build-x64, build-arm64]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download x64 zip
+        uses: actions/download-artifact@v4
+        with:
+          name: TaskbarPopup-zip
+          path: dist-release/x64
+
+      - name: Download arm64 zip
+        uses: actions/download-artifact@v4
+        with:
+          name: TaskbarPopup-arm64-zip
+          path: dist-release/arm64
+
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         # 在网页上新建 Release 时标签和 Release 已经有了，只补上 zip
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/TaskbarPopup.zip --clobber
+            gh release upload "$GITHUB_REF_NAME" dist-release/x64/TaskbarPopup.zip dist-release/arm64/TaskbarPopup-arm64.zip --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/TaskbarPopup.zip --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" dist-release/x64/TaskbarPopup.zip dist-release/arm64/TaskbarPopup-arm64.zip --title "$GITHUB_REF_NAME" --generate-notes
           fi

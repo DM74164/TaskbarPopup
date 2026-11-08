@@ -36,6 +36,28 @@ add_executable(TaskbarPopup WIN32
 target_compile_definitions(TaskbarPopup PRIVATE
     UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 
+if(NOT DEFINED TP_VERSION AND DEFINED ENV{TP_VERSION})
+    set(TP_VERSION "$ENV{TP_VERSION}")
+endif()
+if(DEFINED TP_VERSION)
+    string(REGEX REPLACE "^[vV]" "" TP_VER_CLEAN "${TP_VERSION}")
+    string(REPLACE "." ";" TP_VER_LIST "${TP_VER_CLEAN}")
+    list(LENGTH TP_VER_LIST TP_VER_COUNT)
+    if(TP_VER_COUNT EQUAL 3)
+        list(GET TP_VER_LIST 0 TP_VER_MAJOR)
+        list(GET TP_VER_LIST 1 TP_VER_MINOR)
+        list(GET TP_VER_LIST 2 TP_VER_PATCH)
+        target_compile_definitions(TaskbarPopup PRIVATE
+            TP_VERSION_MAJOR=${TP_VER_MAJOR}
+            TP_VERSION_MINOR=${TP_VER_MINOR}
+            TP_VERSION_PATCH=${TP_VER_PATCH})
+        set_property(SOURCE src/app.rc APPEND PROPERTY COMPILE_DEFINITIONS
+            TP_VERSION_MAJOR=${TP_VER_MAJOR}
+            TP_VERSION_MINOR=${TP_VER_MINOR}
+            TP_VERSION_PATCH=${TP_VER_PATCH})
+    endif()
+endif()
+
 target_link_libraries(TaskbarPopup PRIVATE
     user32 gdi32 gdiplus shell32 comctl32 dwmapi shcore advapi32 ole32 uuid
     oleaut32 dxva2 winhttp iphlpapi imm32 comdlg32)
