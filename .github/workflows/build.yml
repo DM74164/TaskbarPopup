@@ -132,7 +132,8 @@ jobs:
   release:
     name: Release
     needs: [build-x64, build-arm64]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # ARM64 编不过（平时只用 MinGW 编 x64）时照常发 x64 版，只是这次没有 arm64 的 zip
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build-x64.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -144,6 +145,7 @@ jobs:
           path: dist-release/x64
 
       - name: Download arm64 zip
+        if: needs.build-arm64.result == 'success'
         uses: actions/download-artifact@v4
         with:
           name: TaskbarPopup-arm64-zip
@@ -154,8 +156,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         # 在网页上新建 Release 时标签和 Release 已经有了，只补上 zip
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist-release/x64/TaskbarPopup.zip dist-release/arm64/TaskbarPopup-arm64.zip --clobber
+          files="dist-release/x64/TaskbarPopup.zip"
+          if [ -f dist-release/arm64/TaskbarPopup-arm64.zip ]; then
+            files="$files dist-release/arm64/TaskbarPopup-arm64.zip"
           else
-            gh release create "$GITHUB_REF_NAME" dist-release/x64/TaskbarPopup.zip dist-release/arm64/TaskbarPopup-arm64.zip --title "$GITHUB_REF_NAME" --generate-notes
+            echo "::warning::ARM64 没编出来，这次只发 x64 版"
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" $files --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" $files --title "$GITHUB_REF_NAME" --generate-notes
           fi
