@@ -183,9 +183,9 @@ Right-click the tray icon → Settings. Options are grouped into Taskbar, Mini t
 
 Requires C++17. From the repository root:
 
-- **Visual Studio 2022**: `cmake -B build -G "Visual Studio 17 2022" -A x64`, then `cmake --build build --config Release`
+- **Visual Studio 2022**: `cmake -B build -G "Visual Studio 17 2022" -A x64` (or `-A ARM64` for ARM64), then `cmake --build build --config Release`
 - **MSYS2 / MinGW-w64**: `cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release`, then `cmake --build build`
-- **Cross-compile on Linux** (needs `g++-mingw-w64-x86-64-posix`): `sh build-mingw.sh`
+- **Cross-compile on Linux** (needs `g++-mingw-w64-x86-64-posix` for x64, `llvm-mingw` for arm64): `sh build-mingw.sh` (or `TARGET_ARCH=arm64 sh build-mingw.sh`)
 
 ## Code layout
 

@@ -139,7 +139,7 @@ bool FileExists(const std::wstring& path) {
 
 std::shared_ptr<ITEMIDLIST> HoldIdList(PIDLIST_ABSOLUTE pidl) {
     if (!pidl) return nullptr;
-    return std::shared_ptr<ITEMIDLIST>(pidl, [](ITEMIDLIST* p) { CoTaskMemFree(p); });
+    return std::shared_ptr<ITEMIDLIST>((ITEMIDLIST*)pidl, [](ITEMIDLIST* p) { CoTaskMemFree(p); });
 }
 
 // 跳转列表给的是 IShellItem（文件等外壳项）或者 IShellLink（带参数的快捷方式）

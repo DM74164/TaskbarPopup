@@ -157,8 +157,8 @@ Gdiplus::Bitmap* ExeIconAt(const std::wstring& exe, int px) {
 }
 
 // 两个图标是不是同一张图：large 缩到 small 的大小（一样大就不缩），按预乘过透明度的颜色逐像素比
-bool LooksSame(Gdiplus::Bitmap* small, Gdiplus::Bitmap* large) {
-    int w = static_cast<int>(small->GetWidth()), h = static_cast<int>(small->GetHeight());
+bool LooksSame(Gdiplus::Bitmap* bmpSmall, Gdiplus::Bitmap* bmpLarge) {
+    int w = static_cast<int>(bmpSmall->GetWidth()), h = static_cast<int>(bmpSmall->GetHeight());
     if (w < 8 || h < 8) return false;
     Gdiplus::Bitmap a(w, h, PixelFormat32bppPARGB), b(w, h, PixelFormat32bppPARGB);
     {
@@ -166,7 +166,7 @@ bool LooksSame(Gdiplus::Bitmap* small, Gdiplus::Bitmap* large) {
         g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
         g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-        g.DrawImage(small, Gdiplus::Rect(0, 0, w, h));
+        g.DrawImage(bmpSmall, Gdiplus::Rect(0, 0, w, h));
     }
     {
         Gdiplus::Graphics g(&b);
@@ -175,8 +175,8 @@ bool LooksSame(Gdiplus::Bitmap* small, Gdiplus::Bitmap* large) {
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
         Gdiplus::ImageAttributes wrap;
         wrap.SetWrapMode(Gdiplus::WrapModeTileFlipXY);
-        g.DrawImage(large, Gdiplus::Rect(0, 0, w, h), 0, 0, static_cast<int>(large->GetWidth()),
-                    static_cast<int>(large->GetHeight()), Gdiplus::UnitPixel, &wrap);
+        g.DrawImage(bmpLarge, Gdiplus::Rect(0, 0, w, h), 0, 0, static_cast<int>(bmpLarge->GetWidth()),
+                    static_cast<int>(bmpLarge->GetHeight()), Gdiplus::UnitPixel, &wrap);
     }
     Gdiplus::Rect rect(0, 0, w, h);
     Gdiplus::BitmapData da, db;

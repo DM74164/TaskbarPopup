@@ -20,6 +20,9 @@
 #include <dwmapi.h>
 #include <shellscalingapi.h>
 #include <objidl.h>
+#ifdef small
+#undef small
+#endif
 
 #include <algorithm>
 #include <memory>

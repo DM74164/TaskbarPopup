@@ -183,9 +183,9 @@ Windows 10/11 任务栏增强：窗口最大化时藏起任务栏、让窗口铺
 
 需要 C++17，在仓库根目录运行：
 
-- **Visual Studio 2022**：`cmake -B build -G "Visual Studio 17 2022" -A x64`，再 `cmake --build build --config Release`
+- **Visual Studio 2022**：`cmake -B build -G "Visual Studio 17 2022" -A x64`（ARM64 为 `-A ARM64`），再 `cmake --build build --config Release`
 - **MSYS2 / MinGW-w64**：`cmake -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release`，再 `cmake --build build`
-- **Linux 交叉编译**（需要 `g++-mingw-w64-x86-64-posix`）：`sh build-mingw.sh`
+- **Linux 交叉编译**（x64 需要 `g++-mingw-w64-x86-64-posix`，arm64 需要 `llvm-mingw`）：`sh build-mingw.sh`（ARM64 运行 `TARGET_ARCH=arm64 sh build-mingw.sh`）
 
 ## 代码结构
 
