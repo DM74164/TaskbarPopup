@@ -13,6 +13,9 @@ permissions:
   contents: write
   actions: read
 
+env:
+  TP_ZIP_SUFFIX: ${{ startsWith(github.ref, 'refs/tags/v') && format('_{0}', github.ref_name) || '' }}
+
 jobs:
   build-x64:
     name: Build x64
@@ -80,13 +83,13 @@ jobs:
         run: cp dist/signed/TaskbarPopup.exe dist/TaskbarPopup/TaskbarPopup.exe
 
       - name: Package
-        run: cd dist && zip -r TaskbarPopup.zip TaskbarPopup
+        run: cd dist && zip -r "TaskbarPopup${TP_ZIP_SUFFIX}.zip" TaskbarPopup
 
       - name: Upload x64 zip
         uses: actions/upload-artifact@v4
         with:
           name: TaskbarPopup-zip
-          path: dist/TaskbarPopup.zip
+          path: dist/TaskbarPopup${{ env.TP_ZIP_SUFFIX }}.zip
 
   build-arm64:
     name: Build arm64
@@ -121,13 +124,13 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist\TaskbarPopup" -DestinationPath "dist\TaskbarPopup-arm64.zip"
+          Compress-Archive -Path "dist\TaskbarPopup" -DestinationPath "dist\TaskbarPopup-arm64${env:TP_ZIP_SUFFIX}.zip"
 
       - name: Upload arm64 zip
         uses: actions/upload-artifact@v4
         with:
           name: TaskbarPopup-arm64-zip
-          path: dist/TaskbarPopup-arm64.zip
+          path: dist/TaskbarPopup-arm64${{ env.TP_ZIP_SUFFIX }}.zip
 
   release:
     name: Release
@@ -152,18 +155,20 @@ jobs:
           path: dist-release/arm64
 
       - name: Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         # 在网页上新建 Release 时标签和 Release 已经有了，只补上 zip
         run: |
-          files="dist-release/x64/TaskbarPopup.zip"
-          if [ -f dist-release/arm64/TaskbarPopup-arm64.zip ]; then
-            files="$files dist-release/arm64/TaskbarPopup-arm64.zip"
+          files=("dist-release/x64/TaskbarPopup${TP_ZIP_SUFFIX}.zip")
+          arm64="dist-release/arm64/TaskbarPopup-arm64${TP_ZIP_SUFFIX}.zip"
+          if [ -f "$arm64" ]; then
+            files+=("$arm64")
           else
             echo "::warning::ARM64 没编出来，这次只发 x64 版"
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" $files --clobber
+            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" $files --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" "${files[@]}" --title "$GITHUB_REF_NAME" --generate-notes
           fi

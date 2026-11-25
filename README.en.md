@@ -123,7 +123,7 @@ In this mode, press **F2**, right-click the bar you want to restore, and choose 
 
 ## Download
 
-Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and run `TaskbarPopup.exe`. A blue up-arrow icon appears in the tray: left-click it to open the mini taskbar, right-click it for the menu and Settings.
+Download the ZIP for your architecture from Assets on the [Releases](../../releases) page, for example `TaskbarPopup_v1.2.1.zip` (x64) or `TaskbarPopup-arm64_v1.2.1.zip` (ARM64). Unzip it and run `TaskbarPopup.exe`. Left-click the blue up-arrow icon in the tray to open the mini taskbar, or right-click it for the menu and Settings.
 
 ## Mini taskbar controls
 

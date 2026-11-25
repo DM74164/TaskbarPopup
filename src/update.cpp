@@ -23,9 +23,9 @@ constexpr wchar_t kApiPath[] = L"/repos/DM74164/TaskbarPopup/releases/latest";
 constexpr wchar_t kRepoUrl[] = L"https://github.com/DM74164/TaskbarPopup/";  // 下载页面只认这个仓库下的地址
 constexpr wchar_t kReleasesUrl[] = L"https://github.com/DM74164/TaskbarPopup/releases/latest";
 #if defined(_M_ARM64) || defined(__aarch64__)
-constexpr char kZipName[] = "TaskbarPopup-arm64.zip";
+constexpr char kZipBase[] = "TaskbarPopup-arm64";
 #else
-constexpr char kZipName[] = "TaskbarPopup.zip";
+constexpr char kZipBase[] = "TaskbarPopup";
 #endif
 constexpr wchar_t kUserAgent[] = L"TaskbarPopup/" TP_VERSION_STR;  // GitHub API 不接受没有 User-Agent 的请求
 constexpr UINT kFirstCheckMs = 15 * 1000;            // 启动后先等一会儿，别和开机时的其他程序抢网络
@@ -105,7 +105,7 @@ std::wstring VersionText(const Version& v) {
     return buf;
 }
 
-// ---- 只认最外层的 "tag_name"、"html_url"（author 等嵌套对象里也有 html_url），和 "assets" 里每个文件的 "name" ----
+// 只读最外层的 "tag_name"、"html_url"，以及 "assets" 里每个文件的名字和上传状态。
 
 // s[i] 是开头的引号；读完 i 停在结尾引号后面。只关心 ASCII 的值，\u 转义出的非 ASCII 字符记成 '?'
 bool ReadJsonString(const std::string& s, size_t& i, std::string& out) {
@@ -157,15 +157,21 @@ bool ParseRelease(const std::string& json, std::string& tag, std::string& url, b
     if (i >= json.size() || json[i] != '{') return false;
     int depth = 0;
     bool inAssets = false;  // 在最外层的 "assets" 数组里：里面每个文件是第 3 层的对象
-    bool assetIsZip = false, assetUploaded = false;  // 正在读的这个文件：名字对、传完了（没传完的 state 是 "open"）
+    std::string assetName;
+    bool assetUploaded = false;
+    std::vector<std::string> uploadedAssets;  // tag_name 可能在 assets 后面，读完再核对文件名
     while (i < json.size()) {
         char c = json[i];
         if (c == '{' || c == '[') {
             ++depth;
-            if (inAssets && depth == 3) assetIsZip = assetUploaded = false;
+            if (inAssets && depth == 3) {
+                assetName.clear();
+                assetUploaded = false;
+            }
             ++i;
         } else if (c == '}' || c == ']') {
-            if (inAssets && depth == 3 && assetIsZip && assetUploaded) hasZip = true;
+            if (inAssets && depth == 3 && assetUploaded && !assetName.empty())
+                uploadedAssets.push_back(std::move(assetName));
             if (--depth <= 0) break;  // 最外层的对象结束了
             if (depth == 1) inAssets = false;
             ++i;
@@ -182,7 +188,7 @@ bool ParseRelease(const std::string& json, std::string& tag, std::string& url, b
             std::string value;
             if (!ReadJsonString(json, i, value)) return false;
             if (depth == 3) {
-                if (key == "name") assetIsZip = value == kZipName;
+                if (key == "name") assetName = std::move(value);
                 else if (key == "state") assetUploaded = value == "uploaded";
             } else if (key == "tag_name") {
                 tag = value;
@@ -193,6 +199,11 @@ bool ParseRelease(const std::string& json, std::string& tag, std::string& url, b
             ++i;
         }
     }
+    const std::string base = kZipBase;
+    const std::string versioned = base + "_" + tag + ".zip";
+    const std::string legacy = base + ".zip";
+    hasZip = std::any_of(uploadedAssets.begin(), uploadedAssets.end(),
+                         [&](const std::string& name) { return name == versioned || name == legacy; });
     return !tag.empty();
 }
 

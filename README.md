@@ -121,7 +121,7 @@ Windows 10/11 任务栏增强。窗口最大化时藏起任务栏，让窗口铺
 
 ## 下载
 
-到 [Releases](../../releases) 下载最新的 `TaskbarPopup.zip`，解压后运行 `TaskbarPopup.exe`，托盘区会出现一个蓝色向上箭头图标：左键弹出迷你任务栏，右键打开菜单和“设置...”。
+在 [Releases](../../releases) 的 Assets 里下载对应架构的 ZIP，例如 `TaskbarPopup_v1.2.1.zip`（x64）或 `TaskbarPopup-arm64_v1.2.1.zip`（ARM64）。解压后运行 `TaskbarPopup.exe`。左键单击托盘里的蓝色向上箭头可弹出迷你任务栏，右键可打开菜单和“设置...”。
 
 ## 迷你任务栏操作
 
