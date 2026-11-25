@@ -193,16 +193,21 @@ void StartMove(Slide& s, double to) {
 
 // 等提前关自动隐藏的线程做完，之后才能再开、再关，免得先后颠倒。
 // 等的时候照样处理发来的消息：资源管理器要等每个窗口（包括这个线程的截图窗口）处理完广播才返回
-void JoinOff() {
-    if (!s_offThread) return;
+bool JoinOff() {
+    if (!s_offThread) return true;
     DWORD start = GetTickCount();
     for (DWORD elapsed = 0; elapsed < 3000; elapsed = GetTickCount() - start) {
-        if (MsgWaitForMultipleObjectsEx(1, &s_offThread, 3000 - elapsed, QS_SENDMESSAGE, 0) != WAIT_OBJECT_0 + 1) break;
+        DWORD result = MsgWaitForMultipleObjectsEx(1, &s_offThread, 3000 - elapsed, QS_SENDMESSAGE, 0);
+        if (result == WAIT_OBJECT_0) {
+            CloseHandle(s_offThread);
+            s_offThread = nullptr;
+            return true;
+        }
+        if (result != WAIT_OBJECT_0 + 1) break;
         MSG msg;
         PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
     }
-    CloseHandle(s_offThread);
-    s_offThread = nullptr;
+    return false;  // 它还可能修改系统设置，保留句柄，下一次操作仍须等它结束
 }
 
 // 关掉本程序打开的自动隐藏，再告诉主线程（它接着把没跟着缩回去的窗口、桌面图标收拾好）
@@ -211,7 +216,10 @@ void ApplyPendingOff() {
     if (!s_offSeq) return;
     UINT seq = s_offSeq;
     s_offSeq = 0;
-    JoinOff();
+    if (!JoinOff()) {
+        PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, false);
+        return;
+    }
     DesktopIcons_WaitUpdated(1000);  // 工作区一变桌面就重新排列，用户挪过的图标得先读完
     // 等的时候主线程改了主意（窗口又最大化了，已经要求重新打开），或者要退出了（主线程自己关）：不关了。
     // 主线程那边已经不等这次的回报
@@ -262,7 +270,7 @@ bool MaximizedOn(HMONITOR monitor) {
 bool OffEarly(const Slide& s) {
     (void)s;
     if (!s_offSeq || MaximizedOn(nullptr)) return false;
-    JoinOff();
+    if (!JoinOff()) return false;
     auto* job = new OffJob{s_offSeq, t_generation};
     HANDLE thread = CreateThread(nullptr, 0, OffThread, job, 0, nullptr);
     if (!thread) {
@@ -282,25 +290,43 @@ bool SlidingIn() {
 
 // 拉伸前再确认一次：从决定拉伸到现在可能过了一两秒，窗口也许已经还原或者换了屏幕
 void StretchIfStillMaximized(HWND hwnd, const RECT& rect) {
-    if (!hwnd || !IsWindow(hwnd) || !IsZoomed(hwnd)) return;
-    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST)) return;
+    if (!hwnd || !IsWindow(hwnd) || IsIconic(hwnd) || !IsZoomed(hwnd)) return;
+    HMONITOR monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) return;
+    MONITORINFO mi = {sizeof(mi)};
+    RECT current;
+    if (!GetMonitorInfoW(monitor, &mi) || !GetWindowRect(hwnd, &current) ||
+        IsNativeFullscreen(hwnd, current, mi.rcMonitor))
+        return;
     SetWindowRectAsync(hwnd, rect);
+}
+
+// 开启自动隐藏会等待资源管理器。回来时再次确认请求，避免把已经换到后台的最大化窗口拉伸。
+void CompleteHide(HWND stretch, const RECT& rect, UINT seq, UINT generation) {
+    if (generation != s_generation) return;
+    if (seq) {
+        if (seq != s_wantedSeq) return;
+        bool done = Taskbar_SetAutoHide(true);
+        PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_ON, seq, done);
+        if (!done || seq != s_wantedSeq || generation != s_generation) return;
+    }
+    StretchIfStillMaximized(stretch, rect);
 }
 
 // 真任务栏藏好以后：需要的话打开自动隐藏，再拉伸窗口（工作区变大以后 Chromium 系的程序才肯铺满）
 void AfterHidden(const HideCommand& c) {
     if (c.autoHideSeq) {
+        if (Stopped() || c.autoHideSeq != s_wantedSeq) return;
         s_offSeq = 0;  // 还没执行的关闭请求作废
         DesktopIcons_WaitSaved(1500);  // 工作区一变桌面就重新排列，得先记完图标位置
         // 要退出了，或者主线程已经改主意要关了（窗口最大化后马上又还原）：不开，也不拉伸
         if (Stopped() || c.autoHideSeq != s_wantedSeq) return;
-        JoinOff();  // 刚提前关过的话等它关完再开
-        if (Stopped() || c.autoHideSeq != s_wantedSeq) return;
-        bool done = Taskbar_SetAutoHide(true);
-        PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_ON, c.autoHideSeq, done);
-        if (!done) return;  // 资源管理器没在运行：它回来以后主线程会重新藏、重新开
+        if (!JoinOff()) {  // 刚提前关过的话等它关完再开
+            PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_ON, c.autoHideSeq, false);
+            return;
+        }
     }
-    if (!Stopped()) StretchIfStillMaximized(c.stretch, c.stretchRect);
+    CompleteHide(c.stretch, c.stretchRect, c.autoHideSeq, t_generation);
 }
 
 // 截图滑走之前等窗口在它后面铺满，免得先露出一条空白、窗口再变大
@@ -333,6 +359,7 @@ void OnHide(const HideCommand& c) {
         Present(*s, s->pos, 255);
         if (s->docking || s->settling) {
             WaitForVBlank();  // 截图先恢复不透明，再藏真任务栏
+            if (Stopped()) return;
             ShowWindowAsync(c.taskbar, SW_HIDE);
         }
         AfterHidden(c);
@@ -373,6 +400,7 @@ void OnHide(const HideCommand& c) {
         if (s->overlay) NoTransitions(s->overlay);
     }
     if (!s->overlay || !CaptureImage(*s)) {
+        if (Stopped()) return;
         ShowWindowAsync(c.taskbar, SW_HIDE);
         AfterHidden(c);
         ReleaseImage(*s);
@@ -384,6 +412,7 @@ void OnHide(const HideCommand& c) {
     Present(*s, 0, 255);
     ShowOverlay(*s);
     WaitForVBlank();  // 截图上屏以后再藏真任务栏、打开自动隐藏、拉伸窗口
+    if (Stopped()) return;
     ShowWindowAsync(c.taskbar, SW_HIDE);
     AfterHidden(c);
     StartMove(*s, 1);
@@ -442,6 +471,7 @@ void OnShow(HWND taskbar, UINT offSeq) {
     if (realShown) {
         // 截图盖上以后把真任务栏藏起来，免得两条任务栏一起动；截图滑到原位、任务栏回到原位以后再显示它
         WaitForVBlank();
+        if (Stopped()) return;
         ShowWindowAsync(taskbar, SW_HIDE);
     }
     StartMove(*s, 0);
@@ -450,6 +480,7 @@ void OnShow(HWND taskbar, UINT offSeq) {
 
 // 推进一帧，返回是否还有动画在进行
 bool Step() {
+    if (Stopped()) return false;
     double now = NowMs();
     bool active = false;
     for (auto it = s_slides.begin(); it != s_slides.end();) {
@@ -567,7 +598,10 @@ DWORD WINAPI AnimThread(LPVOID ready) {
         if (active) WaitForVBlank();
     }
 
-    JoinOff();
+    if (!JoinOff()) {
+        CloseHandle(s_offThread);  // 已停止，不会再开启新的自动隐藏操作
+        s_offThread = nullptr;
+    }
     for (auto& s : s_slides) Destroy(*s);
     s_slides.clear();
     while (PeekMessageW(&msg, nullptr, kCmdHide, kCmdHide, PM_REMOVE))  // 没来得及处理的命令
@@ -578,11 +612,12 @@ DWORD WINAPI AnimThread(LPVOID ready) {
 bool EnsureThread() {
     if (s_thread) return true;
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ready) return false;
     s_thread = CreateThread(nullptr, 0, AnimThread, ready, 0, &s_threadId);
     // 一直等到线程建好消息队列：等不到就关掉事件的话，线程以后会去 SetEvent 一个已经关掉（可能被重用）的句柄，
     // 之前发给它的命令和退出消息也会丢
-    if (s_thread && ready) WaitForSingleObject(ready, INFINITE);
-    if (ready) CloseHandle(ready);
+    if (s_thread) WaitForSingleObject(ready, INFINITE);
+    CloseHandle(ready);
     return s_thread != nullptr;
 }
 
@@ -595,14 +630,10 @@ void TaskbarAnim_Hide(HWND taskbar, HWND stretch, const RECT& stretchRect, bool 
         delete c;
     }
     // 动画线程不可用：直接藏
+    UINT generation = s_generation;
     ShowWindowAsync(taskbar, SW_HIDE);
-    if (autoHideSeq) {
-        DesktopIcons_WaitSaved(1500);
-        bool done = Taskbar_SetAutoHide(true);
-        PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_ON, autoHideSeq, done);
-        if (!done) return;
-    }
-    StretchIfStillMaximized(stretch, stretchRect);
+    if (autoHideSeq) DesktopIcons_WaitSaved(1500);
+    CompleteHide(stretch, stretchRect, autoHideSeq, generation);
 }
 
 void TaskbarAnim_WantAutoHide(UINT seq) { s_wantedSeq = seq; }
@@ -622,7 +653,9 @@ void TaskbarAnim_Show(HWND taskbar, UINT offSeq) {
 
 void TaskbarAnim_AutoHideOff(UINT seq) {
     if (EnsureThread() && PostThreadMessageW(s_threadId, kCmdAutoHideOff, seq, 0)) return;
+    UINT generation = s_generation;
     DesktopIcons_WaitUpdated(1000);
+    if (generation != s_generation || s_wantedSeq != 0) return;
     DesktopIcons_AbandonUpdates();
     bool done = Taskbar_SetAutoHide(false);
     PostMessageW(g_mainWnd, WM_APP_AUTOHIDE_OFF, seq, done);

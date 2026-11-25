@@ -63,6 +63,8 @@ target_link_libraries(TaskbarPopup PRIVATE
     oleaut32 dxva2 winhttp iphlpapi imm32 comdlg32)
 
 if(MSVC)
+    # 源文件和路径可能含中文，资源编译器也要按 UTF-8 读取。
+    string(APPEND CMAKE_RC_FLAGS " /c65001")
     target_compile_options(TaskbarPopup PRIVATE /utf-8 /W4)
     # 清单由 app.rc 嵌入，关掉链接器自动生成的那份
     target_link_options(TaskbarPopup PRIVATE /MANIFEST:NO)

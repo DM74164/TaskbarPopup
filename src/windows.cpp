@@ -13,21 +13,29 @@ std::unordered_map<HWND, long long> s_order;
 long long s_seq = 0;
 std::map<std::wstring, std::shared_ptr<Gdiplus::Bitmap>> s_exeIconCache;
 
-HICON QueryIcon(HWND h, WPARAM type) {
-    DWORD_PTR result = 0;
-    SendMessageTimeoutW(h, WM_GETICON, type, 0, SMTO_ABORTIFHUNG, 50, &result);
-    return reinterpret_cast<HICON>(result);
-}
+using WindowIcons = std::unordered_map<HICON, std::shared_ptr<Gdiplus::Bitmap>>;
 
-std::shared_ptr<Gdiplus::Bitmap> GetIcon(HWND h, const std::wstring& exePath) {
-    HICON icon = QueryIcon(h, ICON_BIG);
-    if (!icon) icon = QueryIcon(h, ICON_SMALL2);
-    if (!icon) icon = QueryIcon(h, ICON_SMALL);
+std::shared_ptr<Gdiplus::Bitmap> GetIcon(HWND h, const std::wstring& exePath, WindowIcons& windowIcons) {
+    HICON icon = nullptr;
+    for (WPARAM size : {ICON_BIG, ICON_SMALL2, ICON_SMALL}) {
+        DWORD_PTR result = 0;
+        // 窗口没有响应时马上走备用图标。同一窗口不再等两次超时。
+        if (!SendMessageTimeoutW(h, WM_GETICON, size, 0, SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, 50, &result)) break;
+        if (result) {
+            icon = reinterpret_cast<HICON>(result);
+            break;
+        }
+    }
     if (!icon) icon = reinterpret_cast<HICON>(GetClassLongPtrW(h, GCLP_HICON));
     if (!icon) icon = reinterpret_cast<HICON>(GetClassLongPtrW(h, GCLP_HICONSM));
     if (icon) {
         // 这些句柄归目标窗口所有，不能 DestroyIcon
-        if (auto bmp = BitmapFromIcon(icon)) return bmp;
+        auto found = windowIcons.find(icon);
+        if (found != windowIcons.end()) return found->second;
+        if (auto bmp = BitmapFromIcon(icon)) {
+            windowIcons.emplace(icon, bmp);
+            return bmp;
+        }
     }
 
     if (exePath.empty()) return nullptr;
@@ -40,7 +48,7 @@ std::shared_ptr<Gdiplus::Bitmap> GetIcon(HWND h, const std::wstring& exePath) {
         bmp = BitmapFromIcon(sfi.hIcon);
         DestroyIcon(sfi.hIcon);
     }
-    s_exeIconCache[exePath] = bmp;
+    if (bmp) s_exeIconCache.emplace(exePath, bmp);
     return bmp;
 }
 
@@ -114,16 +122,25 @@ std::vector<WindowEntry> EnumerateWindows(HWND foreground, int iconPx, HMONITOR 
     HWND activeRoot = foreground ? GetAncestor(foreground, GA_ROOTOWNER) : nullptr;
     std::vector<WindowEntry> result;
     result.reserve(handles.size());
+    std::unordered_map<DWORD, std::wstring> paths;
+    WindowIcons windowIcons;  // 同批次共享图标，下一次枚举重新获取窗口图标
     for (HWND h : handles) {
         WindowEntry e;
         e.hwnd = h;
         e.title = GetWindowTitle(h);
-        e.exePath = ToLower(GetProcessPath(AppWindowTarget(h)));
+        HWND target = AppWindowTarget(h);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(target, &pid);
+        if (pid) {
+            std::wstring& path = paths[pid];
+            if (path.empty()) path = ToLower(GetProcessPath(target));
+            e.exePath = path;
+        }
         e.aumid = GetWindowAumid(h);
         // 应用商店应用的框架窗口给不出应用自己的图标，按 AppUserModelID 向外壳要（带缓存）
         if (!e.aumid.empty() && GetClassNameStr(h) == L"ApplicationFrameWindow")
             e.icon = ShellItemIcon(L"shell:AppsFolder\\" + e.aumid, iconPx);
-        if (!e.icon) e.icon = GetIcon(h, e.exePath);
+        if (!e.icon) e.icon = GetIcon(h, e.exePath, windowIcons);
         e.active = h == foreground || h == activeRoot;
         result.push_back(std::move(e));
     }

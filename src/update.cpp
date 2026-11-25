@@ -22,7 +22,11 @@ constexpr wchar_t kApiHost[] = L"api.github.com";
 constexpr wchar_t kApiPath[] = L"/repos/DM74164/TaskbarPopup/releases/latest";
 constexpr wchar_t kRepoUrl[] = L"https://github.com/DM74164/TaskbarPopup/";  // 下载页面只认这个仓库下的地址
 constexpr wchar_t kReleasesUrl[] = L"https://github.com/DM74164/TaskbarPopup/releases/latest";
-constexpr char kZipName[] = "TaskbarPopup.zip";  // 发布里要有这个文件才算能下载
+#if defined(_M_ARM64) || defined(__aarch64__)
+constexpr char kZipName[] = "TaskbarPopup-arm64.zip";
+#else
+constexpr char kZipName[] = "TaskbarPopup.zip";
+#endif
 constexpr wchar_t kUserAgent[] = L"TaskbarPopup/" TP_VERSION_STR;  // GitHub API 不接受没有 User-Agent 的请求
 constexpr UINT kFirstCheckMs = 15 * 1000;            // 启动后先等一会儿，别和开机时的其他程序抢网络
 constexpr UINT kIntervalMs = 24 * 60 * 60 * 1000;   // 之后每天一次
@@ -252,7 +256,7 @@ Result Fetch() {
         return r;
     }
     const wchar_t headers[] = L"Accept: application/vnd.github+json\r\n";
-    if (!WinHttpSendRequest(request.h, headers, static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+    if (!WinHttpSendRequest(request.h, headers, ARRAYSIZE(headers) - 1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request.h, nullptr)) {
         r.error = NetError(L"发送请求");
         return r;

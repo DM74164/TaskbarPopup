@@ -946,7 +946,7 @@ void Done(UINT session) {
 }
 
 DWORD WINAPI ThreadProc(LPVOID ready) {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     MSG msg;
     PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);  // 建好消息队列以后才能收 PostThreadMessage
     SetEvent(static_cast<HANDLE>(ready));
@@ -1046,7 +1046,7 @@ DWORD WINAPI ThreadProc(LPVOID ready) {
     s_cover = nullptr;
     ReleaseShot();
     Clear();
-    CoUninitialize();
+    if (SUCCEEDED(co)) CoUninitialize();
     return 0;
 }
 

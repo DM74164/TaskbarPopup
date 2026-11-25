@@ -14,6 +14,16 @@
 #include <cwchar>
 
 namespace app {
+
+bool IsNativeFullscreen(HWND hwnd, const RECT& rect, const RECT& screen) {
+    if (rect.left > screen.left || rect.top > screen.top || rect.right < screen.right || rect.bottom < screen.bottom)
+        return false;
+    if (!IsZoomed(hwnd)) return true;
+    // 有些游戏进入全屏时仍带着最大化标记，但已经去掉了标题栏和可调整的边框。
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    return (style & WS_POPUP) && (style & WS_CAPTION) != WS_CAPTION && !(style & WS_THICKFRAME);
+}
+
 namespace {
 
 // 被拉伸过的窗口
@@ -486,6 +496,7 @@ bool PlanStretch(HWND hwnd, HMONITOR monitor, RECT& want, bool direct = false) {
     MONITORINFO mi = {sizeof(mi)};
     RECT cur;
     if (!GetMonitorInfoW(monitor, &mi) || !GetWindowRect(hwnd, &cur)) return false;
+    if (IsNativeFullscreen(hwnd, cur, mi.rcMonitor)) return false;
     LONG tol = Tolerance(monitor);
 
     Attempt& a = AttemptFor(hwnd);
@@ -608,8 +619,9 @@ void FitArranged(HWND hwnd, const RECT& cur, const ShrinkContext& c) {
 BOOL CALLBACK ShrinkProc(HWND hwnd, LPARAM param) {
     const ShrinkContext& c = *reinterpret_cast<const ShrinkContext*>(param);
     RECT cur, border;
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsOwnProcess(hwnd)) return TRUE;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsCloaked(hwnd) || IsOwnProcess(hwnd)) return TRUE;
     if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) != c.monitor || !GetWindowRect(hwnd, &cur)) return TRUE;
+    if (IsNativeFullscreen(hwnd, cur, c.screen)) return TRUE;
     if (!IsZoomed(hwnd)) {
         if (IsArranged(hwnd)) FitArranged(hwnd, cur, c);
         return TRUE;
@@ -637,8 +649,10 @@ void ShrinkBack(const Stretched& s) {
     MONITORINFO mi = {sizeof(mi)};
     RECT cur;
     // 已经还原、最小化，或者挪到别的屏幕（系统会按那块屏重新最大化）的就不管了
-    if (IsWindow(s.hwnd) && IsZoomed(s.hwnd) && MonitorFromWindow(s.hwnd, MONITOR_DEFAULTTONEAREST) == s.monitor &&
-        GetMonitorInfoW(s.monitor, &mi) && GetWindowRect(s.hwnd, &cur) && Near(cur, s.rect, Tolerance(s.monitor))) {
+    if (IsWindow(s.hwnd) && !IsIconic(s.hwnd) && !IsCloaked(s.hwnd) && IsZoomed(s.hwnd) &&
+        MonitorFromWindow(s.hwnd, MONITOR_DEFAULTTONEAREST) == s.monitor && GetMonitorInfoW(s.monitor, &mi) &&
+        GetWindowRect(s.hwnd, &cur) && !IsNativeFullscreen(s.hwnd, cur, mi.rcMonitor) &&
+        Near(cur, s.rect, Tolerance(s.monitor))) {
         RECT r = Inflate(mi.rcWork, s.border);
         if (!EqualRect(&r, &cur)) {
             SetWindowRectAsync(s.hwnd, r);
@@ -860,16 +874,17 @@ bool IsOtherTarget(HWND hwnd) {
     return false;
 }
 
-// 每块屏（except 以外）找一个最大化或铺满整块屏的应用窗口
-std::vector<OtherTarget> FindOtherTargets(HMONITOR except) {
+// 按窗口叠放顺序，每块屏（except 以外）找一个最大化或铺满整块屏的应用窗口
+std::vector<OtherTarget> FindOtherTargets(HMONITOR except, HWND skip = nullptr) {
     struct Ctx {
         HMONITOR except;
+        HWND skip;
         std::vector<OtherTarget> found;
-    } ctx = {except, {}};
+    } ctx = {except, skip, {}};
     EnumWindows(
         [](HWND hwnd, LPARAM param) -> BOOL {
             auto& c = *reinterpret_cast<Ctx*>(param);
-            if (!IsTaskbarWindow(hwnd) || IsIconic(hwnd)) return TRUE;
+            if (hwnd == c.skip || !IsTaskbarWindow(hwnd) || IsIconic(hwnd)) return TRUE;
             HMONITOR m = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
             if (!m || m == c.except) return TRUE;
             for (const OtherTarget& o : c.found)
@@ -887,6 +902,13 @@ std::vector<OtherTarget> FindOtherTargets(HMONITOR except) {
         },
         reinterpret_cast<LPARAM>(&ctx));
     return ctx.found;
+}
+
+OtherTarget FindRemainingTarget(HMONITOR preferred, HWND foreground) {
+    const auto targets = FindOtherTargets(nullptr, foreground);
+    for (const OtherTarget& target : targets)
+        if (target.monitor == preferred) return target;
+    return targets.empty() ? OtherTarget{} : targets.front();
 }
 
 void SetOtherTargets(const std::vector<OtherTarget>& others) {
@@ -914,9 +936,14 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
                              : HasTaskbar(monitor);
     bool userAutoHide = !s_ownAutoHide && Taskbar_AutoHideOn();  // 用户自己开着自动隐藏
     // 别的屏幕上也有任务栏时，肯直接拉伸的窗口不开自动隐藏（见 NeedsAutoHide）。已经开了的接着用
-    auto canDirect = [&](HWND w) { return w && IsZoomed(w) && !NeedsAutoHide(w); };
+    auto nativeFullscreenOn = [](HWND w, HMONITOR m) {
+        RECT rect;
+        MONITORINFO mi = {sizeof(mi)};
+        return w && GetWindowRect(w, &rect) && GetMonitorInfoW(m, &mi) && IsNativeFullscreen(w, rect, mi.rcMonitor);
+    };
+    bool maximized = IsZoomed(window) && !nativeFullscreenOn(window, monitor);
     bool directCtx = !always && !s_ownAutoHide && !userAutoHide && g_settings.keepOtherTaskbars && taskbars.size() > 1;
-    bool direct = hasTaskbar && directCtx && canDirect(window);
+    bool direct = hasTaskbar && directCtx && maximized && !NeedsAutoHide(window);
     RECT want = {};
     HWND stretch = PlanStretch(window, monitor, want, direct) ? window : nullptr;
     if (IsRefused(window)) return false;
@@ -925,7 +952,7 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
     // 这块屏上有任务栏、自动隐藏又不是用户自己开着的：要打开自动隐藏，工作区才会占满整块屏。
     // 无边框全屏的窗口（游戏、全屏视频）本来就盖住了任务栏，不为它去开；已经开着的接着用。
     // 一直隐藏任务栏时所有屏上的任务栏都藏，有任务栏就开
-    bool autoHide = hasTaskbar && !direct && (s_ownAutoHide || ((always || IsZoomed(window)) && !userAutoHide));
+    bool autoHide = hasTaskbar && !direct && (s_ownAutoHide || ((always || maximized) && !userAutoHide));
     // 直接拉伸的情况下（全屏的游戏、视频在前台时也一样）别的屏幕上直接拉伸着的窗口接着藏
     bool directOthers = directCtx && !autoHide;
     // 要（重新）让动画线程打开自动隐藏：刚开始用，或者刚让它去关又反悔了（它可能已经关了）
@@ -952,7 +979,10 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
         others = FindOtherTargets(window ? monitor : nullptr);
         if (directOthers)
             others.erase(std::remove_if(others.begin(), others.end(),
-                                        [&](const OtherTarget& o) { return IsZoomed(o.window) && !canDirect(o.window); }),
+                                        [&](const OtherTarget& o) {
+                                            return IsZoomed(o.window) && !nativeFullscreenOn(o.window, o.monitor) &&
+                                                   NeedsAutoHide(o.window);
+                                        }),
                          others.end());
     }
     SetOtherTargets(others);
@@ -1020,6 +1050,15 @@ bool EnterHiddenMode(HMONITOR monitor, HWND window) {
             s_hidden.push_back({tb, now});
             SyncHiddenFlag();
             Log(L"隐藏任务栏 %p%ls", static_cast<void*>(tb), own ? L"" : L"（这块屏上也有最大化的窗口）");
+        }
+        if (animate) {
+            // 游戏自己已经盖满屏幕：直接藏真任务栏，避免把置顶的动画截图叠到全屏窗口上。
+            if (tbMonitor == monitor) {
+                animate = !nativeFullscreenOn(window, monitor);
+            } else {
+                for (const OtherTarget& o : others)
+                    if (o.monitor == tbMonitor && nativeFullscreenOn(o.window, o.monitor)) animate = false;
+            }
         }
         if (std::find(s_everHidden.begin(), s_everHidden.end(), tb) == s_everHidden.end()) s_everHidden.push_back(tb);
         if (autoHide) s_autoHideAskedAt = now;
@@ -1242,21 +1281,18 @@ void EvaluateNow(bool enforce) {
     // 前台换成了普通窗口（比如从迷你任务栏打开的应用），但让任务栏隐藏的那个窗口还最大化着、
     // 露在后面：接着按它来，任务栏照样藏着，不然它会缩回去。等它被最小化、还原或关掉再放出任务栏。
     // 前台是最大化时不隐藏任务栏的程序、而且它自己最大化着时除外：用户要的是它在前台时看得到任务栏
-    bool excludedOnTop = fg && IsZoomed(fg) && IsExcluded(fg);
+    bool excludedOnTop = !target && fg && (IsZoomed(fg) || IsFullscreenApp(fg)) && IsExcluded(fg);
     if (!target && fg && !excludedOnTop && s_targetWindow && fg != s_targetWindow && IsWindow(s_targetWindow) &&
         GetTargetMonitor(s_targetWindow) == s_targetMonitor) {
         target = s_targetMonitor;
         window = s_targetWindow;
     }
-    // 前台的窗口还原了，别的屏幕上还有一起藏着任务栏的最大化窗口：改按它来，那块屏的任务栏接着藏着，
-    // 不跟着一起放出来。前台是最大化时不隐藏任务栏的程序时除外（理由同上）
-    if (!target && !excludedOnTop) {
-        for (const OtherTarget& o : s_others) {
-            if (o.window == fg || !IsWindow(o.window) || GetTargetMonitor(o.window) != o.monitor) continue;
-            target = o.monitor;
-            window = o.window;
-            break;
-        }
+    // 当前目标还原、最小化或关掉时，重新找仍然全屏的窗口。只看 s_others 会漏掉同一块屏上被它盖住的窗口。
+    // 优先接回这块屏上的窗口，避免先把任务栏放回来，等用户点一下才重新藏。
+    if (!target && !excludedOnTop && s_targetWindow) {
+        OtherTarget remaining = FindRemainingTarget(s_targetMonitor, fg);
+        target = remaining.monitor;
+        window = remaining.window;
     }
     // 一直隐藏任务栏：没有要铺满的窗口也照样藏着，按主屏来（它一定有任务栏）
     if (!target && g_settings.alwaysHideTaskbar) {
@@ -1536,6 +1572,8 @@ void Taskbar_EmergencyRestore(bool crash) {
 }
 
 bool Fullscreen_TaskbarHidden() { return !s_hidden.empty(); }
+
+bool Fullscreen_TaskbarHiddenOn(HMONITOR monitor) { return monitor && HiddenOn(monitor); }
 
 void Fullscreen_DisplayChanged() {
     // 屏幕的句柄、位置可能都变了：任务栏在哪块屏上、屏幕的名字重新认。

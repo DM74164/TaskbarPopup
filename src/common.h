@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,16 +44,37 @@ namespace app {
 enum GlassStyle { kGlassLiquid, kGlassWin11 };
 enum Theme { kThemeSystem, kThemeLight, kThemeDark };     // 跟随系统 / 浅色 / 深色
 // 弹出迷你任务栏 / 固定前台的小窗口 / 把窗口移到下一块屏幕 / 在下一块屏幕弹出迷你任务栏 / 只弹出底部的 / 只弹出侧边的
-enum HotkeyId { kHotkeyPopup, kHotkeyPin, kHotkeyMove, kHotkeyNextScreen, kHotkeyBottom, kHotkeySide, kHotkeyCount };
+enum HotkeyId {
+    kHotkeyPopup, kHotkeyPin, kHotkeyMove, kHotkeyNextScreen, kHotkeyBottom, kHotkeySide,
+    kHotkeyLeft, kHotkeyRight, kHotkeySettings, kHotkeyCount
+};
 enum TrayStyle { kTrayStacked, kTrayRow };                  // 托盘图标：小图标两行堆叠 / 和应用一样大横着排
 // 在底边时的对齐：跟随系统任务栏的对齐方式 / 居中 / 靠左 / 靠右 / 自定义（编辑模式里拖到的位置，见 popupOffset）。
 // 竖排时只看是不是自定义，别的都是上下居中
 enum PopupAlign { kAlignSystem, kAlignCenter, kAlignLeft, kAlignRight, kAlignCustom };
 enum Language { kLangSystem, kLangChinese, kLangEnglish };  // 界面语言
 // 迷你任务栏弹在屏幕哪条边：底边横排 / 左边、右边竖排 / 底部和左边、底部和右边两条一起弹出（各放各的模块）
-enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight, kEdgeBottomLeft, kEdgeBottomRight };
-inline bool DualEdge(int edge) { return edge == kEdgeBottomLeft || edge == kEdgeBottomRight; }
-inline int DualSide(int edge) { return edge == kEdgeBottomRight ? kEdgeRight : kEdgeLeft; }  // 两条一起时侧边那条在哪边
+enum PopupEdge { kEdgeBottom, kEdgeLeft, kEdgeRight, kEdgeBottomLeft, kEdgeBottomRight, kEdgeAll };
+constexpr int kPopupPanelCount = 3;
+constexpr int PopupBarCount(int placed) {
+    return placed == kEdgeAll ? 3 : placed == kEdgeBottomLeft || placed == kEdgeBottomRight ? 2 : 1;
+}
+constexpr int PopupPanelEdge(int placed, int panel) {
+    int main = PopupBarCount(placed) > 1 ? kEdgeBottom : placed;
+    int second = main != kEdgeBottom ? kEdgeBottom : placed == kEdgeBottomRight ? kEdgeRight : kEdgeLeft;
+    if (panel == 0) return main;
+    if (panel == 1) return second;
+    return main == kEdgeRight || second == kEdgeRight ? kEdgeLeft : kEdgeRight;
+}
+constexpr int PopupPanelForEdge(int placed, int edge) {
+    for (int panel = 0; panel < kPopupPanelCount; ++panel)
+        if (PopupPanelEdge(placed, panel) == edge) return panel;
+    return -1;
+}
+constexpr bool PopupHasEdge(int placed, int edge) {
+    int panel = PopupPanelForEdge(placed, edge);
+    return panel >= 0 && panel < PopupBarCount(placed);
+}
 enum PopupMonitor { kPopupAtCursor, kPopupAtActive };  // 迷你任务栏弹在哪块屏幕上：鼠标所在的 / 前台窗口所在的
 // 迷你任务栏列哪些屏幕上的窗口：跟着系统任务栏的设置 / 所有屏幕上的 / 只列它所在那块屏幕上的
 enum PopupWindows { kWindowsSystem, kWindowsAll, kWindowsOwnScreen };
@@ -86,7 +108,7 @@ struct FreeBox {
 };
 // 自由布局里能摆的东西：各模块（Module），再加上下面那行（侧边时最下面）的调节条、Wi-Fi 蓝牙按钮
 constexpr int kFreeLevels = kModuleCount, kFreeRadios = kModuleCount + 1, kFreeItems = kModuleCount + 2;
-// 迷你任务栏显示哪些、按什么顺序：放在底部和侧边时各一份（Settings::modules 的下标见 ModuleSide）
+// 底部、左侧和右侧各有一份显示项目、顺序和自由布局。
 struct ModuleSet {
     // 开始按钮、窗口格子：只有底部和侧边两条一起弹出、又是自由布局时才能隐藏（放到另一条上），别的时候总是显示
     bool start = true;
@@ -113,17 +135,22 @@ struct ModuleSet {
     int freeScale = 100;
     FreeBox box[kFreeItems];
 };
-enum ModuleSide { kSideBottom, kSideEdge };
-// 这条边用哪一份。底部和侧边一起（设置窗口里选的位置）时先说底部那份
-inline int ModuleSideOf(int edge) { return edge == kEdgeBottom || DualEdge(edge) ? kSideBottom : kSideEdge; }
+enum ModuleSide { kSideBottom = kEdgeBottom, kSideLeft = kEdgeLeft, kSideRight = kEdgeRight, kSideCount };
+constexpr int ModuleSideOf(int edge) { return PopupPanelEdge(edge, 0); }
+struct SideBarPlacement {
+    int align = kAlignSystem;
+    int offset = 500;
+    int length = 0;
+    int radius = 22;
+};
 struct Settings {
     bool autoHideOnFullscreen = true;  // 窗口最大化或全屏时隐藏任务栏
     bool alwaysHideTaskbar = false;    // 一直隐藏任务栏：没有窗口最大化时也藏着，鼠标碰到屏幕边上也不弹出
     bool longPressPopup = true;
     int longPressMs = 1000;
     bool showPinnedApps = true;  // 迷你任务栏里显示固定在任务栏的应用
-    ModuleSet modules[2];        // 迷你任务栏放在底部、侧边时各显示哪些，见 ModuleSide
-    std::wstring savedLayout[2];  // 编辑模式里“保存当前布局”存下的（底部、侧边各一份，见 ModuleSetText），空 = 没存过
+    ModuleSet modules[kSideCount];
+    std::wstring savedLayout[kSideCount];  // 编辑模式里“保存当前布局”存下的，空 = 没存过
     int trayStyle = 0;           // 托盘图标的样式，见 TrayStyle
     int popupScale = 100;        // 迷你任务栏大小，百分比（在显示器缩放的基础上再乘），编辑模式里拖面板的边改
     int popupRadius = 22;        // 迷你任务栏的圆角半径，像素（按 100% 大小算）
@@ -131,11 +158,7 @@ struct Settings {
     int popupEdge = kEdgeBottom;    // 迷你任务栏弹在哪条边，见 PopupEdge
     int popupAlign = kAlignSystem;  // 在底边时的对齐，见 PopupAlign
     int popupOffset = 500;          // 自定义位置：面板中心在那条屏幕边上的千分之几处（横排从左数，竖排从上数）
-    // 另一条迷你任务栏（底部和侧边一起时侧边那条，或者快捷键单独呼出的另一条边上的）自己的对齐、自定义位置、长度
-    int secondAlign = kAlignSystem;
-    int secondOffset = 500;
-    int secondLength = 0;
-    int secondRadius = 22;  // 另一条的圆角（只有一条时设置里的“圆角”两个一起改）
+    SideBarPlacement sideBar[kSideCount - 1];  // 左右侧栏，下标为物理边减 kEdgeLeft
     int popupMonitor = kPopupAtCursor;  // 弹在哪块屏幕上，见 PopupMonitor
     bool popupPerScreen = false;        // 每块屏幕分别设置位置和对齐（screens），没设过的屏幕用上面两项
     std::vector<ScreenPlace> screens;
@@ -148,7 +171,8 @@ struct Settings {
     UINT hotkey[kHotkeyCount] = {};       // 快捷键（见 MakeHotkey），下标是 HotkeyId，0 = 没设
     bool hotkeyHold[kHotkeyCount] = {};   // 长按触发，否则单按
     int hotkeyHoldMs[kHotkeyCount] = {kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs,
-                                      kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs};  // 长按要按住多久
+                                      kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs,
+                                      kDefaultLongPressMs, kDefaultLongPressMs, kDefaultLongPressMs};
     int glassStyle = kGlassLiquid;  // 迷你任务栏和设置窗口的材质
     int theme = kThemeSystem;       // 深色还是浅色
     int glassTransparency = kDefaultGlassTransparency;  // 迷你任务栏液态玻璃的透明度，百分比，深浅色共用
@@ -201,7 +225,11 @@ extern HINSTANCE g_instance;
 extern HWND g_mainWnd;  // 隐藏的主消息窗口，托盘和计时器都挂在它上面
 extern Settings g_settings;
 // 底部、侧边随便哪一份开着这一项（托盘、媒体这些在后台读的，有一份要就得读）
-inline bool AnyModuleSet(bool ModuleSet::*item) { return g_settings.modules[0].*item || g_settings.modules[1].*item; }
+inline bool AnyModuleSet(bool ModuleSet::*item) {
+    for (const ModuleSet& mods : g_settings.modules)
+        if (mods.*item) return true;
+    return false;
+}
 
 std::wstring SettingsDir();
 std::wstring SettingsFile();  // SettingsDir() 下的 settings.ini
@@ -211,6 +239,8 @@ void SaveSettings();
 // 一份布局（显示哪些、顺序、大小、自由布局）写成一串字 / 从一串字读回来（读不出返回 false）
 std::wstring ModuleSetText(const ModuleSet& mods);
 bool ParseModuleSetText(const std::wstring& text, ModuleSet& mods);
+const Settings& ThreeBarDefaults();
+bool ApplyThreeBarDefaultsIfPristine(Settings& settings);
 // 外观方案：设置文件里的 [Look1] ~ [Look8]，存着外观、模块和位置相关的那些键
 constexpr int kMaxLookPresets = 8;
 std::vector<int> LookPresets();  // 存着的方案编号，从小到大
@@ -247,9 +277,8 @@ constexpr UINT WM_APP_LONGPRESS = WM_APP + 2;  // 钩子线程通知：Win 键�
 constexpr UINT WM_APP_AUTOHIDE_OFF = WM_APP + 3;  // 动画线程通知：关自动隐藏的结果，wParam 是请求编号，lParam 非 0 = 关掉了
 constexpr UINT WM_APP_AUTOHIDE_ON = WM_APP + 4;   // 动画线程通知：开自动隐藏的结果，wParam 是请求编号，lParam 非 0 = 开了
 constexpr UINT WM_APP_UPDATE = WM_APP + 5;        // 检查更新的线程通知：结果出来了，交给 Update_OnResult
-constexpr UINT WM_APP_TRAY_LAUNCH = WM_APP + 7;   // 点托盘图标的线程通知：找不到图标，再启动一次程序，交给 Tray_OnMessage
+constexpr UINT WM_APP_TRAY_LAUNCH = WM_APP + 7;   // 左键找不到图标时通知主窗口启动程序，lParam 是程序路径
 constexpr UINT WM_APP_WINTAP = WM_APP + 8;        // 钩子线程通知：任务栏藏着时短按了 Win（wParam 是键码），交给 Popup_StartMenu
-constexpr UINT WM_APP_TRAY_MENU = WM_APP + 9;     // 点托盘图标的线程通知：程序自己的菜单弹不出来（发给 Tray_Click 的 notify）
 constexpr UINT WM_APP_TRAY_PEEK = WM_APP + 10;    // 点托盘图标的线程要求：wParam 1 = 临时显示藏着的任务栏 lParam，0 = 藏回去，
                                                   // 2 = 只记下（资源管理器会自己把它升上来）。交给 Fullscreen_PeekTaskbar，返回 1 = 是本程序藏的
 
@@ -269,6 +298,8 @@ bool Fullscreen_PeekTaskbar(HWND tb, int mode);
 void Taskbar_RestoreAll();        // 启动、退出时：显示所有任务栏，关掉本程序打开的自动隐藏，窗口和桌面图标还原
 void Taskbar_EmergencyRestore(bool crash = true);  // 崩溃时：只把任务栏显示出来、关掉自动隐藏
 bool Taskbar_IsShownOn(HMONITOR monitor);  // 这块屏幕上的任务栏现在是否显示着（没被本程序藏起来）
+bool Fullscreen_TaskbarHiddenOn(HMONITOR monitor);  // 本程序在这块屏幕上有隐藏任务栏
+bool IsNativeFullscreen(HWND hwnd, const RECT& rect, const RECT& screen);
 void Fullscreen_LogState();                // 把系统版本、各屏幕的工作区、任务栏位置写进诊断日志
 // 系统的“自动隐藏任务栏”设置（对所有屏幕上的任务栏都生效）。可以在任何线程上调用。
 // Taskbar_SetAutoHide 返回设置现在是否就是要的状态（资源管理器没在运行时返回 false）
@@ -408,11 +439,18 @@ void RunAsAdmin(HWND owner, const std::wstring& file);    // owner：UAC 提示�
 void OpenFileLocation(const std::wstring& path);          // 在资源管理器里打开所在文件夹并选中它
 
 // ---------------- 窗口缩略图（thumbnail.cpp）----------------
-// 在 at 旁边显示 source 的实时缩略图（见 ThumbPlace），不超出 bounds；DWM 不给缩略图时返回 false
+// 在 at 旁显示一组实时缩略图（见 ThumbPlace），不超出 bounds。
 // 缩略图放在哪：kThumbAbove 底边中点对着 at；kThumbRight 左边对着 at.x、顶边在 at.y；kThumbLeft 右边对着 at.x、顶边在 at.y
 enum ThumbPlace { kThumbAbove, kThumbRight, kThumbLeft };
-bool Thumb_Show(HWND source, POINT at, int place, const RECT& bounds, float scale, bool light);
-void Thumb_Hide();
+enum class ThumbEvent { Enter, Leave, Activate, Close };
+constexpr UINT WM_APP_THUMB = WM_APP + 22;  // wParam 是 ThumbEvent，lParam 是要切换或关闭的窗口
+bool Thumb_Show(HWND owner, const std::vector<HWND>& sources, POINT at, ThumbPlace place, const RECT& bounds,
+                float scale, bool light);
+bool Thumb_IsShown(HWND owner);
+bool Thumb_ContainsPoint(HWND owner, POINT screen);
+bool Thumb_Scroll(HWND owner, int delta);
+void Thumb_RemoveWindow(HWND owner, HWND source);
+void Thumb_Hide(HWND owner);
 void Thumb_Destroy();
 
 // ---------------- 系统托盘里隐藏的图标（tray.cpp）----------------
@@ -421,22 +459,20 @@ struct TrayApp {
     std::shared_ptr<Gdiplus::Bitmap> icon;       // 托盘上的图标，原来的大小（不缩放，画的时候按整像素缩放）
     std::shared_ptr<Gdiplus::Bitmap> iconLarge;  // 程序本身的高清图标，和托盘图标看上去一样才有：比 icon 画得大时用
     bool promoted = false;  // 用户设成在任务栏上一直显示
-    DWORD pid = 0;          // 图标属于的进程（Win10 读得到；Win11 只有程序路径，为 0）
+    std::vector<GUID> iconGuids;  // 同一个程序可能留下多条托盘图标记录
+};
+struct TrayMenuAnchor {
+    POINT at{};    // 点击的格子旁，屏幕坐标
+    int edge = -1;
 };
 void Tray_Refresh();                    // 在后台重新读一遍（已经在读就不管）
 std::vector<TrayApp> Tray_Hidden();     // 最近读到的、正在运行、收在“隐藏的图标”里的
-// 在后台线程上去系统托盘里点它。右键弹不出程序自己的菜单时给 notify（为空则是主窗口）发 WM_APP_TRAY_MENU，
-// lParam 是 new 出来的 TrayApp，收到的一方负责 delete
-void Tray_Click(const TrayApp& app, bool right, HWND notify = nullptr);
+void Tray_Click(const TrayApp& app, bool right, TrayMenuAnchor anchor = {});
+bool Tray_IsMenuWindow(HWND hwnd);
+bool Tray_MenuShowing();
 void Tray_ShowHidden();                 // 展开系统的“隐藏的图标”
 bool Tray_Busy();                       // 还在系统托盘里找、点
 void Tray_RepairVeil();                 // 点托盘图标时调透明的任务栏、隐藏的图标没放回（崩溃、被结束）：放回来
-// 迷你任务栏自己的菜单：打开、打开文件所在的位置、结束程序，appMenu 时再加一项“程序菜单”。
-// 由 owner 在屏幕坐标 at 弹出（默认底边对着它）。选了别的项时先调用 picked（可以为空，比如收起迷你任务栏）再去做；
-// 返回 true = 选了“程序菜单”，由调用的一方去系统托盘里右键它
-bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu = false,
-               UINT align = TPM_BOTTOMALIGN);  // align：TrackPopupMenu 的对齐方式
-bool Tray_OnMessage(UINT msg, LPARAM lParam);  // 主窗口收到 WM_APP_TRAY_LAUNCH、WM_APP_TRAY_MENU 时交给它
 
 // ---------------- 迷你任务栏 ----------------
 void Popup_Init();
@@ -444,9 +480,8 @@ void Popup_Destroy();
 void Popup_Show();
 void Popup_Hide();
 void Popup_Toggle();
-// 只弹出 / 收起底部（side 为 false）或侧边的那一条（快捷键）。底部和侧边一起时就是其中一条，
-// 只设了一条边时另一条边弹出另一份模块
-void Popup_ToggleEdge(bool side);
+void Popup_ToggleEdge(PopupEdge edge);  // 只弹出 / 收起左侧、右侧或底部
+void Popup_ToggleSide();                // 原“侧边”快捷键，按当前位置设置选择左侧或右侧
 void Popup_Edit();  // 弹出来直接进编辑模式（设置里的“编辑”按钮）
 // 任务栏藏着时短按了 Win：先弹出迷你任务栏，弹完再打开开始菜单（开始菜单开着时迷你任务栏一直在）；
 // 任务栏没藏着、开始菜单已经开着时照常补发 Win
@@ -459,21 +494,22 @@ struct PopupLook {
     int style = kGlassLiquid;  // GlassStyle
     bool light = false;        // 浅色玻璃（自定义底色时按底色的深浅定）
     int transparency = kDefaultGlassTransparency;
-    int radius = 22, radius2 = 22;  // 主的那条、另一条的圆角（见 Settings::secondRadius）
+    int radius = 22;  // 底栏圆角
+    SideBarPlacement sideBar[kSideCount - 1];
     int iconSize = 100, iconGap = kDefaultIconGap;
     bool showTitle = true;
     bool customTint = false, customAccent = false;
     COLORREF tint = 0, accent = 0;
     // 显示哪些（设置窗口里改开关时预览）
-    ModuleSet modules[2];
+    ModuleSet modules[kSideCount];
     bool clockSeconds = false, clockWeekday = false, clockDate = true;
     int trayStyle = 0;
 };
 PopupLook LookFromSettings();  // 现在的设置对应的外观
 void Popup_PreviewLook(const PopupLook& look);
 void Popup_EndPreview();  // 马上收起预览
-// 设置里换了托盘图标的样式：sets（底部、侧边两份）里自由布局的托盘框跟着拉长成一行或缩成正方形，免得框的样子又把样式换回去
-void Popup_FitTrayBoxes(ModuleSet sets[2], int style);
+// 换托盘样式时，三份自由布局的托盘框也跟着变。
+void Popup_FitTrayBoxes(ModuleSet (&sets)[kSideCount], int style);
 void Popup_Configure();   // 按设置开关“鼠标停在屏幕边上时弹出”
 void Popup_Refresh();     // 开着的话重画（比如要提醒的窗口变了）
 HMONITOR Popup_Monitor();  // 迷你任务栏开着（不算预览）时在哪块屏幕上，没开着为空
@@ -616,6 +652,11 @@ struct GlassShot {
     std::vector<DWORD> blur;  // 模糊、提高饱和度以后的
 };
 
+struct GlassSnapshot {
+    RECT area{};
+    std::shared_ptr<const std::vector<DWORD>> pixels;
+};
+
 // 截下面板后面的屏幕内容，模糊并提高饱和度；按圆角矩形算出边缘的折射、色散、高光和阴影。
 // 画出来的玻璃是不透明的（背景已经画进去了），所以要和截图时的屏幕位置对齐。
 class Glass {
@@ -623,7 +664,7 @@ public:
     // 截 window 四周（再多一圈）的屏幕，模糊、提高饱和度（style：GlassStyle，Win11 原版模糊得更厉害）。
     // 不碰任何成员，可以在后台线程里调用。
     // same 不为空、范围相同、截到的和它一模一样（或者截图失败）时不做后面的处理，返回 false
-    static bool Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassShot* same = nullptr);
+    static bool Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassSnapshot* same = nullptr);
     // 截下 window（要画玻璃的窗口在屏幕上的位置）后面的背景，按现在的材质处理
     void Capture(const RECT& window, float scale);
     // 背景换成更大的 window 后面的：旧截图范围里那块用旧的原图（窗口自己正盖在上面），其余从屏幕上截。
@@ -631,7 +672,7 @@ public:
     void Extend(const RECT& window);
     // 换上一张截好的背景
     void Adopt(GlassShot&& shot, float scale);
-    const std::vector<DWORD>& Raw() const { return m_raw; }
+    GlassSnapshot Snapshot() const { return {m_area, m_raw}; }
     void SetLight(bool light) {  // 浅色玻璃配深色文字，深色玻璃配浅色文字
         m_light = light;
         ++m_version;
@@ -674,7 +715,6 @@ public:
         m_flipCell = cell;
         return true;
     }
-    const RECT& Area() const { return m_area; }  // 背景截图在屏幕上的范围
     // 按面板静止时的形状预先算好每个像素的材质（覆盖率、阴影、折射位移、高光），尺寸不变时直接返回。
     // width×height：窗口像素大小；panel：面板在窗口里的位置；radius：圆角半径
     void Prepare(int width, int height, const Gdiplus::RectF& panel, float radius);
@@ -702,7 +742,7 @@ private:
     void SampleBevel(float x, float y, const Texel& t, float rgb[3]) const;
     DWORD Fetch(int x, int y) const;
 
-    std::vector<DWORD> m_raw;   // 截下来的原图，再截时比较有没有变
+    std::shared_ptr<const std::vector<DWORD>> m_raw;  // 后台比较时共享原图
     std::vector<DWORD> m_blur;  // 模糊后的背景
     RECT m_area = {};           // 背景截图在屏幕上的范围
     int m_w = 0, m_h = 0;
@@ -723,6 +763,31 @@ private:
     float m_texRadius = 0;
     float m_texScale = 0;
     int m_texStyle = -1;
+};
+
+// 窗口线程提交和取结果，截图在线程池里进行。完成消息只唤醒窗口，结果由任务自己持有。
+class GlassCapture {
+public:
+    struct Result {
+        UINT generation;
+        RECT window;
+        float scale;
+        int style;
+        GlassShot shot;
+        bool changed = false;
+    };
+
+    GlassCapture() = default;
+    GlassCapture(GlassCapture&&) noexcept = default;
+    GlassCapture& operator=(GlassCapture&&) noexcept = default;
+    bool Start(HWND window, UINT message, UINT generation, RECT area, float scale, const Glass& glass, bool compare = true);
+    bool Pending() const { return m_job != nullptr; }
+    std::optional<Result> Take();
+
+private:
+    struct Job;
+    static void CALLBACK Run(PTP_CALLBACK_INSTANCE instance, void* context);
+    std::shared_ptr<Job> m_job;
 };
 
 // 按颜色选项（Theme）决定用不用浅色玻璃。taskbar：跟随系统时看“Windows 模式”（任务栏、开始菜单），

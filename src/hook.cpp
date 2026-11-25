@@ -86,7 +86,8 @@ void StopTimer() {
     s_timer = 0;
 }
 
-void CALLBACK OnLongPressTimer(HWND, UINT, UINT_PTR, DWORD) {
+void CALLBACK OnLongPressTimer(HWND, UINT, UINT_PTR timer, DWORD) {
+    if (timer != s_timer) return;  // 上一次已经取消的 WM_TIMER 可能还在队列里
     StopTimer();
     if (s_state != State::Pending) return;
     s_state = State::Triggered;
@@ -157,7 +158,8 @@ void Fire(int action) {
     if (action >= 0) PostMessageW(g_mainWnd, WM_APP_HOTKEY, static_cast<WPARAM>(action), reinterpret_cast<LPARAM>(s_press.target));
 }
 
-void CALLBACK OnBindTimer(HWND, UINT, UINT_PTR, DWORD) {
+void CALLBACK OnBindTimer(HWND, UINT, UINT_PTR timer, DWORD) {
+    if (timer != s_bindTimer) return;
     StopBindTimer();
     if (s_press.state == Press::Pending) {
         s_press.state = Press::Fired;  // 之后的自动重复和松开都吞掉
@@ -525,6 +527,7 @@ DWORD WINAPI HookThread(LPVOID param) {
 bool Hook_Install() {
     if (s_thread) return true;
     StartInfo start = {CreateEventW(nullptr, TRUE, FALSE, nullptr), false};
+    if (!start.ready) return false;
     s_thread = CreateThread(nullptr, 0, HookThread, &start, 0, &s_threadId);
     if (s_thread) WaitForSingleObject(start.ready, INFINITE);
     CloseHandle(start.ready);

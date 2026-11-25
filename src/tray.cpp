@@ -3,21 +3,21 @@
 // 托盘区是资源管理器自己的，没有公开接口能拿到别的程序的托盘图标。这里：
 //   - 图标和名字（在后台线程上读，迷你任务栏弹出时直接用读好的，每 15 秒、每次收起后重新读一遍）：
 //     Win11：系统给每个托盘图标记在 HKCU\Control Panel\NotifyIconSettings 里（程序路径、最初的提示文字、
-//     是否在任务栏上一直显示、图标快照 PNG），只列出程序正在运行、没设成一直显示的。
+//     是否在任务栏上一直显示、图标 GUID、图标快照 PNG），只列出程序正在运行、没设成一直显示的。
 //     Win10 没有这些记录：“隐藏的图标”是资源管理器里的一个工具栏，直接读它的按钮（图标、提示文字、属于哪个窗口）
 //   - 点击：在后台线程上用 UI 自动化在系统托盘里找到对应的按钮。左键先直接“调用”它（和在托盘里按回车一样，
 //     不用把系统任务栏、隐藏的图标弹出来，Win10 不试这一步）；不行或者是右键，就展开“隐藏的图标”，在它上面模拟一次真的鼠标单击，
-//     这样程序自己的窗口和右键菜单照常弹出来（右键先试像按菜单键那样让它弹菜单，鼠标不挪过去，
-//     按鼠标位置弹菜单的程序菜单就出在迷你任务栏的图标上方；没弹出来再真点）。任务栏被本程序藏着时 UI 自动化看不到里面的按钮：先从它的子窗口找，
+//     右键仍由程序自己弹菜单，再把新弹出的菜单移到迷你任务栏的图标旁。
+//     任务栏被本程序藏着时 UI 自动化看不到里面的按钮：先从它的子窗口找，
 //     还找不到就临时把它显示出来（自动隐藏开着，只在屏幕底边露一条线），点完、菜单关了再藏回去。
-//     都找不到时左键改成再启动一次这个程序（多数托盘程序会把开着的窗口调出来），
-//     右键改成弹出迷你任务栏自己的菜单（打开、打开文件所在的位置、结束程序）
+//     找不到时只在左键操作中尝试启动程序（多数托盘程序会把开着的窗口调出来）。
 #include "common.h"
 
 #include <tlhelp32.h>
 #include <uiautomation.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <cwctype>
 #include <map>
 #include <mutex>
@@ -32,7 +32,6 @@ const IID kIidUIAutomation = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc
 const IID kIidInvokePattern = {0xfb377fbe, 0x8ea6, 0x46d5, {0x9c, 0x73, 0x64, 0x99, 0x64, 0x2d, 0x30, 0x59}};
 const IID kIidTogglePattern = {0x94cf8058, 0x9b8d, 0x4ab9, {0x8b, 0xfd, 0x4c, 0xd0, 0xa3, 0x3c, 0x8c, 0x70}};
 const IID kIidExpandCollapsePattern = {0x619be086, 0x1f4e, 0x4ee4, {0xba, 0xfa, 0x21, 0x01, 0x28, 0x73, 0x87, 0x30}};
-const IID kIidElement3 = {0x8471df34, 0xaee0, 0x4a01, {0xa7, 0xde, 0x7d, 0xb9, 0xaf, 0x12, 0xc2, 0x96}};
 
 template <class T>
 struct Ref {
@@ -107,9 +106,15 @@ std::set<std::wstring> RunningExes() {
 
 // PNG 快照 → 自己持有像素的位图（从流解出来的位图要一直拿着流），原来的大小
 std::shared_ptr<Gdiplus::Bitmap> BitmapFromPng(const std::vector<BYTE>& png) {
+    if (png.empty()) return nullptr;
     HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, png.size());
     if (!mem) return nullptr;
-    memcpy(GlobalLock(mem), png.data(), png.size());
+    void* bytes = GlobalLock(mem);
+    if (!bytes) {
+        GlobalFree(mem);
+        return nullptr;
+    }
+    memcpy(bytes, png.data(), png.size());
     GlobalUnlock(mem);
     IStream* stream = nullptr;
     if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &stream))) {
@@ -245,7 +250,7 @@ std::vector<TrayApp> LoadFromSettings() {
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &root) != ERROR_SUCCESS)
         return apps;
     std::set<std::wstring> running = RunningExes();
-    std::set<std::wstring> seen;  // 同一个程序只列一次
+    std::map<std::pair<std::wstring, bool>, size_t> entries;
     wchar_t sub[256];
     for (DWORD i = 0;; ++i) {
         DWORD len = 256;
@@ -257,10 +262,15 @@ std::vector<TrayApp> LoadFromSettings() {
         std::wstring lower = Lower(app.exe);
         DWORD promoted = 0, size = sizeof(promoted);
         RegGetValueW(key, nullptr, L"IsPromoted", RRF_RT_REG_DWORD, nullptr, &promoted, &size);
-        // 同一个程序常有好几条（旧版本留下的）：一直显示的和收起来的各留一条，有收起来的就算在隐藏的图标里
-        if (!app.exe.empty() && running.count(lower) && seen.insert(lower + (promoted ? L"|1" : L"|0")).second) {
+        if (app.exe.empty() || !running.count(lower)) {
+            RegCloseKey(key);
+            continue;
+        }
+        // 一直显示的和收起来的各显示一份，但保留两组里每个图标的 GUID。
+        app.promoted = promoted != 0;
+        auto [entry, added] = entries.try_emplace(std::make_pair(lower, app.promoted), apps.size());
+        if (added) {
             app.name = FirstLine(RegString(key, L"InitialTooltip"));
-            app.promoted = promoted != 0;
             std::vector<BYTE> png;
             DWORD bytes = 0;
             if (RegQueryValueExW(key, L"IconSnapshot", nullptr, nullptr, nullptr, &bytes) == ERROR_SUCCESS && bytes > 0) {
@@ -281,6 +291,12 @@ std::vector<TrayApp> LoadFromSettings() {
             app.icon = cached.icon;
             app.iconLarge = cached.large;
             apps.push_back(std::move(app));
+        }
+        std::wstring iconGuid = RegString(key, L"IconGuid");
+        GUID guid{};
+        if (!iconGuid.empty() && SUCCEEDED(CLSIDFromString(iconGuid.c_str(), &guid)) && !IsEqualGUID(guid, GUID{})) {
+            auto& guids = apps[entry->second].iconGuids;
+            if (std::find(guids.begin(), guids.end(), guid) == guids.end()) guids.push_back(guid);
         }
         RegCloseKey(key);
     }
@@ -341,7 +357,6 @@ bool LoadFromToolbar(std::vector<TrayApp>& apps) {
         TrayApp app;
         app.exe = GetProcessPath(data.hwnd);
         if (app.exe.empty()) continue;
-        GetWindowThreadProcessId(data.hwnd, &app.pid);  // 受保护的进程（杀毒软件之类）拿不到程序路径，菜单、找不到时再启动都用不了
         // 先问长度，放得下才让它写（它不管缓冲区多大）
         DWORD_PTR length = 0;
         std::wstring tip;
@@ -480,10 +495,11 @@ std::vector<Button> TaskbarButtons(IUIAutomation* uia, HWND tray) {
     return out;
 }
 
+POINT Center(const RECT& r) { return {r.left + (r.right - r.left) / 2, r.top + (r.bottom - r.top) / 2}; }
+
 bool OnScreen(const RECT& r) {
     if (r.right - r.left < 4 || r.bottom - r.top < 4) return false;
-    POINT c = {(r.left + r.right) / 2, (r.top + r.bottom) / 2};
-    return MonitorFromPoint(c, MONITOR_DEFAULTTONULL) != nullptr;
+    return MonitorFromPoint(Center(r), MONITOR_DEFAULTTONULL) != nullptr;
 }
 
 bool IsChevron(const Button& b) {
@@ -516,7 +532,35 @@ const Button* FindChevron(IUIAutomation* uia, HWND tray, const std::vector<Butto
 // 任务栏上程序窗口的按钮（名字是“程序名 - 1 个正在运行的窗口”，也会对上程序名），不是托盘图标
 bool IsTaskButton(const Button& b) { return Lower(b.cls).find(L"tasklist") != std::wstring::npos; }
 
+const Button* ButtonAtIcon(const std::vector<Button>& buttons, const RECT& icon) {
+    if (!OnScreen(icon)) return nullptr;
+    POINT center = Center(icon);
+    const Button* match = nullptr;
+    for (const Button& b : buttons) {
+        if (!PtInRect(&b.rect, center) || !PtInRect(&icon, Center(b.rect))) continue;
+        // 溢出面板没打开时，系统可能返回展开按钮的位置。
+        if (IsChevron(b) || IsTaskButton(b)) return nullptr;
+        if (match && !EqualRect(&match->rect, &b.rect)) return nullptr;
+        match = &b;
+    }
+    return match;
+}
+
 const Button* BestMatch(const std::vector<Button>& buttons, const TrayApp& app, bool needOnScreen) {
+    if (buttons.empty()) return nullptr;
+    // 提示文字可能只有实时状态。用登记的图标标识找屏幕上的按钮。
+    for (const GUID& guid : app.iconGuids) {
+        NOTIFYICONIDENTIFIER id{};
+        id.cbSize = sizeof(id);
+        id.guidItem = guid;
+        RECT icon{};
+        if (FAILED(Shell_NotifyIconGetRect(&id, &icon))) continue;
+        if (const Button* b = ButtonAtIcon(buttons, icon)) {
+            Log(L"托盘：按图标 GUID 找到 %ls", app.name.c_str());
+            return b;
+        }
+    }
+
     const Button* best = nullptr;
     int bestScore = 0;
     for (const Button& b : buttons) {
@@ -559,35 +603,33 @@ bool Press(const Button& b) {
     return false;
 }
 
-// 像按键盘上的菜单键那样让按钮弹出右键菜单，鼠标不用挪过去。系统不支持时返回 false
-bool ShowMenuOf(const Button& b) {
-    IUIAutomationElement3* e3 = nullptr;
-    if (!b.element || FAILED(b.element->QueryInterface(kIidElement3, reinterpret_cast<void**>(&e3))) || !e3) return false;
-    HRESULT hr = e3->ShowContextMenu();
-    e3->Release();
-    return SUCCEEDED(hr);
-}
-
-// 在 rect 中间模拟一次鼠标单击，再把鼠标挪回原处
-void ClickAt(const RECT& rect, bool right) {
-    POINT saved;
-    GetCursorPos(&saved);
+bool SendClick(POINT at, bool right, const POINT* returnTo) {
     int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
     int vw = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1), vh = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1);
-    LONG x = (rect.left + rect.right) / 2, y = (rect.top + rect.bottom) / 2;
     if (GetSystemMetrics(SM_SWAPBUTTON)) right = !right;  // 左右键对调了：发的是物理按键
-    INPUT in[3] = {};
-    for (INPUT& i : in) {
-        i.type = INPUT_MOUSE;
-        i.mi.dx = static_cast<LONG>((x - vx) * 65535LL / vw);
-        i.mi.dy = static_cast<LONG>((y - vy) * 65535LL / vh);
-        i.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
-    }
+    auto move = [&](POINT p) {
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = static_cast<LONG>((p.x - vx) * 65535LL / vw);
+        input.mi.dy = static_cast<LONG>((p.y - vy) * 65535LL / vh);
+        input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
+        return input;
+    };
+    const INPUT atIcon = move(at);
+    INPUT in[4] = {atIcon, atIcon, atIcon};
     in[1].mi.dwFlags |= right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
     in[2].mi.dwFlags |= right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
-    SendInput(3, in, sizeof(INPUT));
-    Sleep(150);
-    SetCursorPos(saved.x, saved.y);
+    // 同一批输入里右键并回到原位，不在系统托盘停留等待菜单。
+    UINT count = 3;
+    if (returnTo) in[count++] = move(*returnTo);
+    UINT sent = SendInput(count, in, sizeof(INPUT));
+    if (sent >= 2 && sent < count) sent += SendInput(count - sent, in + sent, sizeof(INPUT));
+    if (returnTo && sent && sent < count && SendInput(1, in + count - 1, sizeof(INPUT)) != 1) {
+        POINT now{};
+        if (GetCursorPos(&now) && std::abs(now.x - at.x) <= 2 && std::abs(now.y - at.y) <= 2)
+            SetCursorPos(returnTo->x, returnTo->y);
+    }
+    return sent >= 3;
 }
 
 // 展开的“隐藏的图标”：Win11 是 XAML 的窗口，Win10 是老的 NotifyIconOverflowWindow。两种都有时用显示着的那个
@@ -615,15 +657,7 @@ bool MenuShowing() {
 
 // 前台窗口属于这个程序（它弹菜单时会把前台给自己的窗口，自己画菜单的程序也一样）
 bool ForegroundIsApp(const std::wstring& exe) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    HANDLE h = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
-    if (!h) return false;
-    wchar_t path[MAX_PATH];
-    DWORD size = MAX_PATH;
-    bool same = QueryFullProcessImageNameW(h, 0, path, &size) && Lower(path) == Lower(exe);
-    CloseHandle(h);
-    return same;
+    return !exe.empty() && Lower(GetProcessPath(GetForegroundWindow())) == Lower(exe);
 }
 
 // ---- 点的时候遮住 ----
@@ -641,6 +675,7 @@ struct Veiled {
 };
 std::mutex s_veilLock;
 std::vector<Veiled> s_veiled;
+std::atomic<bool> s_clicking{false};
 
 std::wstring ClassOf(HWND h) {
     wchar_t cls[96] = L"";
@@ -651,8 +686,16 @@ std::wstring ClassOf(HWND h) {
 void Veil(HWND h) {
     if (!h || !IsWindow(h)) return;
     std::lock_guard<std::mutex> guard(s_veilLock);
-    for (const Veiled& v : s_veiled)
-        if (v.hwnd == h) return;
+    for (const Veiled& v : s_veiled) {
+        if (v.hwnd != h) continue;
+        LONG_PTR style = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        BYTE alpha = 255;
+        DWORD flags = 0;
+        if (!(style & WS_EX_LAYERED)) SetWindowLongPtrW(h, GWL_EXSTYLE, style | WS_EX_LAYERED);
+        if (!GetLayeredWindowAttributes(h, nullptr, &alpha, &flags) || !(flags & LWA_ALPHA) || alpha != kVeilAlpha)
+            SetLayeredWindowAttributes(h, 0, kVeilAlpha, LWA_ALPHA);
+        return;
+    }
     Veiled v{h, false, 0, 255, 0};
     LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
     if (ex & WS_EX_LAYERED) {
@@ -698,6 +741,7 @@ bool IsVeiled(HWND h) {
 
 void UnveilAll() {
     std::lock_guard<std::mutex> guard(s_veilLock);
+    if (s_clicking) return;  // 开始新点击和恢复透明度共用这把锁
     for (const Veiled& v : s_veiled) Unveil(v);
     if (!s_veiled.empty()) Log(L"托盘：点完了，任务栏和隐藏的图标放回不透明");
     s_veiled.clear();
@@ -707,27 +751,125 @@ struct Job {
     TrayApp app;
     bool right = false;
     bool overflowOnly = false;  // 只展开“隐藏的图标”
-    HWND notify = nullptr;      // 右键弹不出程序自己的菜单时通知谁
+    TrayMenuAnchor anchor;
 };
-std::atomic<bool> s_clicking{false};
 std::atomic<bool> s_hideOwed{false};  // 临时显示的任务栏还没藏回去时又点了一个：留给那一次点完再藏
+std::atomic<HWND> s_openMenu{nullptr};
 
-void LaunchInstead(const TrayApp& app) {
-    Log(L"托盘：找不到 %ls 的托盘图标，改成再启动一次它", app.name.c_str());
-    PostMessageW(g_mainWnd, WM_APP_TRAY_LAUNCH, 0, reinterpret_cast<LPARAM>(new std::wstring(app.exe)));
+std::vector<HWND> TrayMenus() {
+    std::vector<HWND> menus;
+    EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
+        if (Tray_IsMenuWindow(hwnd)) reinterpret_cast<std::vector<HWND>*>(param)->push_back(hwnd);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&menus));
+    return menus;
 }
 
-void MenuInstead(const Job& job) {
-    Log(L"托盘：弹不出 %ls 自己的菜单，改用迷你任务栏的菜单", job.app.name.c_str());
-    HWND to = job.notify && IsWindow(job.notify) ? job.notify : g_mainWnd;
-    auto* app = new TrayApp(job.app);
-    if (!PostMessageW(to, WM_APP_TRAY_MENU, 0, reinterpret_cast<LPARAM>(app))) delete app;
+POINT TrayMenuPosition(const TrayMenuAnchor& anchor, const RECT& work, SIZE menu) {
+    POINT pos = anchor.at;
+    if (anchor.edge == kEdgeBottom) pos.y -= menu.cy;
+    if (anchor.edge == kEdgeRight) pos.x -= menu.cx;
+    pos.x = std::clamp(pos.x, work.left, std::max(work.left, work.right - menu.cx));
+    pos.y = std::clamp(pos.y, work.top, std::max(work.top, work.bottom - menu.cy));
+    return pos;
 }
 
-// 点不中时：左键再启动一次，右键弹迷你任务栏自己的菜单
-void Instead(const Job& job) {
-    if (job.right) MenuInstead(job);
-    else LaunchInstead(job.app);
+bool PlaceTrayMenu(HWND hwnd, const TrayMenuAnchor& anchor) {
+    MONITORINFO monitor{sizeof(monitor)};
+    if (!GetMonitorInfoW(MonitorFromPoint(anchor.at, MONITOR_DEFAULTTONEAREST), &monitor)) return false;
+    constexpr UINT flags = SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER;
+    int moves = 0;
+    bool confirmed = false;
+    for (;;) {
+        RECT frame{};
+        if (!IsWindowVisible(hwnd) || !GetWindowRect(hwnd, &frame) || IsRectEmpty(&frame)) return false;
+        POINT pos = TrayMenuPosition(anchor, monitor.rcWork, {frame.right - frame.left, frame.bottom - frame.top});
+        bool atAnchor = pos.x == frame.left && pos.y == frame.top;
+        if (atAnchor && confirmed) return true;
+        confirmed = atAnchor;
+        if (!atAnchor && (++moves > 3 || !SetWindowPos(hwnd, nullptr, pos.x, pos.y, 0, 0, flags))) return false;
+        // 等目标线程应用位置。跨屏 DPI 变化也可能改变菜单大小。
+        Sleep(30);
+    }
+}
+
+bool MenuBelongsToApp(HWND menu, const std::wstring& exe) {
+    if (Lower(GetProcessPath(menu)) == exe) return true;
+    for (HWND owner = GetWindow(menu, GW_OWNER); owner; owner = GetWindow(owner, GW_OWNER))
+        if (Lower(GetProcessPath(owner)) == exe) return true;
+    if (ClassOf(menu) != L"#32768") return false;
+    GUITHREADINFO info{sizeof(info)};
+    DWORD thread = GetWindowThreadProcessId(menu, nullptr);
+    return thread && GetGUIThreadInfo(thread, &info) && Lower(GetProcessPath(info.hwndMenuOwner)) == exe;
+}
+
+bool MenuAppearedNearClick(HWND menu, POINT trayPoint, POINT panelPoint) {
+    if (ClassOf(menu) == L"#32768") return true;
+    RECT frame{};
+    if (!GetWindowRect(menu, &frame) || IsRectEmpty(&frame)) return false;
+    const int margin = static_cast<int>(96 * MonitorScale(MonitorFromRect(&frame, MONITOR_DEFAULTTONEAREST)));
+    InflateRect(&frame, margin, margin);
+    return PtInRect(&frame, trayPoint) || PtInRect(&frame, panelPoint);
+}
+
+// 窗口显示事件唤醒检查。定时检查也覆盖只报内部控件事件的程序。
+void CALLBACK WakeOnShow(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {}
+
+void WaitForTrayMenu(std::vector<HWND> seen, const Job& job, POINT trayPoint) {
+    const auto exe = Lower(job.app.exe);
+    const auto name = FileName(job.app.exe);
+    const ULONGLONG start = GetTickCount64();
+    do {
+        for (HWND menu : TrayMenus()) {
+            if (std::find(seen.begin(), seen.end(), menu) != seen.end() ||
+                !MenuAppearedNearClick(menu, trayPoint, job.anchor.at) || !MenuBelongsToApp(menu, exe)) continue;
+            seen.push_back(menu);
+            s_openMenu = menu;
+            if (PlaceTrayMenu(menu, job.anchor)) {
+                Log(L"托盘：已确认 %ls 的菜单定位（%ls）", name.c_str(), ClassOf(menu).c_str());
+                return;
+            }
+            Log(L"托盘：%ls 的菜单位置未确认（%ls）", name.c_str(), ClassOf(menu).c_str());
+        }
+        MsgWaitForMultipleObjectsEx(0, nullptr, 16, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+    } while (GetTickCount64() - start < 1200);
+    if (!s_openMenu.load()) Log(L"托盘：%ls 右键后未识别到可定位的弹出菜单", name.c_str());
+}
+
+bool ClickAt(const RECT& rect, const Job& job) {
+    const bool placeMenu = job.right && job.anchor.edge >= 0 && !job.app.exe.empty();
+    auto before = placeMenu ? TrayMenus() : std::vector<HWND>{};
+    const POINT target = Center(rect);
+    HWINEVENTHOOK hook = placeMenu ? SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr, WakeOnShow,
+                                                    0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNTHREAD) : nullptr;
+    POINT saved{};
+    bool haveCursor = GetCursorPos(&saved) != FALSE;
+    if (job.right && !haveCursor) {
+        if (hook) UnhookWinEvent(hook);
+        Log(L"托盘：读取不到光标坐标，无法右键 %ls", FileName(job.app.exe).c_str());
+        return false;
+    }
+    bool clicked = SendClick(target, job.right, job.right ? &saved : nullptr);
+    if (clicked && placeMenu) {
+        // 只移动这次点击后出现、属于该应用的菜单。
+        WaitForTrayMenu(std::move(before), job, target);
+    }
+    if (hook) UnhookWinEvent(hook);
+    if (!job.right && haveCursor) {
+        if (clicked) Sleep(150);
+        SetCursorPos(saved.x, saved.y);
+    }
+    if (!clicked) Log(L"托盘：无法模拟点击 %ls", FileName(job.app.exe).c_str());
+    return clicked;
+}
+
+void LaunchOnClickFailure(const Job& job) {
+    if (job.right || job.overflowOnly) return;
+    Log(L"托盘：找不到 %ls 的托盘图标，改成再启动一次它", job.app.name.c_str());
+    auto exe = std::make_unique<std::wstring>(job.app.exe);
+    if (PostMessageW(g_mainWnd, WM_APP_TRAY_LAUNCH, 0, reinterpret_cast<LPARAM>(exe.get()))) exe.release();
 }
 
 void Names(const wchar_t* where, const std::vector<Button>& buttons) {
@@ -748,26 +890,26 @@ void Collapse(IUIAutomation* uia, HWND tray) {
     if (const Button* chevron = FindChevron(uia, tray, buttons, legacyChevron)) Press(*chevron);
 }
 
-// 返回 true = 在系统托盘里点了（或者展开了隐藏的图标），false = 改成了别的办法
+// 返回是否在系统托盘里点到图标或展开了隐藏的图标。
 bool RunJob(const Job& job) {
     Ref<IUIAutomation> uia;
     if (FAILED(CoCreateInstance(kClsidUIAutomation, nullptr, CLSCTX_INPROC_SERVER, kIidUIAutomation,
                                 reinterpret_cast<void**>(&uia.p))) || !uia.p) {
         Log(L"托盘：用不了 UI 自动化");
-        if (!job.overflowOnly) Instead(job);
+        LaunchOnClickFailure(job);
         return false;
     }
     HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
     std::vector<Button> onTaskbar = TaskbarButtons(uia.p, tray);
-    std::vector<Button> inOverflow = ButtonsIn(uia.p, OverflowWindow());
     Names(L"任务栏", onTaskbar);
-    Names(L"隐藏的图标", inOverflow);
 
     // Win10 的托盘是老式工具栏：“调用”它不一定会把点击转给程序，任务栏上同名的程序按钮也分不出来。
     // 列出来的本来就都在隐藏的图标里，直接展开它真点
     if (!job.overflowOnly && !LegacyTray()) {
         // 左键：直接“调用”按钮，什么都不用弹出来
         if (!job.right) {
+            std::vector<Button> inOverflow = ButtonsIn(uia.p, OverflowWindow());
+            Names(L"隐藏的图标", inOverflow);
             const Button* b = BestMatch(inOverflow, job.app, false);
             if (!b) b = BestMatch(onTaskbar, job.app, false);
             if (b && Press(*b)) {
@@ -779,8 +921,7 @@ bool RunJob(const Job& job) {
         if (tray && IsWindowVisible(tray))
             if (const Button* b = BestMatch(onTaskbar, job.app, true)) {
                 Log(L"托盘：点任务栏上的 %ls", b->name.c_str());
-                ClickAt(b->rect, job.right);
-                return true;
+                if (ClickAt(b->rect, job)) return true;
             }
     }
 
@@ -816,7 +957,7 @@ bool RunJob(const Job& job) {
                                 &ours);
         if (!chevron || !Press(*chevron)) {
             Log(L"托盘：没能展开隐藏的图标（%ls）", chevron ? L"按钮按不动" : L"找不到按钮");
-            if (!job.overflowOnly) Instead(job);
+            LaunchOnClickFailure(job);
             return false;
         }
         for (int i = 0; i < 200; ++i) {  // 最多等 1 秒。勤着看：展开时才建出来的窗口要赶在画出第一帧前遮上
@@ -827,27 +968,29 @@ bool RunJob(const Job& job) {
         }
         if (!overflow || !IsWindowVisible(overflow)) {
             Log(L"托盘：按了展开隐藏的图标，但没有展开");
-            if (!job.overflowOnly) Instead(job);
+            LaunchOnClickFailure(job);
             return false;
         }
         expanded = true;
-        Sleep(200);  // 等展开动画放完，按钮到位
+        // 等按钮到位。展开动画期间资源管理器可能重设窗口样式和不透明度。
+        const bool coveredOverflow = veil && IsVeiled(overflow);
+        const bool coveredTray = veil && IsVeiled(tray);
+        if (coveredOverflow || coveredTray) {
+            const ULONGLONG settleUntil = GetTickCount64() + 200;
+            while (GetTickCount64() < settleUntil) {
+                Sleep(16);
+                if (coveredOverflow) Veil(overflow);
+                if (coveredTray) Veil(tray);
+            }
+        } else {
+            Sleep(200);
+        }
     }
     if (job.overflowOnly) return true;
-    inOverflow = ButtonsIn(uia.p, overflow);
+    std::vector<Button> inOverflow = ButtonsIn(uia.p, overflow);
     Names(L"展开后隐藏的图标", inOverflow);
     if (const Button* b = BestMatch(inOverflow, job.app, true)) {
         RECT r = b->rect;
-        if (job.right && ShowMenuOf(*b)) {
-            for (int i = 0; i < 12; ++i) {  // 最多等 0.6 秒
-                Sleep(50);
-                if (MenuShowing() || ForegroundIsApp(job.app.exe)) {
-                    Log(L"托盘：像按菜单键那样弹出了 %ls 的菜单", b->name.c_str());
-                    return true;
-                }
-            }
-            Log(L"托盘：像按菜单键那样没弹出 %ls 的菜单，改成真的右键点一下", b->name.c_str());
-        }
         // 左键：展开以后按钮能“调用”了，先这样点，鼠标不用挪过去（Win10 的老式托盘“调用”不一定转给程序，照旧真点）
         if (!job.right && !LegacyTray() && Press(*b)) {
             Log(L"托盘：展开后调用了 %ls 的托盘图标", b->name.c_str());
@@ -858,13 +1001,13 @@ bool RunJob(const Job& job) {
         }
         Log(L"托盘：%ls隐藏图标里的 %ls（%ld,%ld - %ld,%ld）", job.right ? L"右键" : L"点", b->name.c_str(), r.left,
             r.top, r.right, r.bottom);
-        ClickAt(r, job.right);
-        return true;
+        if (ClickAt(r, job)) return true;
+    } else {
+        Log(L"托盘：隐藏的图标里找不到 %ls", job.app.name.c_str());
     }
-    Log(L"托盘：隐藏的图标里找不到 %ls", job.app.name.c_str());
     // 这次展开的：趁还遮着收起来（ClickThread 等它收好再放回不透明），不然一放回就露出来
     if (expanded) Collapse(uia.p, tray);
-    Instead(job);
+    LaunchOnClickFailure(job);
     return false;
 }
 
@@ -874,6 +1017,7 @@ DWORD WINAPI ClickThread(LPVOID param) {
     bool trayHidden = tray && !IsWindowVisible(tray);
     HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     bool clicked = RunJob(*job);
+    HWND menu = s_openMenu.load();
     if (SUCCEEDED(co)) CoUninitialize();
     s_clicking = false;
     // 任务栏本来藏着：为了点隐藏的图标临时显示了，或者资源管理器展开隐藏的图标时自己把它显示了出来。
@@ -882,7 +1026,8 @@ DWORD WINAPI ClickThread(LPVOID param) {
     if (trayHidden || owed) {
         // 点了：等隐藏的图标和程序的菜单都关了（最多 1 分钟）。没点成：等遮着的隐藏的图标收起来（最多 2 秒）
         for (int i = 0; i < (clicked ? 600 : 20); ++i) {
-            bool open = clicked ? OverflowShowing() || MenuShowing() : OverflowShowing() && IsVeiled(OverflowWindow());
+            bool open = clicked ? OverflowShowing() || MenuShowing() || Tray_IsMenuWindow(menu)
+                                : OverflowShowing() && IsVeiled(OverflowWindow());
             if (!open) break;
             Sleep(100);
         }
@@ -913,16 +1058,20 @@ DWORD WINAPI ClickThread(LPVOID param) {
             if (s_clicking) s_hideOwed = true;  // 等的时候又点了一个：留给那一次藏
         }
     } else {
-        for (int i = 0; AnyVeiled() && i < 600 && OverflowShowing(); ++i) Sleep(100);  // 隐藏的图标收起来再放回
+        for (int i = 0; AnyVeiled() && i < 600 && (OverflowShowing() || Tray_IsMenuWindow(menu)); ++i) Sleep(100);
     }
-    if (!s_clicking) UnveilAll();  // 又点了一个：留给那一次点完再放回
+    UnveilAll();  // 又点了一个时由那一次放回
     return 0;
 }
 
 void StartJob(Job* job) {
-    if (s_clicking.exchange(true)) {  // 上一次还没点完
-        delete job;
-        return;
+    {
+        std::lock_guard<std::mutex> guard(s_veilLock);
+        if (s_clicking.exchange(true)) {  // 上一次还没点完
+            delete job;
+            return;
+        }
+        s_openMenu = nullptr;
     }
     Fullscreen_QuietStartMenu();  // 展开的隐藏图标在前台时别把藏着的系统任务栏放出来
     if (HANDLE h = CreateThread(nullptr, 0, ClickThread, job, 0, nullptr)) {
@@ -933,113 +1082,7 @@ void StartJob(Job* job) {
     }
 }
 
-// ---- 迷你任务栏自己的菜单 ----
-
-std::vector<DWORD> ProcessesOf(const std::wstring& exe) {
-    std::vector<DWORD> pids;
-    std::wstring want = Lower(exe);
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return pids;
-    PROCESSENTRY32W pe = {sizeof(pe)};
-    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
-        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
-        if (!h) continue;
-        wchar_t path[MAX_PATH];
-        DWORD size = MAX_PATH;
-        if (QueryFullProcessImageNameW(h, 0, path, &size) && Lower(path) == want) pids.push_back(pe.th32ProcessID);
-        CloseHandle(h);
-    }
-    CloseHandle(snap);
-    return pids;
-}
-
-struct EndJob {
-    std::wstring name;
-    std::vector<DWORD> pids;
-};
-
-// 结束程序：先给它的窗口发关闭（藏着的也发，多数托盘程序收到会自己退出），3 秒后还在的强行结束
-DWORD WINAPI EndThread(LPVOID param) {
-    std::unique_ptr<EndJob> job(static_cast<EndJob*>(param));
-    const std::vector<DWORD>& pids = job->pids;
-    std::vector<HANDLE> handles;
-    for (DWORD pid : pids)
-        if (HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid)) handles.push_back(h);
-    if (handles.size() < pids.size()) Log(L"托盘：%ls 有 %d 个进程没有权限结束（管理员权限的程序）", job->name.c_str(),
-                                          static_cast<int>(pids.size() - handles.size()));
-    struct Ctx {
-        const std::vector<DWORD>* pids;
-    } ctx = {&pids};
-    EnumWindows(
-        [](HWND h, LPARAM lp) -> BOOL {
-            DWORD pid = 0;
-            GetWindowThreadProcessId(h, &pid);
-            const auto* list = reinterpret_cast<Ctx*>(lp)->pids;
-            if (std::find(list->begin(), list->end(), pid) != list->end()) PostMessageW(h, WM_CLOSE, 0, 0);
-            return TRUE;
-        },
-        reinterpret_cast<LPARAM>(&ctx));
-    int killed = 0;
-    if (!handles.empty() &&
-        WaitForMultipleObjects(static_cast<DWORD>(std::min<size_t>(handles.size(), MAXIMUM_WAIT_OBJECTS)), handles.data(),
-                               TRUE, 3000) == WAIT_TIMEOUT)
-        for (HANDLE h : handles)
-            if (WaitForSingleObject(h, 0) == WAIT_TIMEOUT && TerminateProcess(h, 1)) ++killed;
-    for (HANDLE h : handles) CloseHandle(h);
-    Log(L"托盘：结束 %ls（%d 个进程，强行结束了 %d 个）", job->name.c_str(), static_cast<int>(pids.size()), killed);
-    if (pids.empty() || handles.size() < pids.size()) MessageBeep(MB_ICONWARNING);
-    return 0;
-}
-
-void EndApp(const TrayApp& app) {
-    // 知道是哪个进程（Win10）就只结束它；不知道的话同一个程序的进程都结束，有好几个时先说清楚
-    std::vector<DWORD> pids = ProcessesOf(app.exe);
-    if (app.pid && std::find(pids.begin(), pids.end(), app.pid) != pids.end()) pids = {app.pid};
-    std::wstring text = pids.size() > 1 ? TrF(L"结束“%ls”的全部 %d 个进程？\n它们没保存的内容会丢失。", app.name.c_str(),
-                                              static_cast<int>(pids.size()))
-                                        : TrF(L"结束“%ls”？\n它没保存的内容会丢失。", app.name.c_str());
-    if (MessageBoxW(nullptr, text.c_str(), L"TaskbarPopup", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST |
-                                                         MB_SETFOREGROUND) != IDOK)
-        return;
-    if (HANDLE h = CreateThread(nullptr, 0, EndThread, new EndJob{app.name, std::move(pids)}, 0, nullptr)) CloseHandle(h);
-}
-
-enum TrayCmd : UINT { kTrayOpen = 1, kTrayAppMenu, kTrayLocation, kTrayEnd };
-
 }  // namespace
-
-bool Tray_Menu(const TrayApp& app, HWND owner, POINT at, void (*picked)(), bool appMenu, UINT align) {
-    std::wstring name = app.name.size() > 40 ? app.name.substr(0, 39) + L"…" : app.name;
-    HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, name.c_str());  // 第一行是哪个程序
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayOpen, Tr(L"打开"));
-    if (appMenu) AppendMenuW(menu, MF_STRING, kTrayAppMenu, Tr(L"程序菜单"));
-    if (GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
-        AppendMenuW(menu, MF_STRING, kTrayLocation, Tr(L"打开文件所在的位置"));
-    // 资源管理器（“安全删除硬件”等）和本程序自己不给结束：一结束桌面、任务栏就没了，或者来不及把任务栏放回来
-    wchar_t self[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring file = Lower(app.exe.substr(app.exe.find_last_of(L"\\/") + 1));
-    if (file != L"explorer.exe" && Lower(app.exe) != Lower(self)) {
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kTrayEnd, Tr(L"结束程序"));
-    }
-    SetMenuDefaultItem(menu, kTrayOpen, FALSE);
-    if (!SetForegroundWindow(owner)) ForceForeground(owner);  // 不然点别处菜单不会消失
-    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align, at.x, at.y, 0, owner, nullptr);
-    PostMessageW(owner, WM_NULL, 0, 0);
-    DestroyMenu(menu);
-    if (cmd == kTrayAppMenu) return true;
-    if (!cmd) return false;
-    if (picked) picked();
-    switch (cmd) {
-        case kTrayOpen: Tray_Click(app, false); break;
-        case kTrayLocation: OpenFileLocation(app.exe); break;
-        case kTrayEnd: EndApp(app); break;
-    }
-    return false;
-}
 
 void Tray_Refresh() {
     if (s_loading.exchange(true)) return;
@@ -1055,9 +1098,23 @@ std::vector<TrayApp> Tray_Hidden() {
     return hidden;
 }
 
-void Tray_Click(const TrayApp& app, bool right, HWND notify) { StartJob(new Job{app, right, false, notify}); }
+void Tray_Click(const TrayApp& app, bool right, TrayMenuAnchor anchor) { StartJob(new Job{app, right, false, anchor}); }
 
-void Tray_ShowHidden() { StartJob(new Job{TrayApp{}, false, true, nullptr}); }
+bool Tray_IsMenuWindow(HWND hwnd) {
+    if (!IsWindowVisible(hwnd)) return false;
+    std::wstring cls = GetClassNameStr(hwnd);
+    if (cls == L"#32768") return true;
+    if (cls == TOOLTIPS_CLASSW || cls == L"TopLevelWindowForOverflowXamlIsland" || cls == L"NotifyIconOverflowWindow" ||
+        cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd") return false;
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE), ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    return (style & WS_POPUP) && (style & WS_CAPTION) != WS_CAPTION && !(style & WS_DISABLED) &&
+           !(ex & (WS_EX_TRANSPARENT | WS_EX_APPWINDOW)) &&
+           ((ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) || GetWindow(hwnd, GW_OWNER)) && !IsCloaked(hwnd);
+}
+
+bool Tray_MenuShowing() { return Tray_IsMenuWindow(s_openMenu.load()); }
+
+void Tray_ShowHidden() { StartJob(new Job{TrayApp{}, false, true}); }
 
 bool Tray_Busy() { return s_clicking; }
 
@@ -1074,20 +1131,6 @@ void Tray_RepairVeil() {
         RedrawWindow(h, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
         Log(L"托盘：%ls 还是上次点托盘图标时调的透明，放回来", cls);
     }
-}
-
-bool Tray_OnMessage(UINT msg, LPARAM lParam) {
-    if (msg == WM_APP_TRAY_MENU) {
-        std::unique_ptr<TrayApp> app(reinterpret_cast<TrayApp*>(lParam));
-        POINT pt;
-        GetCursorPos(&pt);
-        if (app) Tray_Menu(*app, g_mainWnd, pt, nullptr);
-        return true;
-    }
-    if (msg != WM_APP_TRAY_LAUNCH) return false;
-    std::unique_ptr<std::wstring> exe(reinterpret_cast<std::wstring*>(lParam));
-    if (exe && !exe->empty()) LaunchAsUser(*exe);
-    return true;
 }
 
 }  // namespace app

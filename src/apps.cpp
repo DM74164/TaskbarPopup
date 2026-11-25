@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cwctype>
 #include <mutex>
+#include <system_error>
 #include <thread>
 
 namespace app {
@@ -70,20 +71,25 @@ void Apps_Refresh(HWND notify) {
     }
     if (s_thread.joinable()) s_thread.join();
     s_loading = true;
-    s_thread = std::thread([notify] {
-        HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        double start = NowMs();
-        std::vector<InstalledApp> apps = Enumerate();
-        Log(L"读到 %d 个应用，用了 %.0f 毫秒", static_cast<int>(apps.size()), NowMs() - start);
-        {
-            std::lock_guard<std::mutex> guard(s_lock);
-            s_apps = std::move(apps);
-            s_loadedAt = std::max<DWORD>(1, GetTickCount());
-        }
+    try {
+        s_thread = std::thread([notify] {
+            HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            double start = NowMs();
+            std::vector<InstalledApp> apps = Enumerate();
+            Log(L"读到 %d 个应用，用了 %.0f 毫秒", static_cast<int>(apps.size()), NowMs() - start);
+            {
+                std::lock_guard<std::mutex> guard(s_lock);
+                s_apps = std::move(apps);
+                s_loadedAt = std::max<DWORD>(1, GetTickCount());
+            }
+            PostMessageW(notify, WM_APP_APPS, 0, 0);
+            if (SUCCEEDED(co)) CoUninitialize();
+            s_loading = false;
+        });
+    } catch (const std::system_error&) {
         s_loading = false;
-        PostMessageW(notify, WM_APP_APPS, 0, 0);
-        if (SUCCEEDED(co)) CoUninitialize();
-    });
+        Log(L"无法启动读取应用列表的线程");
+    }
 }
 
 std::vector<InstalledApp> Apps_Match(const std::wstring& filter, size_t max) {

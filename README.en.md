@@ -2,7 +2,7 @@
 
 # TaskbarPopup
 
-A Windows 10/11 taskbar enhancement: when a window is maximized, the taskbar hides and the window fills the whole screen. Hold the Win key and a liquid-glass mini taskbar pops up from the bottom of the screen. Single exe, no runtime to install.
+A Windows 10/11 taskbar enhancement. Maximizing a window hides the taskbar and lets the window fill the screen. Hold Win to open a liquid-glass mini taskbar on your selected screen edges. Single exe, no runtime to install.
 
 > The interface comes in English and Chinese. It follows your Windows display language; change it under Settings → Appearance → Language.
 
@@ -26,19 +26,25 @@ Right-click an app in the mini taskbar and tick "Don't hide taskbar when maximiz
 
 ### Hold Win for the mini taskbar
 
-Hold Win for 1 second (adjustable) and the mini taskbar rises from the bottom: pinned apps, open windows, hidden tray icons, the clock, volume and brightness sliders, plus Wi-Fi and Bluetooth toggles. Hover a window icon for a live thumbnail. A short press of Win still opens the Start menu.
+Hold Win for 1 second (adjustable) to open the mini taskbar on your selected screen edges. The bottom edge is the default. The bar can show pinned apps, open windows, hidden tray icons, the clock, and system controls. A short press of Win still opens the Start menu.
+
+When a pinned app opens, its windows appear with the other open windows, to the right of unopened pins on the bottom bar. Closing its last window returns the icon to its original place among the pins.
+
+Multiple windows from one app share a stacked icon. Hover or click the icon to see window titles and thumbnails. Hover a thumbnail for a larger preview, click it to switch to that window, or use its × button to close it. Scroll over the icon or the thumbnails to turn pages. Select the stacked icon with the keyboard and press Enter to switch by title.
 
 ![Hold Win and the mini taskbar rises from the bottom](docs/demo/en/popup.webp)
 
 ### Tap Win while the taskbar is hidden
 
-When the taskbar is hidden, a short press of Win first raises a one-row mini taskbar, then opens the Start menu as usual. Both go away when Start closes.
+When the taskbar is hidden, a short press of Win can open the system Start menu with a one-row mini taskbar. With multiple displays, the mini taskbar follows the display that hosts Start. Both go away when Start closes.
 
 ![Tap Win while the taskbar is hidden: the mini taskbar and Start open together](docs/demo/en/start.webp)
 
 ### Tray icons
 
-The icons hidden in the system tray are in the mini taskbar too, stacked four at a time by default; scroll or press ← → to flip pages. Once they're turned on, the Status & controls page of Settings can show them "In a row" instead. In edit mode, stretching the tray to twice its thickness switches it to a row too, and shrinking it switches it back; the setting follows along. Changing the style in Settings stretches or shrinks a tray you've arranged in edit mode to match. Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu. While the taskbar is hidden, clicking a hidden icon makes the system taskbar and the hidden-icons panel transparent first, so they don't flash on screen.
+Hidden tray icons are stacked four at a time by default. Scroll or press ← → to turn pages. Choose "In a row" in Status & controls, or stretch or shrink the tray in edit mode to switch between styles.
+
+Left-click works like the system tray. Right-click opens the app's tray menu directly. Menus that support positioning open next to the icon on the mini taskbar. When the taskbar is hidden, the app masks the system tray while opening it to deliver the click.
 
 ![Hidden tray icons: scroll to flip pages, right-click for the app's menu](docs/demo/en/tray.webp)
 
@@ -50,7 +56,7 @@ Drag or scroll to set volume and brightness. Right-click the volume control to p
 
 ### Media, input mode and battery
 
-Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size (also when you have arranged items yourself: it takes no room while nothing plays and slots back into its place when something does). There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings; it changes the bar on the current edge. When the bottom and side bars show together, pick Bottom or Side under "Settings for" first; a bar you've arranged in edit mode can also turn off its Start button and window icons there. The mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
+Next to the clock you'll find the cover art of what's playing; point at it to see the title. Click the cover and previous, pause / play and next pop out over it; they tuck away when the mouse leaves. When something starts playing, it is added onto the panel, which gets a little longer while the icons keep their size (also when you have arranged items yourself: it takes no room while nothing plays and slots back into its place when something does). There's also the input mode (中 / 英 for Chinese), which you can click to switch, and on laptops, the battery level and charging state. Turn off what you don't need on the Status & controls page in Settings; pick Bottom, Left, or Right under "Settings for" first. A bar you've arranged in edit mode can also turn off its Start button and window icons there. The mini taskbar pops up to show each change. If turning things off leaves empty space on the panel, the remaining icons grow to fill it (up to 150%). The clock settings are there too, where you can add the weekday or seconds, or drop the date.
 
 ### New message alerts
 
@@ -80,7 +86,7 @@ Double-click a small floating window (or use a hotkey) and it stays on top even 
 
 ### Hotkeys
 
-Set hotkeys to open the mini taskbar, open only the bottom bar, open only the side bar, pin a small window, move the active window to the next display, and open the mini taskbar on the next display. Key combos, single keys and mouse buttons all work, triggered by a tap or a hold. None are set by default.
+Set hotkeys to open Settings, open the configured mini taskbars together, toggle just the bottom, left, or right bar, pin a small window, move a window, or open on the next display. Key combos, single keys, and mouse buttons can trigger on a tap or hold. None are set by default.
 
 ![Hotkeys can be key combos, single keys or mouse buttons](docs/demo/en/hotkeys.webp)
 
@@ -92,16 +98,14 @@ Choose liquid glass or the original Windows 11 look (the system's acrylic: a sol
 
 ### Edit mode
 
-Press F2 while the mini taskbar is open, or click "Edit" on the Size & position page of Settings, to arrange it your way:
+Press F2 while the mini taskbar is open, or click "Edit" on the Size & position page of Settings. Each open bar shows its edge label (Bottom, Left, or Right).
 
-- Drag the top edge to change its size (50 – 200%) and the ends to change its length (on a screen side, the inner edge and the top and bottom ends). Double-click an edge to reset it. Scrolling over empty space changes the size too.
-- Drag the Start button, window icons, tray icons, media, input mode, battery, clock, volume and brightness, or the Wi-Fi and Bluetooth toggles anywhere on the panel, and they stay where you drop them. A dashed outline shows where the item will land; it lines up with nearby items and the panel's center, and if it would cover another item it lands in the nearest free spot. Drag an item off the panel to hide it (the Start button and the window icons only when the bottom and side bars show together). The bottom and the screen sides remember this separately.
-- When the bottom and side bars show together, both enter edit mode. Drop an item on the other bar to move it there; the other bar shows where it will land.
-- Once you've moved an item, the panel's edges change the size of the area the items sit in; only the edge you drag moves. Double-click an edge to trim the empty space.
-- Point at an item and a small dot appears on its corner: drag the dot to size that item, or scroll over the item. Double-click the dot to reset. Once you've moved an item, width and height change separately (hold Shift to keep the shape): longer window icons show more windows and thicker ones get bigger icons, a longer tray shows more icons, volume, brightness and the Wi-Fi and Bluetooth toggles line up across or down to fit, and other items scale to fit.
-- Point at the window icons and small bars appear in the gaps between them: drag one to change the icon spacing, or scroll over a gap. Double-click to reset.
-- Drag empty space to slide the whole panel anywhere along the screen edge; it snaps to the center and the ends. Double-click to reset.
-- Right-click to choose what shows. "Save layout" keeps the current arrangement, and "Restore saved layout" brings it back later. "Reset layout" goes back to the default order and sizes, and "Reset position" to the default place. Press Enter or Esc when you're done.
+- Changes preview immediately. Press Enter or F2 to save and exit, or Ctrl+Z to undo the last change. Esc cancels the current drag. When no drag is active, Esc or closing the mini taskbar discards the edits.
+- Drag items to arrange them. A dashed outline shows the drop position, with snapping to nearby items and the center. When you drag to another bar, that bar highlights and previews the drop. A transfer counts as one change. Releasing outside a bar, on a bar with the same module, or where the item cannot fit returns it to its original position.
+- In the ordered layout, drag an inner edge to scale all bars (50–200%) or either end to change that bar's length. In the free layout, drag the edges to resize that bar's module area and double-click one to trim empty space.
+- Drag a corner dot to resize an item or double-click to reset it. In the free layout, hold Shift to keep the aspect ratio. A longer window or tray box shows more icons, and the sliders and wireless controls follow the shape of their boxes. Drag the handles between window icons to change icon spacing across all bars, or double-click to reset it. Hold Ctrl while scrolling to resize an item, change spacing over a gap, or scale all bars over empty space. Scroll normally to browse window or tray icons.
+- Drag empty space to move that bar along its screen edge. It snaps to the center and ends. Double-click to reset its position.
+- Right-click to show or hide modules, remember or restore this bar's layout, or reset this bar's layout or position. Remembered layouts are saved with the rest of the edits.
 
 ### Presets and backup
 
@@ -109,7 +113,11 @@ On the Presets & backup page in Settings, save the current look as a preset (up 
 
 ### Position and alignment
 
-Put the mini taskbar at the bottom, or stand it vertically on the left or right screen edge, or pick "Bottom + left" or "Bottom + right" to show two bars together: the side bar sits above the bottom one, each bar has its own set of items, and they open and close together. At the bottom it can follow the system, or be centered, left or right aligned, and in edit mode you can drag it anywhere. Settings shows the position and length you set in edit mode; with two bars, click Center under "Side alignment" to put a dragged side bar back. You can also give the bottom bar and the side bar a hotkey each to open or close just that bar (with only one edge set, the other hotkey still brings up a bar on the other edge).
+Place the mini taskbar at the bottom, on either side, or on two edges. Choose **All three** under **Size & position** to open the bottom, left, and right bars together from the tray, by holding Win, or with the mini taskbar hotkey. Use **Status & controls → Settings for** to choose modules for the bottom, left, or right bar. Each bar saves its own layout, placement, and corner radius. The bottom can follow the system, be centered, or align left or right, and edit mode lets you drag it into position. Set individual hotkeys to open or close each edge separately.
+
+When you switch to **All three** from the original layout, the bottom bar holds Start and app windows, the left bar holds hidden tray icons, and the right bar holds media, input, the clock, volume, brightness, Wi-Fi, and Bluetooth. Saved custom layouts take precedence.
+
+In this mode, press **F2**, right-click the bar you want to restore, and choose **Reset this bar's layout** or **Reset this bar's position**. Press **Enter** to save.
 
 ![The mini taskbar at the bottom, on the left or on the right](docs/demo/en/side.webp)
 
@@ -122,21 +130,24 @@ Get the latest `TaskbarPopup.zip` from [Releases](../../releases), unzip it and 
 | Action | Result |
 | --- | --- |
 | Hold Win / hotkey | Open / close |
-| Click an icon | Switch to that window (click the active one to minimize); start a pinned app that isn't running |
+| Click an icon | Switch to the window, minimize it if active, or start the pinned app. Click a stacked icon to open thumbnails |
+| Click a thumbnail / its × button | Switch to / close the corresponding window |
 | Shift + click | Open another window |
 | Right-click / Menu key | Right-click menu |
-| Middle-click / Delete | Close the window |
+| Middle-click / Delete | Close the window. For a stack, choose which window to close |
 | Arrow keys / Tab, Enter | Select and open with the keyboard |
 | Type | Filter; Esc clears, press again to close |
 | Mouse wheel | Scroll the icons; over a slider, adjust volume / brightness |
 | Windows icon on the left | Click for Start, right-click for the Win+X menu |
-| Tray icons | Left-click works like the system tray; right-click opens a menu, and "App menu" opens the program's own menu |
+| Tray icons | Left-click works like the system tray. Right-click opens the app's tray menu directly |
 | Volume | Click the speaker to mute; right-click to switch the playback device |
 | Wi-Fi / Bluetooth buttons | Click to turn on or off; right-click to open the system's network list or Bluetooth device list (Bluetooth on Windows 10 opens Settings) |
 | Media | Click the cover for previous, pause / play and next; they hide when the mouse leaves |
 | Input mode | Click to switch between native and English input |
 | Rest the mouse on the edge | Opens (turn it on in Settings) and closes when the mouse moves away; once clicked, it works as usual |
-| F2 | Enter or leave edit mode: drag items anywhere, corner dots to size them, edges to resize, icon gaps to space them, empty space to move |
+| F2 | Enter edit mode or save and exit |
+| Enter / Esc / Ctrl+Z (while editing) | Save and exit / cancel the drag or edits / undo the last change |
+| Ctrl+scroll (while editing) | Resize the module under the pointer, adjust icon spacing, or scale all bars |
 | Esc / click elsewhere | Close |
 
 ## Settings

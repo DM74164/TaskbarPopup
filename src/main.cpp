@@ -31,7 +31,8 @@ HICON s_trayIcon = nullptr;
 UINT s_msgTaskbarCreated = 0;
 std::wstring s_balloonUrl;  // 最近一次弹出的气泡被点时要打开的网址，空 = 点了不做什么
 const wchar_t* const kHotkeyKeys[kHotkeyCount] = {L"PopupHotkey", L"PinHotkey",    L"MoveHotkey",
-                                                  L"NextScreenHotkey", L"BottomHotkey", L"SideHotkey"};  // 设置文件里的名字，长按的再加 Hold
+                                                  L"NextScreenHotkey", L"BottomHotkey", L"SideHotkey",
+                                                  L"LeftHotkey", L"RightHotkey", L"SettingsHotkey"};
 
 // 运行时画托盘图标：底部一条任务栏 + 向上的箭头
 HICON CreateAppIcon() {
@@ -223,10 +224,11 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Popup_StartMenu(static_cast<DWORD>(wParam));
             return 0;
 
-        case WM_APP_TRAY_LAUNCH:
-        case WM_APP_TRAY_MENU:
-            Tray_OnMessage(msg, lParam);
+        case WM_APP_TRAY_LAUNCH: {
+            std::unique_ptr<std::wstring> exe(reinterpret_cast<std::wstring*>(lParam));
+            if (exe && !exe->empty()) LaunchAsUser(*exe);
             return 0;
+        }
 
         case WM_APP_TRAY_PEEK:
             return Fullscreen_PeekTaskbar(reinterpret_cast<HWND>(lParam), static_cast<int>(wParam)) ? 1 : 0;
@@ -468,6 +470,12 @@ const ModuleKey kModuleSetKeys[] = {{L"TrayIcons", &ModuleSet::tray},
                                     {L"ShowBattery", &ModuleSet::battery},
                                     {L"ShowClock", &ModuleSet::clock}};
 std::wstring SideKey(const wchar_t* key) { return std::wstring(L"Side") + key; }
+
+std::wstring EdgeKey(int side, const wchar_t* key) {
+    return std::wstring(side == kSideLeft ? L"Left" : L"Right") + key;
+}
+
+const wchar_t* const kSideLookKeys[] = {L"Layout", L"Align", L"Offset", L"Length", L"Radius"};
 // 开始按钮、窗口格子显不显示：只有两条一起弹出时用，默认都显示（侧边的不跟着底部）。存成一份布局时写在 hide 里
 struct AppModuleKey {
     const wchar_t* key;
@@ -540,11 +548,13 @@ void ParseFreeLayout(const std::wstring& text, ModuleSet& mods) {
         start = end + 1;
     }
     float scale = 0;
-    if (parts.empty() || swscanf(parts[0].c_str(), L"%f,%f,%f", &mods.freeW, &mods.freeH, &scale) < 2 || mods.freeW < 8 ||
-        mods.freeH < 8 || mods.freeW > 20000 || mods.freeH > 20000)
+    if (parts.empty() || swscanf(parts[0].c_str(), L"%f,%f,%f", &mods.freeW, &mods.freeH, &scale) < 2 ||
+        !std::isfinite(mods.freeW) || !std::isfinite(mods.freeH) ||
+        mods.freeW < 8 || mods.freeH < 8 || mods.freeW > 20000 || mods.freeH > 20000)
         return;
-    int icon = static_cast<int>(std::lround(scale));
-    mods.freeScale = icon >= kMinIconSize && icon <= kMaxIconSize ? icon : g_settings.iconSize;
+    mods.freeScale = scale >= kMinIconSize && scale <= kMaxIconSize
+                         ? static_cast<int>(std::lround(scale))
+                         : g_settings.iconSize;
     for (size_t i = 1; i < parts.size(); ++i) {
         size_t colon = parts[i].find(L':');
         if (colon == std::wstring::npos) continue;
@@ -554,7 +564,9 @@ void ParseFreeLayout(const std::wstring& text, ModuleSet& mods) {
             if (key == FreeItemKey(k)) item = k;
         FreeBox b;
         if (item < 0 || swscanf(parts[i].c_str() + colon + 1, L"%f,%f,%f,%f", &b.x, &b.y, &b.w, &b.h) != 4) continue;
-        if (b.w > 0 && b.h > 0) mods.box[item] = b;
+        if (std::isfinite(b.x) && std::isfinite(b.y) && std::isfinite(b.w) && std::isfinite(b.h) &&
+            b.w > 0 && b.h > 0)
+            mods.box[item] = b;
     }
     mods.free = true;
 }
@@ -607,6 +619,124 @@ bool ParseModuleSetText(const std::wstring& text, ModuleSet& mods) {
     return true;
 }
 
+const Settings& ThreeBarDefaults() {
+    static const Settings defaults = [] {
+        Settings st;
+        st.popupScale = 80;
+        st.popupRadius = 18;
+        st.popupLength = 719;
+        st.popupAlign = kAlignCustom;
+        st.popupOffset = 504;
+        st.sideBar[kSideLeft - kSideLeft] = {kAlignSystem, 500, 614, 18};
+        st.sideBar[kSideRight - kSideLeft] = {kAlignCustom, 479, 614, 18};
+        st.iconSize = 80;
+        st.iconGap = 9;
+        st.clockSeconds = true;
+        ParseModuleSetText(
+            L"show=VolumeCapsule,BrightCapsule;free=912.2,100.3,80"
+            L"|start:0,12.5,89.8,87.8|windows:95.8,11.5,816.4,88.8|tray:1073.7,26.2,48,48"
+            L"|media:761.2,7.1,102.5,93.2|clock:869.7,1.9,81.8,53.4"
+            L"|volume:959.3,0,33.3,100.3|brightness:994.7,0.4,37.5,98.2"
+            L"|levels:1127.7,28.9,450,42.5|radios:869.7,62.1,89.6,35.4", st.modules[kSideBottom]);
+        ParseModuleSetText(
+            L"show=TrayIcons;free=134,867.4,80|start:0,0,70.5,70.5|windows:0,81.7,70.5,679.4"
+            L"|tray:17.1,0,99.8,863.2|battery:0,772.4,70.5,45|clock:0,817.4,70.5,50;hide=start,windows",
+            st.modules[kSideLeft]);
+        ParseModuleSetText(
+            L"show=ShowVolume,ShowBrightness,ShowRadios,ShowMedia,ShowIme,ShowClock;free=167.5,438.2,80"
+            L"|start:11.8,435.7,70.5,70.5|windows:34.3,389.8,48,344.2|tray:50.6,-217.7,99.8,863.2"
+            L"|media:0,0,167.5,173.4|ime:0,173.4,82.2,50.8|battery:33.5,554.7,70.5,45"
+            L"|clock:0,359,77.1,79.2|levels:88.2,180.3,79.3,257.9|radios:0,224.2,88.2,134.8;hide=start,windows",
+            st.modules[kSideRight]);
+        return st;
+    }();
+    return defaults;
+}
+
+// 三边和单栏共用布局。只有仍在使用原始布局时才自动套用三边默认值。
+bool ApplyThreeBarDefaultsIfPristine(Settings& st) {
+    const Settings original;
+    const int radius = DefaultPopupRadius(st.glassStyle);
+    if (st.popupScale != original.popupScale || st.popupAlign != original.popupAlign ||
+        st.popupOffset != original.popupOffset || st.popupLength != original.popupLength ||
+        st.popupRadius != radius || st.iconSize != original.iconSize || st.iconGap != original.iconGap ||
+        st.clockSeconds != original.clockSeconds)
+        return false;
+    for (const SideBarPlacement& bar : st.sideBar)
+        if (bar.align != kAlignSystem || bar.offset != 500 || bar.length != 0 || bar.radius != radius)
+            return false;
+    const std::wstring originalModules = ModuleSetText(original.modules[kSideBottom]);
+    for (const ModuleSet& modules : st.modules)
+        if (ModuleSetText(modules) != originalModules) return false;
+
+    const Settings& defaults = ThreeBarDefaults();
+    std::copy_n(defaults.modules, kSideCount, st.modules);
+    st.popupScale = defaults.popupScale;
+    st.popupRadius = defaults.popupRadius;
+    st.popupLength = defaults.popupLength;
+    st.popupAlign = defaults.popupAlign;
+    st.popupOffset = defaults.popupOffset;
+    std::copy_n(defaults.sideBar, kSideCount - 1, st.sideBar);
+    st.iconSize = defaults.iconSize;
+    st.iconGap = defaults.iconGap;
+    st.clockSeconds = defaults.clockSeconds;
+    for (ScreenPlace& place : st.screens) {
+        if (place.edge == kEdgeAll && place.align == kAlignSystem && place.offset == original.popupOffset) {
+            place.align = defaults.popupAlign;
+            place.offset = defaults.popupOffset;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+void LoadSideBars(Settings& st, const std::wstring& file, const ModuleSet& legacy,
+                  const std::wstring& legacySaved, const SideBarPlacement& legacyPlacement) {
+    std::vector<wchar_t> buf(32768);
+    for (int side : {kSideLeft, kSideRight}) {
+        auto text = [&](const wchar_t* key, const wchar_t* fallback) {
+            GetPrivateProfileStringW(L"General", EdgeKey(side, key).c_str(), fallback,
+                                     buf.data(), static_cast<DWORD>(buf.size()), file.c_str());
+            return std::wstring(buf.data());
+        };
+        auto value = [&](const wchar_t* key, int fallback) {
+            return static_cast<int>(GetPrivateProfileIntW(L"General", EdgeKey(side, key).c_str(), fallback, file.c_str()));
+        };
+        st.modules[side] = legacy;
+        ParseModuleSetText(text(L"Layout", L""), st.modules[side]);
+        st.savedLayout[side] = text(L"SavedLayout", legacySaved.c_str());
+
+        // 旧版只显示单个侧栏时，该栏用的是主栏的大小和位置。
+        SideBarPlacement fallback = st.popupEdge == side
+                                         ? SideBarPlacement{st.popupAlign, st.popupOffset, st.popupLength, st.popupRadius}
+                                         : legacyPlacement;
+        SideBarPlacement& bar = st.sideBar[side - kSideLeft];
+        int align = value(L"Align", fallback.align);
+        bar.align = align == kAlignCustom ? kAlignCustom : kAlignSystem;
+        bar.offset = ClampOffset(value(L"Offset", fallback.offset));
+        bar.length = std::clamp(value(L"Length", fallback.length), 0, kMaxPopupLength);
+        bar.radius = std::clamp(value(L"Radius", fallback.radius), 0, kMaxPopupRadius);
+    }
+}
+
+void SaveSideBars(const Settings& st, const std::wstring& file) {
+    for (int side : {kSideLeft, kSideRight}) {
+        auto write = [&](const wchar_t* key, const std::wstring& value) {
+            WritePrivateProfileStringW(L"General", EdgeKey(side, key).c_str(), value.c_str(), file.c_str());
+        };
+        const SideBarPlacement& bar = st.sideBar[side - kSideLeft];
+        write(L"Layout", ModuleSetText(st.modules[side]));
+        write(L"SavedLayout", st.savedLayout[side]);
+        write(L"Align", std::to_wstring(bar.align));
+        write(L"Offset", std::to_wstring(bar.offset));
+        write(L"Length", std::to_wstring(bar.length));
+        write(L"Radius", std::to_wstring(bar.radius));
+    }
+}
+
+}  // namespace
+
 void LoadSettings() {
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
@@ -616,6 +746,7 @@ void LoadSettings() {
     int ms = static_cast<int>(GetPrivateProfileIntW(L"General", L"LongPressMs", kDefaultLongPressMs, f.c_str()));
     g_settings.longPressMs = std::max(kMinLongPressMs, std::min(ms, kMaxLongPressMs));
     g_settings.showPinnedApps = GetPrivateProfileIntW(L"General", L"ShowPinnedApps", 1, f.c_str()) != 0;
+    ModuleSet legacySide;
     for (const ModuleKey& k : kModuleSetKeys) {
         int def = k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", k.oldKey, k.def, f.c_str())) : k.def;
         bool bottom = GetPrivateProfileIntW(L"General", k.key, def, f.c_str()) != 0;
@@ -623,11 +754,11 @@ void LoadSettings() {
         int sideDef = !k.sideFollows ? k.def
                       : k.oldKey ? static_cast<int>(GetPrivateProfileIntW(L"General", SideKey(k.oldKey).c_str(), bottom, f.c_str()))
                                  : bottom;
-        g_settings.modules[kSideEdge].*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), sideDef, f.c_str()) != 0;
+        legacySide.*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), sideDef, f.c_str()) != 0;
     }
     for (const AppModuleKey& k : kAppModuleKeys) {
         g_settings.modules[kSideBottom].*k.item = GetPrivateProfileIntW(L"General", k.key, 1, f.c_str()) != 0;
-        g_settings.modules[kSideEdge].*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), 1, f.c_str()) != 0;
+        legacySide.*k.item = GetPrivateProfileIntW(L"General", SideKey(k.key).c_str(), 1, f.c_str()) != 0;
     }
     g_settings.clockSeconds = GetPrivateProfileIntW(L"General", L"ClockSeconds", 0, f.c_str()) != 0;
     g_settings.clockWeekday = GetPrivateProfileIntW(L"General", L"ClockWeekday", 0, f.c_str()) != 0;
@@ -642,15 +773,10 @@ void LoadSettings() {
     g_settings.trayStyle = GetPrivateProfileIntW(L"General", L"TrayStyle", kTrayStacked, f.c_str()) == kTrayRow ? kTrayRow : kTrayStacked;
     int scale = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupScale", kDefaultPopupScale, f.c_str()));
     int edge = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupEdge", kEdgeBottom, f.c_str()));
-    g_settings.popupEdge = edge >= kEdgeBottom && edge <= kEdgeBottomRight ? edge : kEdgeBottom;
+    g_settings.popupEdge = edge >= kEdgeBottom && edge <= kEdgeAll ? edge : kEdgeBottom;
     int align = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupAlign", kAlignSystem, f.c_str()));
     g_settings.popupAlign = align >= kAlignSystem && align <= kAlignCustom ? align : kAlignSystem;
     g_settings.popupOffset = ClampOffset(static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupOffset", 500, f.c_str())));
-    align = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondAlign", kAlignSystem, f.c_str()));
-    g_settings.secondAlign = align >= kAlignSystem && align <= kAlignCustom ? align : kAlignSystem;
-    g_settings.secondOffset = ClampOffset(static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondOffset", 500, f.c_str())));
-    g_settings.secondLength =
-        std::clamp(static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondLength", 0, f.c_str())), 0, kMaxPopupLength);
     g_settings.popupMonitor =
         GetPrivateProfileIntW(L"General", L"PopupMonitor", kPopupAtCursor, f.c_str()) == kPopupAtActive ? kPopupAtActive
                                                                                                        : kPopupAtCursor;
@@ -681,8 +807,6 @@ void LoadSettings() {
     g_settings.glassStyle = style == 1 || style == 2 ? kGlassWin11 : kGlassLiquid;  // 1 是以前的毛玻璃，2 是上一版的 Win11 原版
     int radius = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupRadius", DefaultPopupRadius(g_settings.glassStyle), f.c_str()));
     g_settings.popupRadius = std::max(0, std::min(radius, kMaxPopupRadius));
-    radius = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondRadius", g_settings.popupRadius, f.c_str()));
-    g_settings.secondRadius = std::max(0, std::min(radius, kMaxPopupRadius));
     int length = static_cast<int>(GetPrivateProfileIntW(L"General", L"PopupLength", 0, f.c_str()));
     g_settings.popupLength = std::max(0, std::min(length, kMaxPopupLength));
     int theme = static_cast<int>(GetPrivateProfileIntW(L"General", L"Theme", kThemeSystem, f.c_str()));
@@ -690,29 +814,34 @@ void LoadSettings() {
     g_settings.glassTransparency = std::clamp(
         static_cast<int>(GetPrivateProfileIntW(L"General", L"GlassTransparency", kDefaultGlassTransparency, f.c_str())), 0, 100);
     std::vector<wchar_t> buf(32768);
-    auto text = [&](const wchar_t* key) {
-        GetPrivateProfileStringW(L"General", key, L"", buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
+    auto text = [&](const wchar_t* key, const wchar_t* fallback = L"") {
+        GetPrivateProfileStringW(L"General", key, fallback, buf.data(), static_cast<DWORD>(buf.size()), f.c_str());
         return std::wstring(buf.data());
     };
     int* bottomOrder = g_settings.modules[kSideBottom].order;
     ParseModuleOrder(text(L"ModuleOrder"), bottomOrder);
     std::wstring sideOrder = text(SideKey(L"ModuleOrder").c_str());
     if (sideOrder.empty())
-        std::copy(bottomOrder, bottomOrder + kModuleCount, g_settings.modules[kSideEdge].order);
+        std::copy(bottomOrder, bottomOrder + kModuleCount, legacySide.order);
     else
-        ParseModuleOrder(sideOrder, g_settings.modules[kSideEdge].order);
+        ParseModuleOrder(sideOrder, legacySide.order);
     // 大小：侧边那份没写过（键不在）时跟着底部
     ParseModuleScale(text(L"ModuleScale"), g_settings.modules[kSideBottom].scale);
     wchar_t probe[4];
     DWORD got = GetPrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), L"\x01", probe, 4, f.c_str());
     bool sideScale = !(got == 1 && probe[0] == L'\x01');
     ParseModuleScale(text((sideScale ? SideKey(L"ModuleScale") : std::wstring(L"ModuleScale")).c_str()),
-                     g_settings.modules[kSideEdge].scale);
+                     legacySide.scale);
     // 自由布局：底部和侧边排的方向不一样，侧边没写过就不是自由布局
     ParseFreeLayout(text(L"FreeLayout"), g_settings.modules[kSideBottom]);
-    ParseFreeLayout(text(SideKey(L"FreeLayout").c_str()), g_settings.modules[kSideEdge]);
+    ParseFreeLayout(text(SideKey(L"FreeLayout").c_str()), legacySide);
     g_settings.savedLayout[kSideBottom] = text(L"SavedLayout");
-    g_settings.savedLayout[kSideEdge] = text(SideKey(L"SavedLayout").c_str());
+    SideBarPlacement legacyPlacement;
+    legacyPlacement.align = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondAlign", kAlignSystem, f.c_str()));
+    legacyPlacement.offset = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondOffset", 500, f.c_str()));
+    legacyPlacement.length = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondLength", 0, f.c_str()));
+    legacyPlacement.radius = static_cast<int>(GetPrivateProfileIntW(L"General", L"SecondRadius", g_settings.popupRadius, f.c_str()));
+    LoadSideBars(g_settings, f, legacySide, text(SideKey(L"SavedLayout").c_str()), legacyPlacement);
     g_settings.customTint = GetPrivateProfileIntW(L"General", L"CustomTint", 0, f.c_str()) != 0;
     g_settings.tintColor = ParseColor(text(L"TintColor"), RGB(32, 32, 36));
     g_settings.customAccent = GetPrivateProfileIntW(L"General", L"CustomAccent", 0, f.c_str()) != 0;
@@ -765,13 +894,19 @@ void LoadSettings() {
             p.key = ToLower(item.substr(0, a));
             size_t c = item.find(L'|', b + 1);
             int edge = _wtoi(item.substr(a + 1, b - a - 1).c_str()), align = _wtoi(item.substr(b + 1, c - b - 1).c_str());
-            p.edge = edge >= kEdgeBottom && edge <= kEdgeBottomRight ? edge : kEdgeBottom;
+            p.edge = edge >= kEdgeBottom && edge <= kEdgeAll ? edge : kEdgeBottom;
             p.align = align >= kAlignSystem && align <= kAlignCustom ? align : kAlignSystem;
             if (c != std::wstring::npos) p.offset = ClampOffset(_wtoi(item.substr(c + 1).c_str()));
             if (!FindScreenPlace(g_settings.screens, p.key)) g_settings.screens.push_back(p);
         }
         start = end + 1;
     }
+    // 只有记录了三边位置、还未写入布局的配置才使用默认值。
+    const bool threeBars = g_settings.popupEdge == kEdgeAll ||
+        (g_settings.popupPerScreen && std::any_of(g_settings.screens.begin(), g_settings.screens.end(),
+            [](const ScreenPlace& place) { return place.edge == kEdgeAll; }));
+    if (threeBars && text(L"FreeLayout", L"\x01") == L"\x01")
+        ApplyThreeBarDefaultsIfPristine(g_settings);
 }
 
 void SaveSettings() {
@@ -782,33 +917,20 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"LongPressPopup", g_settings.longPressPopup ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"LongPressMs", std::to_wstring(g_settings.longPressMs).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"ShowPinnedApps", g_settings.showPinnedApps ? L"1" : L"0", f.c_str());
-    for (const ModuleKey& k : kModuleSetKeys) {
+    for (const ModuleKey& k : kModuleSetKeys)
         WritePrivateProfileStringW(L"General", k.key, g_settings.modules[kSideBottom].*k.item ? L"1" : L"0", f.c_str());
-        WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), g_settings.modules[kSideEdge].*k.item ? L"1" : L"0",
-                                   f.c_str());
-    }
-    for (const AppModuleKey& k : kAppModuleKeys) {
+    for (const AppModuleKey& k : kAppModuleKeys)
         WritePrivateProfileStringW(L"General", k.key, g_settings.modules[kSideBottom].*k.item ? L"1" : L"0", f.c_str());
-        WritePrivateProfileStringW(L"General", SideKey(k.key).c_str(), g_settings.modules[kSideEdge].*k.item ? L"1" : L"0",
-                                   f.c_str());
-    }
     WritePrivateProfileStringW(L"General", L"ClockSeconds", g_settings.clockSeconds ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ClockWeekday", g_settings.clockWeekday ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ClockDate", g_settings.clockDate ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"ModuleOrder", ModuleOrderText(g_settings.modules[kSideBottom].order).c_str(),
                                f.c_str());
-    WritePrivateProfileStringW(L"General", SideKey(L"ModuleOrder").c_str(), ModuleOrderText(g_settings.modules[kSideEdge].order).c_str(),
-                               f.c_str());
     WritePrivateProfileStringW(L"General", L"ModuleScale", ModuleScaleText(g_settings.modules[kSideBottom].scale).c_str(),
                                f.c_str());
-    WritePrivateProfileStringW(L"General", SideKey(L"ModuleScale").c_str(), ModuleScaleText(g_settings.modules[kSideEdge].scale).c_str(),
-                               f.c_str());
     WritePrivateProfileStringW(L"General", L"FreeLayout", FreeLayoutText(g_settings.modules[kSideBottom]).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", SideKey(L"FreeLayout").c_str(), FreeLayoutText(g_settings.modules[kSideEdge]).c_str(),
-                               f.c_str());
     WritePrivateProfileStringW(L"General", L"SavedLayout", g_settings.savedLayout[kSideBottom].c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", SideKey(L"SavedLayout").c_str(), g_settings.savedLayout[kSideEdge].c_str(),
-                               f.c_str());
+    SaveSideBars(g_settings, f);
     WritePrivateProfileStringW(L"General", L"ShowTitle", g_settings.showTitle ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"IconSize", std::to_wstring(g_settings.iconSize).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"IconGap", std::to_wstring(g_settings.iconGap).c_str(), f.c_str());
@@ -823,9 +945,6 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PopupEdge", std::to_wstring(g_settings.popupEdge).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupAlign", std::to_wstring(g_settings.popupAlign).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupOffset", std::to_wstring(g_settings.popupOffset).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"SecondAlign", std::to_wstring(g_settings.secondAlign).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"SecondOffset", std::to_wstring(g_settings.secondOffset).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"SecondLength", std::to_wstring(g_settings.secondLength).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupMonitor", std::to_wstring(g_settings.popupMonitor).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupPerScreen", g_settings.popupPerScreen ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"KeepOtherTaskbars", g_settings.keepOtherTaskbars ? L"1" : L"0", f.c_str());
@@ -840,7 +959,6 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"General", L"PinTopmost", g_settings.pinTopmost ? L"1" : L"0", f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassStyle", std::to_wstring(g_settings.glassStyle).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupRadius", std::to_wstring(g_settings.popupRadius).c_str(), f.c_str());
-    WritePrivateProfileStringW(L"General", L"SecondRadius", std::to_wstring(g_settings.secondRadius).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"PopupLength", std::to_wstring(g_settings.popupLength).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"Theme", std::to_wstring(g_settings.theme).c_str(), f.c_str());
     WritePrivateProfileStringW(L"General", L"GlassTransparency", std::to_wstring(g_settings.glassTransparency).c_str(), f.c_str());
@@ -888,13 +1006,16 @@ void CopyLookKeys(const wchar_t* fromSection, const wchar_t* toSection) {
     std::wstring f = SettingsFile();
     std::vector<wchar_t> buf(32768);  // 每块屏幕的位置一条八十多个字，见过的屏幕多了很长
     wchar_t* value = buf.data();
-    for (const wchar_t* key : kLookKeys) {
+    auto copy = [&](const wchar_t* key) {
         DWORD n = GetPrivateProfileStringW(fromSection, key, L"\x01", value, static_cast<DWORD>(buf.size()), f.c_str());
         bool missing = n == 1 && value[0] == L'\x01';
         // 每块屏幕的位置是后来加进方案的：旧方案里没有就留着现在的
-        if (missing && (!wcscmp(key, L"PopupPerScreen") || !wcscmp(key, L"ScreenPlaces"))) continue;
+        if (missing && (!wcscmp(key, L"PopupPerScreen") || !wcscmp(key, L"ScreenPlaces"))) return;
         WritePrivateProfileStringW(toSection, key, missing ? nullptr : value, f.c_str());
-    }
+    };
+    for (const wchar_t* key : kLookKeys) copy(key);
+    for (int side : {kSideLeft, kSideRight})
+        for (const wchar_t* key : kSideLookKeys) copy(EdgeKey(side, key).c_str());
 }
 
 bool SectionExists(const wchar_t* section, const std::wstring& file) {
@@ -963,9 +1084,16 @@ bool ExportSettings(const std::wstring& path) {
 bool ImportSettings(const std::wstring& path) {
     std::vector<wchar_t> buf(65536);
     DWORD n = GetPrivateProfileSectionW(L"General", buf.data(), static_cast<DWORD>(buf.size()), path.c_str());
-    if (n == 0) return false;  // 不是本程序的设置文件
+    if (n == 0 || n == buf.size() - 2) return false;  // 没有设置或设置节太长、已被截断
     EnsureUnicodeIni();
     std::wstring f = SettingsFile();
+    for (int side : {kSideLeft, kSideRight}) {
+        for (const wchar_t* key : kSideLookKeys)
+            WritePrivateProfileStringW(L"General", EdgeKey(side, key).c_str(), nullptr, f.c_str());
+        WritePrivateProfileStringW(L"General", EdgeKey(side, L"SavedLayout").c_str(), nullptr, f.c_str());
+    }
+    for (const wchar_t* key : {L"SideSavedLayout", L"SecondAlign", L"SecondOffset", L"SecondLength", L"SecondRadius"})
+        WritePrivateProfileStringW(L"General", key, nullptr, f.c_str());
     // 旧版本导出的没有侧边那份：先删掉现在的，读的时候跟着导入的底部
     // 音量、亮度分开的开关也是：旧版本导出的只有 ShowLevels，删掉现在的才会照它
     for (const ModuleKey& k : kModuleSetKeys) {
@@ -1096,7 +1224,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))))
         setDpiContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_instance = instance;
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS};
     InitCommonControlsEx(&icc);
@@ -1171,7 +1299,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     Windows_ClearCache();
     if (s_trayIcon) DestroyIcon(s_trayIcon);
     Gdiplus::GdiplusShutdown(gdiplusToken);
-    CoUninitialize();
+    if (SUCCEEDED(co)) CoUninitialize();
     if (mutex) CloseHandle(mutex);
     Log(L"退出完成");
     // 后台线程（桌面图标、任务栏动画）没在限定时间里结束时还可能在用全局对象，

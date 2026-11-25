@@ -1,5 +1,5 @@
 // 迷你任务栏：液态玻璃质感的分层窗口，从屏幕底部中央弹上来。
-// 先按任务栏上的顺序列出固定的应用（已经打开的换成它的窗口），再列出其余打开的窗口。
+// 未打开的固定应用按任务栏顺序排在前面，所有已打开的窗口跟在后面。
 // 单击切换窗口（再点当前窗口则最小化）或启动应用，Shift+单击再开一个，中键关闭窗口，
 // 右键弹出和系统任务栏差不多的菜单（开始按钮上是 Win+X 菜单），方向键 + 回车选择，Esc 或点到别处收起。直接打字筛选窗口和应用（也搜开始菜单里的所有应用）。
 // 鼠标停在窗口图标上时在上方显示它的实时缩略图。
@@ -20,6 +20,9 @@
 #include <climits>
 #include <cmath>
 #include <cwchar>
+#include <optional>
+#include <unordered_map>
+#include <utility>
 
 using namespace Gdiplus;
 
@@ -30,7 +33,7 @@ constexpr wchar_t kClassName[] = L"TaskbarPopupMini";
 constexpr UINT_PTR kTimerClock = 2;
 constexpr UINT_PTR kTimerThumb = 3;  // 缩略图延迟出现 / 消失
 constexpr UINT kThumbShowMs = 400;
-constexpr UINT kThumbHideMs = 120;   // 鼠标在两个图标之间的缝里时别闪
+constexpr UINT kThumbHideMs = 260;   // 给鼠标留出从图标移到缩略图的时间
 constexpr size_t kMaxAppMatches = 12;
 constexpr UINT WM_APP_FRAME = WM_APP + 20;  // 动画的下一帧
 constexpr UINT_PTR kTimerRefocus = 4;  // 刚弹出就失去了前台：稍等一下再抢回来
@@ -63,7 +66,7 @@ constexpr double kMediaMs = 240.0 * TP_ANIM_SCALE;  // 点封面弹出 / 收起�
 constexpr UINT_PTR kTimerMediaClose = 11;           // 鼠标离开封面一会儿后收起媒体按钮
 constexpr UINT kMediaCloseMs = 600;
 constexpr UINT_PTR kTimerLive = 12;               // 定时刷新玻璃后面的背景（和设置窗口一样实时变）
-constexpr UINT WM_APP_SHOT = WM_APP + 21;         // 后台截好背景了，lParam 是 ShotJob*
+constexpr UINT WM_APP_SHOT = WM_APP + 21;         // 后台截好背景了
 constexpr double kExcludeSettleMs = 50;           // 打开“截图时排除本窗口”以后等这么久再截
 constexpr int kStillTicks = 30;                   // 连续这么多次没变就算安静了
 constexpr DWORD kHoverLeaveMs = 600;    // 走开这么久就收起
@@ -94,7 +97,7 @@ const Palette kWin11Light = {Color(255, 26, 26, 26),   Color(195, 26, 26, 26),  
                              Color(150, 26, 26, 26),   Color(255, 0, 95, 184),    Color(0, 0, 0, 0),
                              Color(70, 0, 0, 0),       Color(255, 255, 255, 255), Color(45, 0, 0, 0)};
 
-// 一个格子：打开的窗口，或者固定了但还没运行的应用
+// 一个格子：打开的窗口、同一应用的窗口堆叠，或者没有打开窗口的固定应用。
 struct Tile {
     std::wstring title;
     std::shared_ptr<Bitmap> icon;
@@ -105,6 +108,13 @@ struct Tile {
     std::wstring pinName;
     std::shared_ptr<Bitmap> pinIcon;
     std::wstring search;  // 打字筛选时比较的小写文字：标题、应用名、程序文件名
+    int pinOrder = -1;    // 在系统固定列表中的顺序，关掉最后一个窗口时用来归位
+    std::wstring appKey;
+    std::vector<HWND> windows;  // 堆叠才有，按窗口顺序保存；hwnd 指向代表窗口
+
+    bool ContainsWindow(HWND h) const {
+        return hwnd == h || std::find(windows.begin(), windows.end(), h) != windows.end();
+    }
 };
 
 // 以下尺寸都是物理像素，按目标显示器的缩放比例计算
@@ -164,13 +174,15 @@ int SliderOf(int control) { return control == kVolumeIcon || control == kVolumeT
 // 或者快捷键单独呼出的另一条边上的）。下面这些 s_ 变量都是“现在载入的那一条”的，换着用时整个换（见 InPanel），
 // 只有 s_cur、s_panelHwnd 和标了“两条共用”的几个不换
 int s_cur = 0;
-HWND s_panelHwnd[2] = {};
+constexpr int kPanelSlots[] = {0, 1, 2};
+HWND s_panelHwnd[kPopupPanelCount] = {};
 
 HWND s_hwnd = nullptr;
-bool s_dual = false;       // 这次弹出时这块屏幕设的是底部和侧边一起（开始按钮、窗口格子才能放到另一条上）
+bool s_multiBar = false;   // 这次弹出时设了多条边（开始按钮、窗口格子才能放到另一条上）
+int s_placed = kEdgeBottom;  // 打开时的整组位置，独立呼出其它边时沿用
 UINT s_frameSeq = 0;       // 上一帧画完时的 s_vblankSeq（两条一起放动画时一次屏幕刷新只等一次）
 std::vector<Tile> s_items;     // 现在显示的格子（打字筛选后的）
-std::vector<Tile> s_allItems;  // 弹出时列出的全部格子
+std::vector<Tile> s_allItems;  // 每个窗口单独保留，筛选和关窗口后再从这里生成堆叠
 std::wstring s_filter;         // 打的字
 float s_lockedItemsW = 0;      // 筛选期间格子区宽度不变（面板不跟着变窄变宽）；0 = 没锁
 float s_tileGrow = 1;          // 格子那段有空时格子放大补位的倍数，见 FitTiles
@@ -178,8 +190,7 @@ float s_holderRoom = 0;        // 拖过长度时给媒体多留的长度（拖�
 bool s_keyNav = false;         // 最近是用键盘选的（选中项也显示缩略图）
 bool s_menuOpen = false;
 POINT s_lastMouse = {INT_MIN, INT_MIN};  // 上一次 WM_MOUSEMOVE 的位置：窗口出现、移动时系统会补发一条位置没变的
-HWND s_thumbWant = nullptr;    // 想显示缩略图的窗口
-HWND s_thumbShown = nullptr;   // 正显示着缩略图的窗口
+std::vector<HWND> s_thumbWant;  // 当前格子请求预览的窗口，按组内顺序排列
 int s_thumbIdx = -1;
 HWND s_prevForeground = nullptr;
 HWND s_keepPrevForeground = nullptr;  // 换到下一块屏幕重新弹出：收起时前台换了，还用原来的
@@ -204,7 +215,51 @@ int s_edge = kEdgeBottom;           // 这次弹在哪条边（弹出时按设�
 int s_align = kAlignSystem;         // 这次在底边时怎么对齐（弹出时按设置定下来）
 int s_offset = 500;                 // 自定义位置时面板中心在边上的千分之几处
 double s_shownAt = 0;      // 这次弹出的时间
-// 编辑模式（弹出后按 F2）：拖面板的边改大小（粗细）和长度，别的点击不管用，回车、Esc 或再按 F2 退出
+// 编辑模式使用一份草稿，三条栏同时打开时共用撤销历史。
+struct EditLayout {
+    ModuleSet modules[kSideCount];
+    std::wstring saved[kSideCount];
+    SideBarPlacement bars[kSideCount];
+    std::vector<ScreenPlace> screens = g_settings.screens;
+    int scale = g_settings.popupScale;
+    int iconGap = g_settings.iconGap;
+    int trayStyle = g_settings.trayStyle;
+
+    EditLayout() {
+        std::copy_n(g_settings.modules, kSideCount, modules);
+        std::copy_n(g_settings.savedLayout, kSideCount, saved);
+        bars[kSideBottom] = {g_settings.popupAlign, g_settings.popupOffset, g_settings.popupLength};
+        std::copy_n(g_settings.sideBar, kSideCount - 1, bars + kSideLeft);
+    }
+
+    void Commit() const {
+        std::copy_n(modules, kSideCount, g_settings.modules);
+        std::copy_n(saved, kSideCount, g_settings.savedLayout);
+        g_settings.popupAlign = bars[kSideBottom].align;
+        g_settings.popupOffset = bars[kSideBottom].offset;
+        g_settings.popupLength = bars[kSideBottom].length;
+        for (int side = kSideLeft; side < kSideCount; ++side) {
+            SideBarPlacement& bar = g_settings.sideBar[side - kSideLeft];
+            bar.align = bars[side].align;
+            bar.offset = bars[side].offset;
+            bar.length = bars[side].length;
+        }
+        g_settings.screens = screens;
+        g_settings.popupScale = scale;
+        g_settings.iconGap = iconGap;
+        g_settings.trayStyle = trayStyle;
+    }
+};
+
+struct EditSession {
+    EditLayout draft;
+    std::optional<EditLayout> beforeAction;
+    int actionPanel = -1;
+    std::vector<EditLayout> undo;
+};
+std::optional<EditSession> s_editSession;
+bool s_ignoreEditMouseUp = false;  // 拖动取消后，松开左键不触发普通点击
+
 bool s_editing = false;
 enum ResizeEdge { kResizeLeft = 1, kResizeTop = 2, kResizeRight = 4, kResizeBottom = 8 };
 int s_resize = 0;          // 正在拖的边（ResizeEdge 组合），0 = 没在拖
@@ -240,8 +295,11 @@ int s_scaleFromPercent = 100;  // 开始拖时设置里的大小
 float s_scaleFromK = 1;        // 开始拖时画着的大小（倍数）
 PointF s_scaleAnchor, s_scaleDiag;  // 开始拖时模块对角（不动的那个角）和到圆点的那条对角线（屏幕坐标）
 int s_wheelScaled = -1;        // 刚用滚轮改了大小的模块：鼠标离开它之前标题上显示大小
-int s_moveModule = kPartNone;  // 正在拖着换位置的模块（调节条、Wi-Fi 蓝牙只能拖出去隐藏）
-bool s_moveOut = false;        // 拖到了面板外面：松开就隐藏
+enum class DropState { None, Ready, Duplicate, NoRoom };
+int s_moveModule = kPartNone;  // 正在拖着换位置的模块
+bool s_moveOut = false;        // 鼠标已经在原栏外
+int s_movePeer = -1;
+DropState s_dropTarget = DropState::None;  // 另一栏拖过来的模块能否放下
 bool s_movePanel = false;      // 正在拖面板挪位置
 POINT s_moveAt = {};           // 开始拖时鼠标在屏幕上的位置
 POINT s_moveCur = {};          // 拖模块时鼠标现在在屏幕上的位置（拖着的模块跟着它画）
@@ -249,7 +307,7 @@ float s_moveStartPos = 0;      // 开始拖时那个模块沿排列方向的起�
 POINT s_movePress = {};        // 按下鼠标的地方（按顺序排时挪出几像素才换成自由布局）
 // 自由布局里拖模块：开始拖时它的框、松开会落在哪（w 为 0：没地方放）、对齐到的参考线（区域里的位置，-1 没有）
 FreeBox s_moveBox0, s_moveLand;
-RectF s_dropMark;  // 另一条上拖着模块过来：松开会放在哪（窗口里的位置，宽为 0：没有）
+RectF s_dropMarks[2];  // 音量和亮度一起拖时，目标栏可能有两个落点
 bool s_hideAlone = false;  // 这次收起不带上另一条（快捷键只收这一条）
 float s_guideX = -1, s_guideY = -1;
 bool s_moveNoRoom = false;  // 想放的地方叠到了别的上面，又没有别的空位（只能回原处）
@@ -263,7 +321,8 @@ struct FreeSnap {
 };
 FreeSnap s_freeFrom;
 bool s_wheelPanel = false;  // 刚在面板空白处用滚轮改了大小：鼠标离开之前标题上显示大小
-std::wstring s_editNote;    // 标题上临时显示的一句话（比如“已保存当前布局”），鼠标挪到别的东西上就不显示了
+int s_editWheelRest = 0;    // Ctrl+滚轮和普通滚轮分别积累高精度滚轮的余量
+std::wstring s_editNote;    // 标题上的临时消息，鼠标挪到别的东西上就不显示了
 // 编辑模式里换了顺序、显示隐藏了模块：各模块从原来画的地方滑到新位置。s_modFrom 是开始滑时还差的那段
 PointF s_modFrom[kModuleCount];
 double s_modStart = 0;
@@ -279,6 +338,11 @@ POINT s_moveFromPos = {};      // 开始拖面板时窗口的位置、对齐和�
 int s_moveFromAlign = kAlignSystem, s_moveFromOffset = 500;
 // 编辑模式里正拖着东西：边、面板、模块、改大小的圆点、格子之间的缝
 bool EditDragging() { return s_resize || s_movePanel || s_moveModule != kPartNone || s_scaleModule >= 0 || s_gapDrag >= 0; }
+EditLayout* EditingLayout() { return s_editing && s_editSession ? &s_editSession->draft : nullptr; }
+int LayoutScale() {
+    const auto* draft = EditingLayout();
+    return draft ? draft->scale : g_settings.popupScale;
+}
 bool s_refocused = false;  // 这次弹出后已经抢回过一次前台
 Anim s_anim = Anim::None;
 double s_animStart = 0;
@@ -357,6 +421,7 @@ DWORD s_hoverAwayAt = 0;   // 鼠标走开的时间，0 = 还在上面
 // 任务栏藏着时短按 Win：迷你任务栏弹完再打开开始菜单，开始菜单开着时它一直在
 bool s_compact = false;       // 这次弹出只有一行格子、贴着屏幕底边，给开始菜单让地方
 bool s_startPending = false;  // 弹出动画放完就打开开始菜单
+bool s_followStart = false;   // 多屏时先打开开始菜单，等系统选定显示器
 bool s_startMode = false;     // 开始菜单打开了（或者正在打开），迷你任务栏跟着它收起
 bool s_startSeen = false;     // 开始菜单到过前台
 std::wstring s_startTyped;    // 开始菜单出来之前打的字（回车记成 \r），出来以后补发给它
@@ -382,7 +447,7 @@ float Px(float dip) { return dip * s_scale; }
 
 // 显示器的缩放比例再乘上设置里的迷你任务栏大小
 float PopupScale(HMONITOR monitor) {
-    return MonitorScale(monitor) * (s_preview ? s_previewPercent : g_settings.popupScale) / 100.0f;
+    return MonitorScale(monitor) * (s_preview ? s_previewPercent : LayoutScale()) / 100.0f;
 }
 
 bool Win11Style() { return s_glass.Style() == kGlassWin11; }
@@ -458,21 +523,26 @@ Color OnAccent() {
     return ColorLuma(RGB(a.GetR(), a.GetG(), a.GetB())) > 150 ? Color(235, 0, 0, 0) : Color(255, 255, 255, 255);
 }
 
-// 圆角半径（像素，按 100% 大小算）：主的那条、另一条（底部和侧边一起时侧边那条）各一个
-int PopupRadius() { return s_cur ? s_look.radius2 : s_look.radius; }
+// 圆角按实际边取，独立呼出和整组呼出用同一份。
+int PopupRadius() { return s_edge == kEdgeBottom ? s_look.radius : s_look.sideBar[s_edge - kEdgeLeft].radius; }
 
 // 横排、不显示标题行：名字显示在面板上方的小牌子里
 bool BubbleTitle() { return s_edge == kEdgeBottom && !s_compact && !s_look.showTitle; }
 
 // 弹在屏幕左右两边：竖着排，从侧边滑出来
 bool Vertical() { return s_edge != kEdgeBottom; }
-// 这次弹出的那条边用哪份“显示哪些、什么顺序”（底部、侧边各一份）。预览时用设置窗口里改着的
-ModuleSet& Mods() { return (s_preview ? s_look.modules : g_settings.modules)[ModuleSideOf(s_edge)]; }
+// 设置预览和 F2 编辑各用自己的草稿，平时读已保存的模块。
+ModuleSet& Mods() {
+    int side = ModuleSideOf(s_edge);
+    if (s_preview) return s_look.modules[side];
+    if (auto* draft = EditingLayout()) return draft->modules[side];
+    return g_settings.modules[side];
+}
 // 这次按自由布局摆（开始菜单上那一行总是按顺序排）
 bool FreeLayout() { return Mods().free && !s_compact; }
 
 // 开始按钮、窗口格子能不能隐藏：底部和侧边一起弹出、又是自由布局时（放到另一条上）。别的时候总是显示
-bool CanHideApps() { return s_dual && FreeLayout(); }
+bool CanHideApps() { return s_multiBar && FreeLayout(); }
 bool StartShown() { return !CanHideApps() || Mods().start; }
 bool WindowsShown() { return !CanHideApps() || Mods().windows; }
 
@@ -496,8 +566,11 @@ int IconPx() {
 // 面板贴着的那条屏幕边有多长（横排是宽，竖排是高）
 float ScreenSide() { return static_cast<float>(Vertical() ? s_bounds.bottom - s_bounds.top : s_bounds.right - s_bounds.left); }
 
-// 这一条的长度设置（占那条屏幕边的千分之几，0 = 跟着内容）：主的和另一条各一份
-int& PanelLength() { return s_cur ? g_settings.secondLength : g_settings.popupLength; }
+// 这一条的长度占屏幕边的千分之几，0 = 跟着内容。
+int& PanelLength() {
+    if (auto* draft = EditingLayout()) return draft->bars[ModuleSideOf(s_edge)].length;
+    return Vertical() ? g_settings.sideBar[s_edge - kEdgeLeft].length : g_settings.popupLength;
+}
 
 // 编辑模式里拖出来的面板长度（像素，不算媒体，再加上给媒体留的），0 = 跟着内容
 float CustomLength() {
@@ -1529,27 +1602,26 @@ bool BoxesOverlap(const FreeBox& a, const FreeBox& b, float pad) {
 }
 
 // 放在 box 会不会和别的（这次有的）叠在一起。self：它自己，不算
-bool Collides(const FreeBox& box, int self, float pad = 0) {
-    const ModuleSet& mods = Mods();
+bool Collides(const ModuleSet& mods, const bool* present, const FreeBox& box, int self, float pad = 0) {
     for (int i = 0; i < kFreeItems; ++i)
-        if (i != self && s_freePresent[i] && mods.box[i].w > 0 && BoxesOverlap(box, mods.box[i], pad)) return true;
+        if (i != self && present[i] && mods.box[i].w > 0 && BoxesOverlap(box, mods.box[i], pad)) return true;
     return false;
 }
 
-bool InCanvas(const FreeBox& b) {
-    const ModuleSet& mods = Mods();
+bool Collides(const FreeBox& box, int self, float pad = 0) { return Collides(Mods(), s_freePresent, box, self, pad); }
+
+bool InCanvas(const ModuleSet& mods, const FreeBox& b) {
     const float e = 0.01f;
     return b.x >= -e && b.y >= -e && b.x + b.w <= mods.freeW + e && b.y + b.h <= mods.freeH + e;
 }
 
 // 离 want 最近、在区域里、不和别的叠在一起的位置（差不多近时挑和别的隔开一点的）；没有返回 w 为 0 的。
 // 最近的空位每个方向上要么就是想放的位置，要么贴着区域的边或者别的框的边，只要试这些
-FreeBox FindSpot(const FreeBox& want, int self) {
-    const ModuleSet& mods = Mods();
+FreeBox FindSpot(const ModuleSet& mods, const bool* present, const FreeBox& want, int self) {
     std::vector<float> xs = {want.x, 0, mods.freeW - want.w}, ys = {want.y, 0, mods.freeH - want.h};
     for (int i = 0; i < kFreeItems; ++i) {
         const FreeBox& o = mods.box[i];
-        if (i == self || !s_freePresent[i] || o.w <= 0) continue;
+        if (i == self || !present[i] || o.w <= 0) continue;
         for (float g : {0.0f, kFreeGap}) {
             xs.insert(xs.end(), {o.x - want.w - g, o.x + o.w + g});
             ys.insert(ys.end(), {o.y - want.h - g, o.y + o.h + g});
@@ -1565,7 +1637,7 @@ FreeBox FindSpot(const FreeBox& want, int self) {
             for (float y : ys) {
                 FreeBox b{x, y, want.w, want.h};
                 float d = std::hypot(x - want.x, y - want.y);
-                if (d < bestD[pass] && InCanvas(b) && !Collides(b, self, pad)) {
+                if (d < bestD[pass] && InCanvas(mods, b) && !Collides(mods, present, b, self, pad)) {
                     best[pass] = b;
                     bestD[pass] = d;
                 }
@@ -1574,6 +1646,8 @@ FreeBox FindSpot(const FreeBox& want, int self) {
     if (best[0].w > 0 && bestD[0] <= bestD[1] + 2 * kFreeGap) return best[0];
     return best[1];
 }
+
+FreeBox FindSpot(const FreeBox& want, int self) { return FindSpot(Mods(), s_freePresent, want, self); }
 
 // 这次有的东西都要有个放得下的框：上次的框出了区域就挪回来（比区域还大就缩小），和别的叠在一起就挪到最近的空位
 // （设置窗口里打开了一样东西、区域改小了以后会这样）。还没放过的（第一次有）按原来的大小找个空位：调节条那一行放左下角、
@@ -1892,7 +1966,11 @@ void DrawPill(Graphics& g) {
 // 在任务栏上闪着（来了消息）的窗口用的橙色
 Color UrgentColor(BYTE alpha = 255) { return ToneLight() ? Color(alpha, 235, 115, 0) : Color(alpha, 255, 150, 40); }
 
-bool IsUrgentItem(int i) { return s_items[i].hwnd && Attention_IsUrgent(s_items[i].hwnd); }
+bool IsUrgentItem(int i) {
+    const Tile& item = s_items[i];
+    if (item.windows.empty()) return item.hwnd && Attention_IsUrgent(item.hwnd);
+    return std::any_of(item.windows.begin(), item.windows.end(), Attention_IsUrgent);
+}
 
 // 别的屏幕上的窗口：格子右上角一个小圆，写着它在第几块屏幕（和设置里“屏幕 2”的编号一样）
 void DrawScreenBadge(Graphics& g, const RectF& tile, HWND hwnd) {
@@ -1941,11 +2019,22 @@ void DrawTile(Graphics& g, int idx) {
         bg.Inflate(-0.5f, -0.5f);
         FillRound(g, bg, PillRadius(), UrgentColor(ToneLight() ? 70 : 80));
     }
-    float is = std::min(r.Width / 2 * glyph, r.Width - Px(2));
+    float step = item.windows.empty() ? 0.0f : std::min(Px(4), r.Width * 0.10f);
+    float is = std::max(1.0f, std::min(r.Width / 2 * glyph, r.Width - Px(2) - step));
     RectF iconRect(cx - is / 2, cy - is / 2, is, is);
+    if (step > 0) {
+        iconRect.Offset(-step / 2, step / 2);
+        RectF back = iconRect;
+        back.Offset(step, -step);
+        float radius = std::min(Px(5), is / 4);
+        FillRound(g, back, radius, pal.accent);
+        FillRound(g, iconRect, radius, ToneLight() ? Color(255, 250, 250, 252) : Color(255, 43, 43, 49));
+        float inset = std::min(Px(2), is / 8);
+        iconRect.Inflate(-inset, -inset);
+    }
     if (item.icon) g.DrawImage(item.icon.get(), iconRect);
     else FillRound(g, iconRect, Px(4), pal.separator);
-    DrawScreenBadge(g, r, item.hwnd);
+    if (item.windows.empty()) DrawScreenBadge(g, r, item.hwnd);
 
     // 和 Win11 任务栏一样：当前窗口是一条长的强调色短线，其它打开的窗口是短点，没运行的固定应用没有。
     // 竖排时竖着画在靠屏幕边的那一侧
@@ -2576,7 +2665,7 @@ void DrawBubble(Graphics& g, float anchor, const std::wstring& title, const Font
     const Layout& L = s_L;
     Tone theme(-1);  // 小牌子是实心底，照主题
     const Palette& pal = Colors();
-    bool filtering = !s_filter.empty();
+    bool filtering = !s_editing && !s_filter.empty();
     if (title.empty() && !filtering) return;
     StringFormat oneLine(StringFormatFlagsNoWrap);
     oneLine.SetLineAlignment(StringAlignmentCenter);
@@ -2591,7 +2680,7 @@ void DrawBubble(Graphics& g, float anchor, const std::wstring& title, const Font
     }
     float w = std::min(maxW, 2 * padX + searchW + titleW);
     float x = s_edge == kEdgeLeft ? L.panelX + L.panelW + Px(8) : L.panelX - Px(8) - w;
-    float y = std::clamp(anchor - h / 2, L.panelY, L.panelY + L.panelH - h);
+    float y = std::clamp(anchor - h / 2, L.panelY, L.panelY + std::max(0.0f, L.panelH - h));
     if (!Vertical()) {
         x = std::clamp(anchor - w / 2, L.panelX, std::max(L.panelX, L.panelX + L.panelW - w));
         y = L.panelY - Px(8) - h;
@@ -2621,18 +2710,27 @@ void DrawEditFrame(Graphics& g);
 std::wstring EditText();
 bool EditPartShown(int part);
 RectF EditPartRect(int part);
+const wchar_t* EdgeLabel(int edge) {
+    const wchar_t* const names[] = {L"底部", L"左侧", L"右侧"};
+    return Tr(names[ModuleSideOf(edge)]);
+}
 
 // 顶部一行显示鼠标所指或选中项的标题；在调节条上时显示音量 / 亮度；编辑模式里说鼠标下的东西怎么拖
 std::wstring PanelTitle() {
     int shown = s_hover >= 0 ? s_hover : s_sel;
-    if (s_editing) return EditText();
+    if (s_editing) return TrF(L"%ls · %ls", EdgeLabel(s_edge), EditText().c_str());
     if (s_drag != kNone) return SliderText(SliderOf(s_drag));
     if (s_hoverControl != kNone) return SliderText(SliderOf(s_hoverControl));
     if (s_hoverRadio >= 0) return RadioText(s_radioIds[s_hoverRadio]);
     if (s_hoverExtra != kExtraNone) return ExtraText(s_hoverExtra);
     if (s_hoverTray >= 0 || s_overTray) return TrayTitle(s_hoverTray);
     if (shown == 0) return Tr(L"开始");
-    if (shown > 0 && shown <= ItemCount()) return s_items[shown - 1].title;
+    if (shown > 0 && shown <= ItemCount()) {
+        const Tile& item = s_items[shown - 1];
+        if (item.windows.empty()) return item.title;
+        const std::wstring& title = item.pinName.empty() ? item.title : item.pinName;
+        return TrF(L"%ls · %d 个窗口", title.c_str(), static_cast<int>(item.windows.size()));
+    }
     return {};
 }
 
@@ -2655,6 +2753,11 @@ void DrawContent(Graphics& g) {
     oneLine.SetLineAlignment(StringAlignmentCenter);
     oneLine.SetTrimming(StringTrimmingEllipsisCharacter);
     RectF titleRect = TitleRect();
+    if (s_editing && !vertical && !BubbleTitle() && titleRect.Width < Px(105)) {
+        title = EdgeLabel(s_edge);
+        titleRect.X = L.panelX + Px(2);
+        titleRect.Width = L.panelW - Px(4);
+    }
     if (vertical || BubbleTitle()) {
         // 竖排（或者横排不显示标题行）：标题在面板旁边（上方）的小牌子上，对着它说的那一项。打字筛选时只在指着或选了一项时
         // 显示名字；开始菜单模式只在鼠标指着时显示；横排时只在指着、用键盘选或者打字时显示
@@ -2825,7 +2928,7 @@ void DrawContent(Graphics& g) {
 
 void ReleaseCanvas() {
     if (s_canvasDC) {
-        SelectObject(s_canvasDC, s_canvasOld);
+        if (s_canvasOld && s_canvasOld != HGDI_ERROR) SelectObject(s_canvasDC, s_canvasOld);
         DeleteDC(s_canvasDC);
     }
     if (s_canvas) DeleteObject(s_canvas);
@@ -2850,7 +2953,11 @@ bool EnsureCanvas() {
     s_canvas = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (!s_canvas) return false;
     s_canvasDC = CreateCompatibleDC(nullptr);
-    s_canvasOld = SelectObject(s_canvasDC, s_canvas);
+    if (s_canvasDC) s_canvasOld = SelectObject(s_canvasDC, s_canvas);
+    if (!bits || !s_canvasOld || s_canvasOld == HGDI_ERROR) {
+        ReleaseCanvas();
+        return false;
+    }
     s_bits = static_cast<DWORD*>(bits);
     s_canvasW = s_width;
     s_canvasH = s_height;
@@ -2898,56 +3005,79 @@ void BlendLayer(int dx, int dy) {
 
 void HideThumb() {
     KillTimer(s_hwnd, kTimerThumb);
-    Thumb_Hide();
-    s_thumbWant = s_thumbShown = nullptr;
+    Thumb_Hide(s_hwnd);
+    s_thumbWant.clear();
     s_thumbIdx = -1;
 }
 
-// 鼠标所指的格子（用键盘选时是选中的格子）是打开的窗口时显示它的缩略图；弹出、收起动画期间和右键菜单开着时不显示
+HWND LiveWindow(const Tile& item) {
+    if (item.hwnd && IsWindow(item.hwnd)) return item.hwnd;
+    auto window = std::find_if(item.windows.begin(), item.windows.end(), [](HWND hwnd) { return IsWindow(hwnd); });
+    return window == item.windows.end() ? nullptr : *window;
+}
+
+bool ThumbAllowed() {
+    return s_open && !s_preview && s_anim == Anim::None && s_drag == kNone && !s_editing && !s_menuOpen &&
+           !s_startMode && s_trayHot < 0;
+}
+
+// 鼠标所指的格子（用键盘选时是选中的格子）是打开的窗口时显示它的缩略图。
 int ThumbIndex() {
-    if (!s_open || s_anim != Anim::None || s_drag != kNone || s_editing || s_menuOpen || s_startMode) return -1;  // 开始菜单会盖住缩略图
+    if (!ThumbAllowed()) return -1;
     int idx = s_hover >= 0 ? s_hover : s_keyNav ? s_sel : -1;
-    if (idx <= 0 || idx > ItemCount() || !IsTileVisible(idx) || !IsWindow(s_items[idx - 1].hwnd)) return -1;
+    if (idx <= 0 || idx > ItemCount() || !IsTileVisible(idx) || !LiveWindow(s_items[idx - 1])) return -1;
     return idx;
 }
 
-void ShowThumbNow() {
+bool ShowThumbNow() {
     KillTimer(s_hwnd, kTimerThumb);
     int idx = ThumbIndex();
     if (idx < 0) {
         HideThumb();
-        return;
+        return false;
     }
     // 横排时在格子上方；竖排时在面板里侧、标题小牌子下面
     RectF r = TileRect(idx);
     const Layout& L = s_L;
     POINT at = {s_pos.x + static_cast<int>(r.X + r.Width / 2), s_pos.y + static_cast<int>(L.margin - Px(8))};
-    int place = kThumbAbove;
+    ThumbPlace place = kThumbAbove;
     if (Vertical()) {
         bool left = s_edge == kEdgeLeft;
         at = {s_pos.x + static_cast<int>(left ? L.panelX + L.panelW + Px(8) : L.panelX - Px(8)),
               s_pos.y + static_cast<int>(r.Y + r.Height / 2 + Px(21))};
         place = left ? kThumbRight : kThumbLeft;
     }
-    HWND h = s_items[idx - 1].hwnd;
-    s_thumbShown = Thumb_Show(h, at, place, s_bounds, s_scale, s_glass.Light()) ? h : nullptr;
-    s_thumbWant = h;
+    const Tile& item = s_items[idx - 1];
+    s_thumbWant = item.windows;
+    if (s_thumbWant.empty()) s_thumbWant.push_back(item.hwnd);
     s_thumbIdx = idx;
+    return Thumb_Show(s_hwnd, s_thumbWant, at, place, s_bounds, s_scale, s_glass.Light());
 }
 
 // 每次重画后调用：想显示的缩略图变了就安排出现、切换或消失
 void SyncThumb() {
-    if (!s_open) {
-        if (s_thumbWant || s_thumbShown) HideThumb();
+    if (!ThumbAllowed()) {
+        if (!s_thumbWant.empty() || Thumb_IsShown(s_hwnd)) HideThumb();
         return;
     }
     int idx = ThumbIndex();
-    HWND want = idx > 0 ? s_items[idx - 1].hwnd : nullptr;
-    if (want == s_thumbWant && idx == s_thumbIdx) return;
-    s_thumbWant = want;
+    if (idx > 0) {
+        const Tile& item = s_items[idx - 1];
+        if (item.windows.empty()) {
+            if (idx == s_thumbIdx && s_thumbWant.size() == 1 && s_thumbWant.front() == item.hwnd) return;
+            s_thumbWant.assign(1, item.hwnd);
+        } else {
+            if (idx == s_thumbIdx && s_thumbWant == item.windows) return;
+            s_thumbWant = item.windows;
+        }
+    } else {
+        if (idx == s_thumbIdx && s_thumbWant.empty()) return;
+        s_thumbWant.clear();
+    }
     s_thumbIdx = idx;
-    if (want && s_thumbShown) ShowThumbNow();  // 已经在显示：直接换成这个窗口
-    else if (want || s_thumbShown) SetTimer(s_hwnd, kTimerThumb, want ? kThumbShowMs : kThumbHideMs, nullptr);
+    bool shown = Thumb_IsShown(s_hwnd);
+    if (idx > 0 && shown) ShowThumbNow();  // 已经在显示：直接换成当前格子的整组
+    else if (idx > 0 || shown) SetTimer(s_hwnd, kTimerThumb, idx > 0 ? kThumbShowMs : kThumbHideMs, nullptr);
     else KillTimer(s_hwnd, kTimerThumb);
 }
 
@@ -3141,18 +3271,7 @@ bool s_excluded = false;        // 现在截图时排除着本窗口
 double s_excludedAt = 0;        // 什么时候打开的排除
 int s_still = 0;                // 背景连续几次没变
 UINT s_shotSeq = 0;             // 背景换过一次（重新弹出）就加一，截到一半的旧结果不要
-HANDLE s_shotThread = nullptr;  // 后台正在截
-
-struct ShotJob {
-    HWND hwnd;
-    UINT seq;
-    RECT window;
-    float scale;
-    int style;
-    GlassShot prev;  // 只有 area 和 raw，一样就不处理
-    GlassShot shot;
-    bool changed = false;
-};
+GlassCapture s_liveCapture;
 
 bool SetExclude(bool on) {
     if (on == s_excluded) return true;
@@ -3224,47 +3343,24 @@ RECT LiveWindow() {
 
 bool LivePaused() { return s_anim != Anim::None || s_resize || s_movePanel || s_menuOpen; }
 
-DWORD WINAPI ShotThread(void* param) {
-    auto* job = static_cast<ShotJob*>(param);
-    job->changed = Glass::Shoot(job->window, job->scale, job->style, job->shot, &job->prev);
-    if (!PostMessageW(job->hwnd, WM_APP_SHOT, 0, reinterpret_cast<LPARAM>(job))) delete job;
-    return 0;
-}
-
-bool StartShot() {
-    auto job = std::make_unique<ShotJob>();
-    job->hwnd = s_hwnd;
-    job->seq = s_shotSeq;
-    job->window = LiveWindow();
-    job->scale = s_scale;
-    job->style = s_glass.Style();
-    job->prev.area = s_glass.Area();
-    job->prev.raw = s_glass.Raw();
-    HANDLE thread = CreateThread(nullptr, 0, ShotThread, job.get(), 0, nullptr);
-    if (!thread) return false;
-    job.release();
-    s_shotThread = thread;
-    return true;
-}
-
-// 收起时：不再刷新，等后台截完（截图卡住时最多等 1 秒），没处理的结果扔掉，关掉排除
+// 收起时让旧结果作废，正在截的任务结束后才安排下一张。
 void StopLive() {
     KillTimer(s_hwnd, kTimerLive);
     ++s_shotSeq;
-    if (s_shotThread) {
-        if (WaitForSingleObject(s_shotThread, 1000) == WAIT_TIMEOUT) Log(L"迷你任务栏：后台截图没有及时结束");
-        CloseHandle(s_shotThread);
-        s_shotThread = nullptr;
-    }
-    MSG msg;
-    while (PeekMessageW(&msg, s_hwnd, WM_APP_SHOT, WM_APP_SHOT, PM_REMOVE)) delete reinterpret_cast<ShotJob*>(msg.lParam);
     SetExclude(false);
 }
+
+void OnShot();
 
 // 该截下一张了：先打开排除、等它生效，再交给后台
 void LiveTick() {
     KillTimer(s_hwnd, kTimerLive);
-    if (!s_open || s_preview || s_compact || s_shotThread || s_excludeWorks < 0) return;  // 截完会再来；不支持就不再刷新
+    if (!s_open || s_preview || s_compact || s_excludeWorks < 0) return;
+    if (s_liveCapture.Pending()) {
+        OnShot();
+        if (s_liveCapture.Pending()) SetTimer(s_hwnd, kTimerLive, 250, nullptr);
+        return;
+    }
     if (LivePaused()) {
         SetTimer(s_hwnd, kTimerLive, 100, nullptr);
         return;
@@ -3279,7 +3375,9 @@ void LiveTick() {
         SetExclude(false);
         return;
     }
-    if (!StartShot()) SetTimer(s_hwnd, kTimerLive, 500, nullptr);
+    bool started = s_liveCapture.Start(s_hwnd, WM_APP_SHOT, s_shotSeq, LiveWindow(), s_scale, s_glass);
+    // 消息队列满时完成通知可能没投递成功，定时器仍能取走结果。
+    SetTimer(s_hwnd, kTimerLive, started ? 250 : 500, nullptr);
 }
 
 void Render(float slide, BYTE alpha);
@@ -3287,15 +3385,11 @@ void RequestFrame();
 bool PillMoving();
 
 // 后台截完了：变了（而且这期间没重新弹出、截的范围没变）就换上重画。背景在变就尽快再截；一直没变就关掉排除，隔一会儿再看
-void OnShot(ShotJob* raw) {
-    std::unique_ptr<ShotJob> job(raw);
-    if (s_shotThread) {
-        CloseHandle(s_shotThread);
-        s_shotThread = nullptr;
-    }
-    if (!s_open) return;
+void OnShot() {
+    auto job = s_liveCapture.Take();
+    if (!job || !s_open || s_preview || s_compact || s_excludeWorks < 0) return;
     RECT now = LiveWindow();
-    if (job->seq == s_shotSeq && job->style == s_glass.Style() && job->scale == s_scale && EqualRect(&job->window, &now) &&
+    if (job->generation == s_shotSeq && job->style == s_glass.Style() && job->scale == s_scale && EqualRect(&job->window, &now) &&
         !LivePaused()) {
         if (job->changed) {
             s_glass.Adopt(std::move(job->shot), job->scale);
@@ -3321,8 +3415,7 @@ void OnShot(ShotJob* raw) {
 
 void RequestFrame() {
     if (s_framePosted || !s_hwnd) return;
-    s_framePosted = true;
-    PostMessageW(s_hwnd, WM_APP_FRAME, 0, 0);
+    s_framePosted = PostMessageW(s_hwnd, WM_APP_FRAME, 0, 0) != FALSE;
 }
 
 bool MouseButtonDown() {
@@ -3332,7 +3425,7 @@ bool MouseButtonDown() {
 }
 
 void EndStartMode() {
-    s_startPending = s_startMode = false;
+    s_startPending = s_startMode = s_followStart = false;
     s_startTyped.clear();
     KillTimer(s_hwnd, kTimerStart);
 }
@@ -3348,22 +3441,13 @@ void EndHoverOpen() {
     KillTimer(s_hwnd, kTimerHoverLeave);
 }
 
-void EndResize();
-void EndModuleDrag(bool drop);
-void EndPanelMove(bool drop);
-void EndScaleDrag();
-void EndGapDrag();
-
+void FinishEditing(bool apply);
 void HideOne();
-void HideOther();
+void HidePeers();
 
 void HideNow() {
-    EndResize();
-    EndModuleDrag(false);
-    EndPanelMove(false);
-    EndScaleDrag();
-    EndGapDrag();
-    s_editing = false;
+    bool wasPreview = s_preview;
+    if (s_editing) FinishEditing(false);
     s_editHover = kPartNone;
     s_hoverModule = -1;
     HideThumb();
@@ -3384,9 +3468,9 @@ void HideNow() {
     StopLive();
     ShowWindow(s_hwnd, SW_HIDE);
     Attention_Update();
-    bool alone = s_hideAlone;
+    bool alone = s_hideAlone || wasPreview;
     s_hideAlone = false;
-    if (!alone) HideOther();  // 两条一起的：这一条收起（比如点了里面的东西），另一条也收起
+    if (!alone) HidePeers();  // 点了面板里的内容时，一组一起收起
 }
 
 void BeginStart();
@@ -3395,13 +3479,13 @@ void BeginStart();
 bool s_scaleLayout = false;
 
 // ---- 两条迷你任务栏 ----
-// 底部和侧边一起弹出时有两个窗口，代码只有一份：上面那些 s_ 变量放的是现在载入的那一条，另一条的放在 s_away 里，
+// 每条边有一个窗口，代码只有一份：上面那些 s_ 变量放的是现在载入的那一条，其它的放在 s_panels 里，
 // 要处理哪一条就先换上它（InPanel，出了作用域换回来）。窗口的消息、对外的 Popup_ 函数一进来就换到对应的那条。
 // 以后加了这种每条各一份的变量，要加进下面的表里；两条共用的（字体、读到过的亮度这些）不加
 #define TP_PANEL_VARS(X) \
-    X(s_hwnd) X(s_dual) X(s_frameSeq) X(s_items) X(s_allItems) X(s_filter)\
+    X(s_hwnd) X(s_multiBar) X(s_placed) X(s_frameSeq) X(s_items) X(s_allItems) X(s_filter)\
     X(s_lockedItemsW) X(s_tileGrow) X(s_holderRoom) X(s_keyNav) X(s_menuOpen) X(s_lastMouse)\
-    X(s_thumbWant) X(s_thumbShown) X(s_thumbIdx) X(s_prevForeground) X(s_keepPrevForeground) X(s_bounds)\
+    X(s_thumbWant) X(s_thumbIdx) X(s_prevForeground) X(s_keepPrevForeground) X(s_bounds)\
     X(s_trayRowMax) X(s_scale) X(s_L) X(s_width) X(s_height) X(s_pos)\
     X(s_first) X(s_visible) X(s_hover) X(s_sel) X(s_open) X(s_preview)\
     X(s_previewPercent) X(s_previewAlign) X(s_previewEdge) X(s_previewLook) X(s_look) X(s_edge)\
@@ -3410,8 +3494,9 @@ bool s_scaleLayout = false;
     X(s_edgeClickPt) X(s_editHover) X(s_hoverModule) X(s_scaleModule) X(s_hoverGap) X(s_gapDrag)\
     X(s_gapFromValue) X(s_gapAt) X(s_wheelGap) X(s_scaleFromPercent) X(s_scaleFromK) X(s_scaleAnchor)\
     X(s_scaleDiag) X(s_wheelScaled) X(s_moveModule) X(s_moveOut) X(s_movePanel) X(s_moveAt)\
-    X(s_moveCur) X(s_moveStartPos) X(s_movePress) X(s_moveBox0) X(s_moveLand) X(s_dropMark) X(s_hideAlone) X(s_guideX)\
-    X(s_guideY) X(s_moveNoRoom) X(s_scaleBox0) X(s_scaleAt) X(s_freeFrom) X(s_wheelPanel)\
+    X(s_moveCur) X(s_moveStartPos) X(s_movePress) X(s_moveBox0) X(s_moveLand) X(s_dropMarks) X(s_dropTarget) X(s_movePeer)\
+    X(s_hideAlone) X(s_guideX)\
+    X(s_guideY) X(s_moveNoRoom) X(s_scaleBox0) X(s_scaleAt) X(s_freeFrom) X(s_wheelPanel) X(s_editWheelRest)\
     X(s_editNote) X(s_modFrom) X(s_modStart) X(s_scaleFrom) X(s_scaleStart) X(s_gapFrom)\
     X(s_gapStart) X(s_moveFromPos) X(s_moveFromAlign) X(s_moveFromOffset) X(s_refocused) X(s_anim)\
     X(s_animStart) X(s_lastSlide) X(s_lastAlpha) X(s_hideFromSlide) X(s_hideFromAlpha) X(s_framePosted)\
@@ -3424,11 +3509,11 @@ bool s_scaleLayout = false;
     X(s_showBattery) X(s_mediaOpen) X(s_mediaFrom) X(s_mediaStart) X(s_mediaLeaving) X(s_media)\
     X(s_ime) X(s_battery) X(s_coverFrom) X(s_coverScaled) X(s_drawK) X(s_imeTarget)\
     X(s_hoverExtra) X(s_edgeSince) X(s_edgeArmed) X(s_hoverOpen) X(s_hoverAwayAt) X(s_compact)\
-    X(s_startPending) X(s_startMode) X(s_startSeen) X(s_startTyped) X(s_startAt) X(s_startClosedAt)\
+    X(s_startPending) X(s_followStart) X(s_startMode) X(s_startSeen) X(s_startTyped) X(s_startAt) X(s_startClosedAt)\
     X(s_glass) X(s_base) X(s_baseValid) X(s_canvasDC) X(s_canvas) X(s_canvasOld)\
     X(s_bits) X(s_canvasW) X(s_canvasH) X(s_pillIndex) X(s_pillAt) X(s_pillFrom)\
     X(s_pillTo) X(s_pillStart) X(s_boxFrom) X(s_boxStart) X(s_freePresent) X(s_mediaCutAt) X(s_mediaCut) X(s_layer)\
-    X(s_layerValid) X(s_excluded) X(s_excludedAt) X(s_still) X(s_shotSeq) X(s_shotThread)\
+    X(s_layerValid) X(s_excluded) X(s_excludedAt) X(s_still) X(s_shotSeq) X(s_liveCapture)\
     X(s_scaleLayout) X(s_tones) X(s_toneVersion) X(s_toneAt)
 
 struct PanelVars {
@@ -3436,7 +3521,7 @@ struct PanelVars {
     TP_PANEL_VARS(TP_PANEL_DECL)
 #undef TP_PANEL_DECL
 };
-PanelVars s_away{};   // 没载入的那一条
+PanelVars s_panels[kPopupPanelCount]{};  // 当前载入的那一格留空
 UINT s_vblankSeq = 0;  // 等过几次屏幕刷新（见 FrameWait）
 
 template <class T>
@@ -3448,19 +3533,25 @@ void CopyVar(T& dst, const T& src) {
     }
 }
 
-// 启动时：另一条从和现在一样的初始值开始
-void InitAway() {
-#define TP_PANEL_INIT(n) CopyVar(s_away.v_##n, n);
-    TP_PANEL_VARS(TP_PANEL_INIT)
+void InitPanelStates() {
+    for (int panel = 1; panel < kPopupPanelCount; ++panel) {
+#define TP_PANEL_INIT(n) CopyVar(s_panels[panel].v_##n, n);
+        TP_PANEL_VARS(TP_PANEL_INIT)
 #undef TP_PANEL_INIT
+    }
+}
+
+void SwapPanelState(PanelVars& state) {
+    using std::swap;
+#define TP_PANEL_SWAP(n) swap(n, state.v_##n);
+    TP_PANEL_VARS(TP_PANEL_SWAP)
+#undef TP_PANEL_SWAP
 }
 
 void Use(int panel) {
     if (panel == s_cur) return;
-    using std::swap;
-#define TP_PANEL_SWAP(n) swap(n, s_away.v_##n);
-    TP_PANEL_VARS(TP_PANEL_SWAP)
-#undef TP_PANEL_SWAP
+    SwapPanelState(s_panels[s_cur]);
+    SwapPanelState(s_panels[panel]);
     s_cur = panel;
 }
 
@@ -3473,10 +3564,26 @@ struct InPanel {
     InPanel& operator=(const InPanel&) = delete;
 };
 
-int Other() { return 1 - s_cur; }
-int PanelOf(HWND hwnd) { return hwnd && hwnd == s_panelHwnd[1] ? 1 : hwnd && hwnd == s_panelHwnd[0] ? 0 : s_cur; }
-bool IsOtherPanel(HWND hwnd) { return hwnd && hwnd == s_panelHwnd[Other()]; }
-bool OtherOpen() { return s_away.v_s_open && !s_away.v_s_preview; }
+int PanelOf(HWND hwnd) {
+    for (int panel : kPanelSlots)
+        if (hwnd && hwnd == s_panelHwnd[panel]) return panel;
+    return -1;
+}
+
+bool IsOtherPanel(HWND hwnd) {
+    int panel = PanelOf(hwnd);
+    return panel >= 0 && panel != s_cur;
+}
+
+bool PeerOpen(int panel) {
+    return panel != s_cur && s_panels[panel].v_s_open && !s_panels[panel].v_s_preview;
+}
+
+int OpenPeer() {
+    for (int panel : kPanelSlots)
+        if (PeerOpen(panel)) return panel;
+    return -1;
+}
 
 // 另一条开着时它的面板在屏幕上的位置，没开着为空
 RECT PanelRectAt(const Layout& L, POINT o) {
@@ -3484,7 +3591,7 @@ RECT PanelRectAt(const Layout& L, POINT o) {
             o.x + static_cast<LONG>(L.panelX + L.panelW), o.y + static_cast<LONG>(L.panelY + L.panelH)};
 }
 
-RECT OtherPanelRect() { return s_away.v_s_open ? PanelRectAt(s_away.v_s_L, s_away.v_s_pos) : RECT{}; }
+RECT PeerRect(int panel) { return PanelRectAt(s_panels[panel].v_s_L, s_panels[panel].v_s_pos); }
 
 // 动画的下一帧之前等屏幕刷新。两条一起放动画时，这次刷新以后另一条已经等过了就不再等，免得两条轮流各等一次、都只剩一半帧数
 void FrameWait() {
@@ -3496,11 +3603,6 @@ void FrameWait() {
 }
 
 // 这块屏幕设的位置（PopupPlaceFor 的 edge），算出这一条弹在哪条边
-int PanelEdge(int placed, int panel) {
-    if (panel == 0) return DualEdge(placed) ? kEdgeBottom : placed;
-    return DualEdge(placed) ? DualSide(placed) : placed == kEdgeBottom ? kEdgeLeft : kEdgeBottom;
-}
-
 void ScaleRelayout() {
     FitTiles(true);
     s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
@@ -3511,6 +3613,7 @@ void ScaleRelayout() {
 
 // 诊断：弹出动画放完时窗口在不在屏幕上、中间那一点是不是被别的窗口盖着
 void LogShown() {
+    if (!s_hwnd) return;
     RECT wr = {};
     GetWindowRect(s_hwnd, &wr);
     RECT panel = PanelRectAt(s_L, s_pos);
@@ -3582,36 +3685,28 @@ void Redraw() {
 // 托盘图标翻页（堆叠、不止一页时），转一圈回到头；一行大图标放不下时滚动 delta 个，到头就停
 void FlipTray(int delta) {
     if (s_trayStyle == kTrayRow) {
-        int first = std::clamp(s_trayFirst + delta, 0, TrayCells() - TrayRowVisible());
+        int last = std::max(0, TrayCells() - TrayRowVisible());
+        int first = std::clamp(s_trayFirst + delta, 0, last);
         if (first == s_trayFirst) return;
         s_trayFirst = first;
-        POINT pt;
-        GetCursorPos(&pt);
-        ScreenToClient(s_hwnd, &pt);
-        s_hoverTray = TrayAt(pt.x, pt.y);
-        Redraw();
-        return;
+    } else {
+        int pages = TrayPages();
+        if (pages <= 1 || delta == 0) return;
+        s_flipFrom = s_trayPage;
+        s_flipDir = delta > 0 ? 1 : -1;
+        s_flipStart = NowMs();
+        s_trayPage = ((s_trayPage + delta) % pages + pages) % pages;
     }
-    int pages = TrayPages();
-    if (pages <= 1 || delta == 0) return;
-    s_flipFrom = s_trayPage;
-    s_flipDir = delta > 0 ? 1 : -1;
-    s_flipStart = NowMs();
-    s_trayPage = ((s_trayPage + delta) % pages + pages) % pages;
-    POINT pt;  // 鼠标下换成了新一页的图标
-    GetCursorPos(&pt);
-    ScreenToClient(s_hwnd, &pt);
-    s_hoverTray = TrayAt(pt.x, pt.y);
+    POINT pt{};  // 鼠标下换成了新一页的图标
+    s_hoverTray = GetCursorPos(&pt) && ScreenToClient(s_hwnd, &pt) ? TrayAt(pt.x, pt.y) : -1;
     Redraw();
 }
 
 // 鼠标停在托盘图标上时，左右方向键翻页（一行大图标时滚动）
 bool FlipTrayUnderMouse(int delta) {
     if (!TrayScrolls()) return false;
-    POINT pt;
-    GetCursorPos(&pt);
-    if (WindowFromPoint(pt) != s_hwnd) return false;
-    ScreenToClient(s_hwnd, &pt);
+    POINT pt{};
+    if (!GetCursorPos(&pt) || WindowFromPoint(pt) != s_hwnd || !ScreenToClient(s_hwnd, &pt)) return false;
     if (!OverTray(pt.x, pt.y)) return false;
     FlipTray(delta);
     return true;
@@ -3645,6 +3740,41 @@ int DefaultSelection() {
     return !s_items.empty() ? 1 : StartShown() ? 0 : -1;
 }
 
+std::vector<Tile> GroupTiles(const std::vector<Tile>& items, const std::wstring& filter = {}) {
+    std::vector<Tile> result;
+    result.reserve(items.size());
+    std::unordered_map<std::wstring, size_t> groups;
+    for (const Tile& item : items) {
+        if (!filter.empty() && item.search.find(filter) == std::wstring::npos) continue;
+        if (!item.hwnd || item.appKey.empty()) {
+            result.push_back(item);
+            continue;
+        }
+        auto [group, first] = groups.try_emplace(item.appKey, result.size());
+        if (first) {
+            result.push_back(item);
+            continue;
+        }
+        Tile& stack = result[group->second];
+        if (stack.windows.empty()) stack.windows.push_back(stack.hwnd);
+        stack.windows.push_back(item.hwnd);
+        if (item.active && !stack.active) {
+            stack.hwnd = item.hwnd;
+            stack.active = true;
+            stack.title = item.title;
+            stack.icon = item.icon;
+        }
+        if (stack.pinOrder < 0 && item.pinOrder >= 0) {
+            stack.launch = item.launch;
+            stack.pinName = item.pinName;
+            stack.pinIcon = item.pinIcon;
+            stack.pinOrder = item.pinOrder;
+        }
+        if (stack.pinIcon) stack.icon = stack.pinIcon;
+    }
+    return result;
+}
+
 // 打了字：只留下标题、应用名或程序名里有这些字的格子，后面再补上开始菜单里匹配的应用。
 // 面板宽度保持不变（玻璃背景是弹出时按这个大小截的），放不下就左右滚动。
 // keep：字没变、只是后台读完了应用列表，选着的、滚到的位置不动
@@ -3658,12 +3788,8 @@ void ApplyFilter(bool keep = false) {
         keepLaunch = s_items[s_sel - 1].launch;
     }
     std::wstring f = ToLower(s_filter);
-    if (f.empty()) {
-        s_items = s_allItems;
-    } else {
-        s_items.clear();
-        for (const Tile& t : s_allItems)
-            if (t.search.find(f) != std::wstring::npos) s_items.push_back(t);
+    s_items = GroupTiles(s_allItems, f);
+    if (!f.empty()) {
         int iconPx = IconPx();
         for (const InstalledApp& a : Apps_Match(f, kMaxAppMatches)) {
             std::wstring name = ToLower(a.name);
@@ -3687,7 +3813,7 @@ void ApplyFilter(bool keep = false) {
     s_keyNav = !f.empty();
     if (keep && (keepHwnd || !keepLaunch.empty()))
         for (size_t i = 0; i < s_items.size(); ++i)
-            if (keepHwnd ? s_items[i].hwnd == keepHwnd : !s_items[i].hwnd && s_items[i].launch == keepLaunch) {
+            if (keepHwnd ? s_items[i].ContainsWindow(keepHwnd) : !s_items[i].hwnd && s_items[i].launch == keepLaunch) {
                 s_sel = static_cast<int>(i) + 1;
                 s_first = std::max(0, std::min(keepFirst, ItemCount() - s_visible));
                 break;
@@ -3735,7 +3861,7 @@ void OpenRadioPanel(int k) {
     Launch(wifi ? L"ms-settings:network-wifi" : L"ms-settings:bluetooth");
 }
 
-void EditRelayout();
+void EditRelayout(bool fitToScreen = false);
 
 // 弹出 / 收起媒体按钮（大小不变，按钮在封面上面画），从现在的进度接着播动画
 void SetMediaOpen(bool open) {
@@ -3767,7 +3893,26 @@ void ClickExtra(int extra) {
     Redraw();
 }
 
-void ActivateIndex(int idx, bool newInstance = false) {
+POINT MenuAnchor(const RectF& r);
+HWND ChooseStackWindow(const Tile& item, POINT at, const wchar_t* prompt);
+
+void ActivateWindow(HWND hwnd, bool minimizeActive) {
+    if (!IsWindow(hwnd)) {
+        HideNow();
+        return;
+    }
+    if (minimizeActive && !IsIconic(hwnd)) {
+        HideNow();
+        ShowWindowAsync(hwnd, SW_MINIMIZE);  // 异步：那个程序卡住时本程序不跟着卡
+        return;
+    }
+    s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
+    if (IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_RESTORE);
+    ForceForeground(hwnd);  // 趁本窗口还在前台切换焦点
+    HideNow();
+}
+
+void ActivateIndex(int idx, bool newInstance = false, bool byMouse = false) {
     if (idx == 0) {
         // 开始菜单开着时点的开始按钮：和系统的一样是关掉它（它已经因为点到这里关了），不再打开
         bool closing = NowMs() - s_startClosedAt < 500;
@@ -3783,82 +3928,109 @@ void ActivateIndex(int idx, bool newInstance = false) {
         Launch(item.launch);
         return;
     }
-    if (newInstance && IsWindow(item.hwnd)) {  // 没固定的窗口：和右键菜单里“再开一个”一样找它的程序
-        AppTarget app = ResolveAppTarget(item.hwnd, L"", L"");
-        if (!app.launch.empty()) {
-            Launch(app.launch);
-            return;
+    if (newInstance) {  // 没固定的窗口：和右键菜单里“再开一个”一样找它的程序
+        if (HWND hwnd = LiveWindow(item)) {
+            AppTarget app = ResolveAppTarget(hwnd, L"", L"");
+            if (!app.launch.empty()) {
+                Launch(app.launch);
+                return;
+            }
         }
     }
-    HWND h = item.hwnd;
-    if (!IsWindow(h)) {
-        HideNow();
+    if (item.windows.empty()) {
+        ActivateWindow(item.hwnd, item.active);
         return;
     }
-    // 和系统任务栏一样：点当前窗口就最小化
-    if (item.active && !IsIconic(h)) {
-        HideNow();
-        ShowWindowAsync(h, SW_MINIMIZE);  // 异步：那个程序卡住时本程序不跟着卡
-        return;
+    if (byMouse) {
+        s_hover = s_sel = idx;
+        s_keyNav = false;
+        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, s_hwnd, 0};
+        TrackMouseEvent(&track);
+        if (ShowThumbNow()) return;
     }
-    s_open = false;  // 切换焦点会触发失活，这里不要再播收起动画
-    if (IsIconic(h)) ShowWindowAsync(h, SW_RESTORE);
-    ForceForeground(h);  // 先激活目标窗口，趁本窗口还在前台有权限切换
-    HideNow();
+    if (HWND hwnd = ChooseStackWindow(item, MenuAnchor(TileRect(idx)), Tr(L"切换到窗口"))) {
+        ActivateWindow(hwnd, false);
+    }
+}
+
+std::wstring TileSearch(const Tile& tile, const std::wstring& exe) {
+    return ToLower(tile.title + L"\n" + tile.pinName + L"\n" + exe);
+}
+
+// 最后一个窗口关掉后，把这个固定应用放回未打开的固定应用区。
+bool RemoveWindowTile(std::vector<Tile>& tiles, HWND hwnd) {
+    auto closed = std::find_if(tiles.begin(), tiles.end(), [&](const Tile& t) { return t.hwnd == hwnd; });
+    if (closed == tiles.end()) return false;
+    Tile item = std::move(*closed);
+    tiles.erase(closed);
+    if (item.pinOrder < 0 || std::any_of(tiles.begin(), tiles.end(), [&](const Tile& t) {
+            return t.hwnd && t.pinOrder == item.pinOrder;
+        })) return true;
+
+    item.hwnd = nullptr;
+    item.active = false;
+    item.title = item.pinName;
+    item.appKey.clear();
+    if (item.pinIcon) item.icon = item.pinIcon;
+    item.search = TileSearch(item, NormalizeExeName(item.launch));
+    auto at = std::find_if(tiles.begin(), tiles.end(), [&](const Tile& t) {
+        return t.hwnd || t.pinOrder > item.pinOrder;
+    });
+    tiles.insert(at, std::move(item));
+    return true;
+}
+
+void CloseWindows(const std::vector<HWND>& targets) {
+    std::vector<HWND> closed;
+    for (HWND hwnd : targets) {
+        if (!PostMessageW(hwnd, WM_CLOSE, 0, 0)) {
+            DWORD error = GetLastError();
+            if (IsWindow(hwnd)) {
+                Log(L"关闭窗口失败（%lu）：%ls", error, GetWindowTitle(hwnd).c_str());
+                MessageBeep(MB_ICONWARNING);
+                continue;
+            }
+        }
+        closed.push_back(hwnd);
+    }
+    if (closed.empty()) return;
+
+    for (int panel : kPanelSlots) {
+        InPanel in(panel);
+        if (!s_open || s_preview) continue;
+        bool changed = false;
+        for (HWND hwnd : closed) {
+            if (!RemoveWindowTile(s_allItems, hwnd)) continue;
+            Thumb_RemoveWindow(s_hwnd, hwnd);
+            changed = true;
+        }
+        if (!changed) continue;
+        if (!s_filter.empty()) {
+            ApplyFilter(true);
+            continue;
+        }
+        s_items = GroupTiles(s_allItems);
+        FitTiles();  // 格子少了：有空的话放大补上
+        UpdatePlacement();
+        s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
+        s_sel = ItemCount() == 0 ? DefaultSelection() : std::min(s_sel, ItemCount());
+        s_hover = -1;
+        s_hoverTray = -1;
+        s_pillIndex = -1;
+        s_thumbIdx = -1;
+        Redraw();
+    }
 }
 
 void CloseItem(int idx) {
     if (idx <= 0 || idx > ItemCount()) return;
-    Tile& item = s_items[idx - 1];
+    const Tile item = s_items[idx - 1];
     if (!item.hwnd) {
-        Launch(item.launch);  // 没运行的固定应用：中键和任务栏一样是启动
+        Launch(item.launch);
         return;
     }
-    HWND h = item.hwnd;
-    std::wstring launch = item.launch;
-    if (!PostMessageW(h, WM_CLOSE, 0, 0)) {
-        DWORD error = GetLastError();
-        // 以管理员身份运行的程序（比如任务管理器），普通权限发不进去：窗口还在，格子也留着。
-        // 窗口已经没了的话照常去掉格子
-        if (IsWindow(h)) {
-            Log(L"关闭窗口失败（%lu）：%ls", error, item.title.c_str());
-            MessageBeep(MB_ICONWARNING);
-            return;
-        }
-    }
-
-    // 固定应用关掉最后一个窗口后，格子变回启动按钮；其余情况直接去掉。
-    // 按全部格子判断，筛选后显示的格子和全部格子一起改
-    bool lastOfPin = !launch.empty() && std::none_of(s_allItems.begin(), s_allItems.end(), [&](const Tile& t) {
-                         return t.hwnd && t.hwnd != h && t.launch == launch;
-                     });
-    auto closeIn = [&](std::vector<Tile>& list) {
-        auto it = std::find_if(list.begin(), list.end(), [&](const Tile& t) { return t.hwnd == h; });
-        if (it == list.end()) return;
-        if (!lastOfPin) {
-            list.erase(it);
-            return;
-        }
-        it->hwnd = nullptr;
-        it->active = false;
-        it->title = it->pinName;
-        it->icon = it->pinIcon ? it->pinIcon : it->icon;
-    };
-    closeIn(s_allItems);
-    closeIn(s_items);
-    if (lastOfPin) {
-        Redraw();
-        return;
-    }
-    FitTiles();  // 格子少了：有空的话放大补上
-    UpdatePlacement();  // 面板变窄了，重新居中（玻璃背景也跟着重算）
-    s_first = std::max(0, std::min(s_first, ItemCount() - s_visible));
-    s_sel = std::min(s_sel, ItemCount());
-    s_hover = -1;
-    s_hoverTray = -1;  // 托盘格子跟着挪了
-    s_pillIndex = -1;
-    s_thumbIdx = -1;  // 格子重新排过：缩略图按新位置摆
-    Redraw();
+    HWND hwnd = item.windows.empty() ? item.hwnd : ChooseStackWindow(item, MenuAnchor(TileRect(idx)), Tr(L"选择要关闭的窗口"));
+    if (hwnd) CloseWindows({hwnd});
 }
 
 // 右键菜单的命令
@@ -3874,6 +4046,7 @@ enum MenuCmd : UINT {
     kCmdMaximize,
     kCmdRecent = 100,  // 最近项：kCmdRecent + 序号
     kCmdMoveTo = 200,  // 移到另一块屏幕：kCmdMoveTo + 它在 MonitorsInOrder 里的序号
+    kCmdTargetWindow = 1000,  // 堆叠菜单里选单个窗口
 };
 constexpr size_t kMaxRecent = 10;
 constexpr size_t kMaxMenuText = 40;
@@ -3944,6 +4117,44 @@ POINT MenuAnchor(const RectF& r) {  // 客户区坐标
     return {static_cast<LONG>(x), static_cast<LONG>(r.Y)};
 }
 
+std::vector<HWND> LiveStackWindows(const Tile& item) {
+    std::vector<HWND> windows = item.windows;
+    if (windows.empty() && item.hwnd) windows.push_back(item.hwnd);
+    windows.erase(std::remove_if(windows.begin(), windows.end(), [](HWND hwnd) { return !IsWindow(hwnd); }), windows.end());
+    return windows;
+}
+
+void AppendWindowChoices(HMENU menu, const std::vector<HWND>& windows, HWND active, UINT firstId) {
+    for (size_t i = 0; i < windows.size(); ++i) {
+        HWND hwnd = windows[i];
+        std::wstring title = GetWindowTitle(hwnd);
+        if (title.empty()) title = TrF(L"窗口 %d", static_cast<int>(i) + 1);
+        if (g_settings.markScreens && GetSystemMetrics(SM_CMONITORS) > 1) {
+            int monitor = MonitorNumber(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+            if (monitor > 0) title = TrF(L"屏幕 %d · %ls", monitor, title.c_str());
+        }
+        AppendMenuW(menu, MF_STRING | (hwnd == active ? MF_CHECKED : 0), firstId + i, MenuText(title).c_str());
+    }
+}
+
+HWND ChooseStackWindow(const Tile& item, POINT at, const wchar_t* prompt) {
+    const auto windows = LiveStackWindows(item);
+    if (windows.size() < 2) return windows.empty() ? nullptr : windows.front();
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return nullptr;
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, prompt);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendWindowChoices(menu, windows, item.active ? item.hwnd : nullptr, 1);
+    s_menuOpen = true;
+    HideThumb();
+    Redraw();
+    ClientToScreen(s_hwnd, &at);
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | MenuAlign(), at.x, at.y, 0, s_hwnd, nullptr);
+    DestroyMenu(menu);
+    s_menuOpen = false;
+    return s_open && cmd > 0 && cmd <= windows.size() ? windows[cmd - 1] : nullptr;
+}
+
 // 右键音量：列出播放设备，选一个设成默认（和系统快速设置里“选择声音输出”一样），音量条跟着换
 void ShowAudioMenu() {
     enum { kCmdSound = 1, kCmdDevice = 100 };
@@ -3975,8 +4186,9 @@ void ShowAudioMenu() {
     if (!s_open) return;
     RefreshVolume();
     Redraw();
-    if (OtherOpen()) {
-        InPanel other(Other());
+    for (int panel : kPanelSlots) {
+        if (!PeerOpen(panel)) continue;
+        InPanel other(panel);
         RefreshVolume();
         Redraw();
     }
@@ -3987,7 +4199,7 @@ void ShowAudioMenu() {
 // 还原 / 最小化 / 最大化、移到另一块屏幕（不止两块时选哪一块）；“最大化时不隐藏任务栏”（关着“最大化或全屏时隐藏任务栏”时是“最大化时隐藏任务栏”）；关闭这个窗口，同一个程序开着好几个窗口时还能一次全关。
 // 没运行的固定应用、打字筛选出来的应用：“最近”项；打开、以管理员身份运行、打开文件所在的位置。
 // at：菜单的位置（客户区坐标），对齐方式见 MenuAlign
-void ShowItemMenu(int idx, POINT at) {
+void ShowItemMenu(int idx, POINT at, HWND selected = nullptr) {
     if (idx == 0) {
         ShowStartContextMenu();
         return;
@@ -3995,34 +4207,25 @@ void ShowItemMenu(int idx, POINT at) {
     if (idx < 0 || idx > ItemCount()) return;
     // 菜单开着时格子可能重排（比如应用列表读完了重新筛选），先抄一份，之后按窗口句柄找
     const Tile item = s_items[idx - 1];
-    HWND hwnd = item.hwnd;
+    HWND hwnd = selected ? selected : LiveWindow(item);
+    if (selected && (!item.ContainsWindow(selected) || !IsWindow(selected))) return;
     if (!hwnd && item.launch.empty()) return;
 
     AppTarget app = ResolveAppTarget(hwnd, item.launch, item.pinName);
     std::vector<RecentItem> recent = RecentItems(app.appIds, kMaxRecent);
     if (!s_open) return;  // 读外壳时可能处理了别的消息，期间已经收起了
 
-    // 同一个程序：有 AppUserModelID 的按它比（应用商店应用的窗口都属于同一个 ApplicationFrameHost 进程），
-    // 没有的按程序路径比
-    std::vector<HWND> same;
-    std::wstring exeName;
-    if (hwnd) {
-        auto appKey = [](HWND h) {
-            std::wstring id = GetWindowAumid(h);
-            return id.empty() ? ToLower(GetProcessPath(AppWindowTarget(h))) : id;
-        };
-        std::wstring key = appKey(hwnd);
-        for (const Tile& t : s_items)
-            if (t.hwnd && !key.empty() && appKey(t.hwnd) == key) same.push_back(t.hwnd);
-        // 应用商店应用最小化时偶尔找不到它自己的进程，别把 ApplicationFrameHost 当成它加进排除名单
-        exeName = WindowExeName(hwnd);
-        if (exeName == L"applicationframehost.exe") exeName.clear();
-    }
+    const auto same = LiveStackWindows(item);
+    bool stackMenu = !selected && same.size() > 1;
+    std::wstring exeName = hwnd ? WindowExeName(hwnd) : std::wstring();
+    // 应用商店应用最小化时偶尔找不到它自己的进程，别把 ApplicationFrameHost 当成它加进排除名单
+    if (exeName == L"applicationframehost.exe") exeName.clear();
 
-    std::vector<HMONITOR> screens = hwnd ? MonitorsInOrder() : std::vector<HMONITOR>();
-    HMONITOR here = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
+    std::vector<HMONITOR> screens = hwnd && !stackMenu ? MonitorsInOrder() : std::vector<HMONITOR>();
+    HMONITOR here = !screens.empty() ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : nullptr;
 
     HMENU menu = CreatePopupMenu();
+    if (!menu) return;
     // 两组之间的分隔线：前面有东西、最后一项又不是分隔线时才加
     auto separate = [&] {
         int n = GetMenuItemCount(menu);
@@ -4038,7 +4241,13 @@ void ShowItemMenu(int idx, POINT at) {
     if (!app.launch.empty()) AppendMenuW(menu, MF_STRING, kCmdLaunch, hwnd ? MenuText(app.name).c_str() : Tr(L"打开"));
     if (!app.runAs.empty()) AppendMenuW(menu, MF_STRING, kCmdRunAs, Tr(L"以管理员身份运行"));
     if (!app.location.empty()) AppendMenuW(menu, MF_STRING, kCmdLocation, Tr(L"打开文件所在的位置"));
-    if (hwnd) {
+    if (stackMenu) {
+        separate();
+        if (HMENU sub = CreatePopupMenu()) {
+            AppendWindowChoices(sub, same, item.active ? item.hwnd : nullptr, kCmdTargetWindow);
+            if (!AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), Tr(L"各窗口操作"))) DestroyMenu(sub);
+        }
+    } else if (hwnd) {
         separate();
         bool iconic = IsIconic(hwnd), zoomed = IsZoomed(hwnd);
         bool canMaximize = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_MAXIMIZEBOX) != 0;
@@ -4059,21 +4268,21 @@ void ShowItemMenu(int idx, POINT at) {
                         Tr(g_settings.autoHideOnFullscreen ? L"最大化时不隐藏任务栏" : L"最大化时隐藏任务栏"));
         separate();
         AppendMenuW(menu, MF_STRING, kCmdClose, Tr(L"关闭窗口"));
-        if (same.size() > 1) {
-            AppendMenuW(menu, MF_STRING, kCmdCloseAll, TrF(L"关闭全部 %d 个窗口", static_cast<int>(same.size())).c_str());
-        }
         SetMenuDefaultItem(menu, kCmdClose, FALSE);
     } else {
         SetMenuDefaultItem(menu, kCmdLaunch, FALSE);
     }
+    if (same.size() > 1)
+        AppendMenuW(menu, MF_STRING, kCmdCloseAll, TrF(L"关闭全部 %d 个窗口", static_cast<int>(same.size())).c_str());
 
     s_sel = idx;
     s_menuOpen = true;  // 缩略图会挡住菜单
     HideThumb();
     Redraw();
-    ClientToScreen(s_hwnd, &at);
-    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | MenuAlign(), at.x, at.y, 0, s_hwnd,
-                              nullptr);
+    POINT screen = at;
+    ClientToScreen(s_hwnd, &screen);
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | MenuAlign(), screen.x, screen.y,
+                              0, s_hwnd, nullptr);
     DestroyMenu(menu);
     s_menuOpen = false;
 
@@ -4103,18 +4312,18 @@ void ShowItemMenu(int idx, POINT at) {
         case kCmdMaximize: WindowCommand(hwnd, SC_MAXIMIZE); return;
     }
     if (!s_open) return;
-    // CloseItem 会去掉格子、后面的序号跟着变，每次按窗口句柄重新找
-    auto closeWindow = [](HWND h) {
-        for (int i = 0; i < ItemCount(); ++i)
-            if (s_items[i].hwnd == h) {
-                CloseItem(i + 1);
-                return;
-            }
-    };
     if (cmd == kCmdClose) {
-        closeWindow(hwnd);
+        CloseWindows({hwnd});
     } else if (cmd == kCmdCloseAll) {
-        for (HWND h : same) closeWindow(h);
+        CloseWindows(same);
+    } else if (stackMenu && cmd >= kCmdTargetWindow && cmd - kCmdTargetWindow < same.size()) {
+        HWND target = same[cmd - kCmdTargetWindow];
+        for (int i = 0; i < ItemCount(); ++i) {
+            if (s_items[i].ContainsWindow(target)) {
+                ShowItemMenu(i + 1, at, target);
+                break;
+            }
+        }
     }
 }
 
@@ -4124,47 +4333,34 @@ void ShowSelectedMenu() {
     ShowItemMenu(s_sel, MenuAnchor(TileRect(s_sel)));
 }
 
-void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu);
-
 // 点托盘格子：左键先收起迷你任务栏，再去系统托盘里点它。
-// 右键在那一格上方弹迷你任务栏自己的菜单，不碰系统托盘；选“程序菜单”才去系统托盘里右键它（TrayAppMenu）
+// 右键直接打开程序的托盘菜单，迷你任务栏留着等菜单关闭。
 void ActivateTray(int i, bool right) {
     if (i < 0 || i >= TrayCells() || !TrayOnPage(i)) return;
+    if (right && Tray_Busy()) return;
     TrayApp app = s_tray[i];
-    if (!right) {
+    TrayMenuAnchor anchor;
+    if (right) {
+        POINT at = MenuAnchor(ModRect(kModTray, TrayCellRect(i)));
+        if (ClientToScreen(s_hwnd, &at)) anchor = {at, s_edge};
+        HideThumb();
+        s_trayMode = true;
+        s_trayModeAt = GetTickCount();
+        s_trayIdleAt = 0;
+        s_trayRefocused = false;
+        s_trayHot = i;
+        SetTimer(s_hwnd, kTimerTrayMenu, kTrayWatchMs, nullptr);
+        Redraw();
+    } else {
         HideNow();
-        Tray_Click(app, false);
-        return;
     }
-    ShowTrayMenu(i, app, true);
-}
-
-// 去系统托盘里右键它、弹出它自己的菜单。迷你任务栏留着，菜单关了再看要不要收起（WatchTrayMenu）
-void TrayAppMenu(int cell, const TrayApp& app) {
-    if (Tray_Busy()) return;
-    HideThumb();
-    s_trayMode = true;
-    s_trayModeAt = GetTickCount();
-    s_trayIdleAt = 0;
-    s_trayRefocused = false;
-    s_trayHot = cell;
-    SetTimer(s_hwnd, kTimerTrayMenu, kTrayWatchMs, nullptr);
-    Redraw();
-    Tray_Click(app, true, s_hwnd);
+    Tray_Click(app, right, anchor);
 }
 
 bool IsShellUi(HWND h) {
     std::wstring cls = GetClassNameStr(h);
     return cls == L"Shell_TrayWnd" || cls == L"Shell_SecondaryTrayWnd" || cls == L"TopLevelWindowForOverflowXamlIsland" ||
            cls == L"NotifyIconOverflowWindow";
-}
-
-// 像弹出菜单的窗口：系统画的菜单，或者没有标题栏的工具窗口（自己画菜单的程序，比如 Qt、网页做的界面）
-bool MenuLike(HWND h) {
-    if (!h || !IsWindowVisible(h)) return false;
-    if (GetClassNameStr(h) == L"#32768") return true;
-    LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE), ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-    return (style & WS_POPUP) && (style & WS_CAPTION) != WS_CAPTION && (ex & WS_EX_TOOLWINDOW);
 }
 
 bool AnyMenuShowing() {
@@ -4189,7 +4385,7 @@ void WatchTrayMenu() {
     DWORD now = GetTickCount();
     HWND fg = GetForegroundWindow();
     bool busy = Tray_Busy() && now - s_trayModeAt < kTrayBusyMaxMs;
-    if (busy || AnyMenuShowing() || (fg != s_hwnd && MenuLike(fg))) {
+    if (busy || Tray_MenuShowing() || AnyMenuShowing() || (fg != s_hwnd && Tray_IsMenuWindow(fg))) {
         s_trayIdleAt = 0;
         return;
     }
@@ -4221,34 +4417,15 @@ void WatchTrayMenu() {
     }
 }
 
-// 在那一格上方弹迷你任务栏自己的菜单，迷你任务栏留着；选了一项再收起。
-// offerAppMenu = 加一项“程序菜单”（系统托盘里刚弹不出来时就不加了）
-void ShowTrayMenu(int cell, const TrayApp& app, bool offerAppMenu) {
-    EndTrayMode();
-    if (cell < 0 || cell >= TrayCells() || s_tray[cell].exe != app.exe) {
-        cell = -1;
-        for (int i = 0; i < TrayCells(); ++i)
-            if (s_tray[i].exe == app.exe) cell = i;
-    }
-    POINT at;
-    if (cell >= 0 && TrayOnPage(cell)) {
-        at = MenuAnchor(ModRect(kModTray, TrayCellRect(cell)));
-        ClientToScreen(s_hwnd, &at);
-    } else {
-        GetCursorPos(&at);
-    }
-    s_trayHot = cell;
-    s_menuOpen = true;
-    HideThumb();
-    Redraw();
-    bool appMenu = Tray_Menu(app, s_hwnd, at, [] { HideNow(); }, offerAppMenu, MenuAlign());
-    s_menuOpen = false;
-    s_trayHot = -1;
-    Redraw();
-    if (appMenu && s_open) TrayAppMenu(cell, app);
+bool IsStartUi(HWND h) {
+    if (!h || GetClassNameStr(h) != L"Windows.UI.Core.CoreWindow") return false;
+    std::wstring exe = WindowExeName(h);
+    return exe == L"startmenuexperiencehost.exe" || exe == L"searchhost.exe" ||
+           exe == L"searchapp.exe" || exe == L"searchui.exe";
 }
 
-bool IsStartUi(HWND h) { return h && GetClassNameStr(h) == L"Windows.UI.Core.CoreWindow"; }
+void Open(bool preview, bool startMenu = false, bool hover = false, bool companion = false,
+          HMONITOR openedStartOn = nullptr, int placementOverride = -1);
 
 // 弹出动画放完：打开开始菜单。藏着的系统任务栏不放出来，迷你任务栏留着，开始菜单关了再收起
 void BeginStart() {
@@ -4286,12 +4463,26 @@ void StartClosed(HWND fg) {
 
 // 开始菜单开着时每隔一会儿看一眼前台
 void WatchStart() {
+    HWND fg = GetForegroundWindow();
+    bool waited = GetTickCount() - s_startAt > kStartWaitMs;
+    if (s_followStart) {
+        if (IsStartUi(fg) && IsWindowVisible(fg) && !IsCloaked(fg)) {
+            HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+            EndStartMode();
+            // 系统可能在另一块屏打开开始菜单。它的任务栏露着或根本没有任务栏，就不用补一条。
+            if (Fullscreen_TaskbarHiddenOn(mon) && !Taskbar_IsShownOn(mon)) {
+                s_keepPrevForeground = s_prevForeground;
+                Open(false, true, false, false, mon);
+            }
+        } else if (waited) {
+            EndStartMode();
+        }
+        return;
+    }
     if (!s_open || !s_startMode) {
         EndStartMode();
         return;
     }
-    HWND fg = GetForegroundWindow();
-    bool waited = GetTickCount() - s_startAt > kStartWaitMs;
     if (IsStartUi(fg)) {
         NoteStartSeen(fg);
     } else if (s_startSeen) {
@@ -4311,7 +4502,7 @@ void WatchHoverLeave();
 
 // 按最大的大小，迷你任务栏那条屏幕边上一整条：大小一直在变（预览、拖边）时背景截这么大，变大小时不用再截
 RECT GrowArea() {
-    float grow = static_cast<float>(kMaxPopupScale) / std::max(1, s_preview ? s_previewPercent : g_settings.popupScale);
+    float grow = static_cast<float>(kMaxPopupScale) / std::max(1, s_preview ? s_previewPercent : LayoutScale());
     // 模块放大时图标那一行（竖排时那一列）也会变高（宽）：最多到最大的模块放到最大
     if (s_editing && FreeLayout()) {  // 自由布局：那块区域最厚到 kMaxFreeThick
         float thick = Vertical() ? s_L.panelW : s_L.panelH;
@@ -4379,21 +4570,24 @@ float LengthAt(POINT pt) {
 
 // 标题上显示的大小和长度
 std::wstring SizeText() {
-    if (PanelLength() <= 0) return TrF(L"大小 %d%%，长度自动", g_settings.popupScale);
-    return TrF(L"大小 %d%%，长度 %d%%", g_settings.popupScale, (PanelLength() + 5) / 10);
+    if (PanelLength() <= 0) return TrF(L"整体缩放 %d%%，长度自动", LayoutScale());
+    return TrF(L"整体缩放 %d%%，长度 %d%%", LayoutScale(), (PanelLength() + 5) / 10);
 }
+
+void RescaleEditPanel();
 
 // 换个大小、长度马上重新排、重画（图标还是弹出时读的，缩放着画）。变大时最多大到屏幕放得下。
 // fit：在拖长度，记成面板实际的长度（拖得太短时内容放不下，按放得下的算）
 void SetPopupSize(int percent, int length, bool fit = false) {
-    int was = g_settings.popupScale, wasLen = PanelLength();
+    int& scale = EditingLayout()->scale;
+    int was = scale, wasLen = PanelLength();
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
     length = std::clamp(length, 0, kMaxPopupLength);
     if (percent == was && length == wasLen) return;
     float old = s_scale, locked = s_lockedItemsW;
     PanelLength() = length;
     for (;; --percent) {
-        g_settings.popupScale = percent;
+        scale = percent;
         s_scale = PopupScale(s_monitor);
         s_lockedItemsW = locked * s_scale / old;
         FitTiles();
@@ -4417,11 +4611,22 @@ void SetPopupSize(int percent, int length, bool fit = false) {
     s_glass.SetScale(s_scale);
     s_pillIndex = -1;  // 高亮块直接到新位置，不滑过去
     Redraw();
+    if (scale != was) {
+        for (int panel : kPanelSlots) {
+            if (!PeerOpen(panel)) continue;
+            InPanel other(panel);
+            if (s_editing) RescaleEditPanel();
+        }
+    }
 }
 
 // 编辑模式里改了布局（模块、位置）：重新排、摆好、重画（背景已经按最大的大小截了一整条）
-void EditRelayout() {
+void EditRelayout(bool fitToScreen) {
     FitTiles(s_scaleLayout);  // 模块变大小的动画中，格子放大补位的倍数不变
+    if (fitToScreen) {
+        FitScreen();
+        s_glass.SetScale(s_scale);
+    }
     s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
     UpdatePlacement();
     s_glass.Extend(GrowArea());
@@ -4430,28 +4635,73 @@ void EditRelayout() {
     Redraw();
 }
 
+void RescaleEditPanel() {
+    float scale = PopupScale(s_monitor);
+    s_lockedItemsW *= scale / s_scale;
+    s_scale = scale;
+    EditRelayout(true);
+}
+
+void LoadPanelAlignment(HMONITOR monitor) {
+    auto* draft = EditingLayout();
+    auto& screens = draft ? draft->screens : g_settings.screens;
+    if (s_cur == 0 && g_settings.popupPerScreen) {
+        if (const auto* place = FindScreenPlace(screens, MonitorKey(monitor))) {
+            if (!Vertical() || place->edge == s_edge) {
+                s_align = place->align;
+                s_offset = place->offset;
+                return;
+            }
+        }
+    }
+    if (draft || Vertical()) {
+        const auto& bar = draft ? draft->bars[ModuleSideOf(s_edge)] : g_settings.sideBar[s_edge - kEdgeLeft];
+        s_align = bar.align;
+        s_offset = bar.offset;
+    } else {
+        s_align = g_settings.popupAlign;
+        s_offset = g_settings.popupOffset;
+    }
+}
+
 // 编辑模式里开着却暂时没有内容的媒体（没在放）也显示出来，好拖着排顺序；预览时也显示，看得出开着
 void SyncMediaShown() { s_showMedia = Mods().media && !s_compact && (s_editing || s_preview || s_media.present); }
 
-void SetEditing(bool on) {
-    if (on && (!s_open || s_preview || s_compact)) return;
-    if (on == s_editing) return;
-    EndResize();
-    EndModuleDrag(false);
-    EndPanelMove(false);
-    EndScaleDrag();
-    EndGapDrag();
-    if (s_drag != kNone) {  // 拖着音量、亮度时按了 F2
-        s_drag = kNone;
-        if (GetCapture() == s_hwnd) ReleaseCapture();
+void ConfigureLayoutMedia() {
+    bool enabled = AnyModuleSet(&ModuleSet::media);
+    if (auto* draft = EditingLayout()) {
+        enabled = enabled || std::any_of(draft->modules, draft->modules + kSideCount,
+                                         [](const ModuleSet& mods) { return mods.media; });
     }
-    s_editing = on;
+    Media_Configure(enabled, s_panelHwnd[0]);
+}
+
+void ResetEditHover() {
     s_editHover = kPartNone;
-    s_hoverModule = -1;
-    s_mediaOpen = false;  // 编辑模式里媒体只有封面
-    s_mediaFrom = 0;
-    StopMediaLeave();
-    if (on) {
+    s_hoverModule = s_wheelScaled = s_hoverGap = -1;
+    s_wheelPanel = s_wheelGap = false;
+    s_editNote.clear();
+    s_edgeClickAt = 0;
+}
+
+void StartEditing() {
+    if (!s_open || s_preview || s_compact || s_editSession) return;
+    s_editSession.emplace();
+    for (int panel : kPanelSlots) {
+        InPanel in(panel);
+        if (!s_open || s_preview || s_compact) continue;
+        if (s_drag != kNone) {  // 拖着音量、亮度时按了 F2
+            s_ignoreEditMouseUp = true;
+            s_drag = kNone;
+            if (GetCapture() == s_hwnd) ReleaseCapture();
+        }
+        EndHoverOpen();
+        s_editing = true;
+        s_wheelRest = s_editWheelRest = 0;
+        ResetEditHover();
+        s_mediaOpen = false;
+        s_mediaFrom = 0;
+        StopMediaLeave();
         HideThumb();
         s_hover = -1;
         s_hoverControl = kNone;
@@ -4459,14 +4709,122 @@ void SetEditing(bool on) {
         s_hoverExtra = kExtraNone;
         s_hoverTray = -1;
         s_overTray = false;
-        Log(L"迷你任务栏进入编辑模式");
+        SyncMediaShown();
+        EditRelayout();
     }
-    SyncMediaShown();
+    Log(L"迷你任务栏进入编辑模式");
+}
+
+bool SameModules(const ModuleSet& a, const ModuleSet& b);
+void ReloadLayoutModules(bool windowsWereShown);
+void ClearDropPreview();
+
+bool SameEditLayout(const EditLayout& a, const EditLayout& b) {
+    if (a.scale != b.scale || a.iconGap != b.iconGap || a.trayStyle != b.trayStyle || a.screens != b.screens)
+        return false;
+    for (int side = 0; side < kSideCount; ++side) {
+        const auto &pa = a.bars[side], &pb = b.bars[side];
+        if (pa.align != pb.align || pa.offset != pb.offset || pa.length != pb.length || a.saved[side] != b.saved[side])
+            return false;
+        const auto &ma = a.modules[side], &mb = b.modules[side];
+        if (!SameModules(ma, mb) || ma.free != mb.free || ma.freeW != mb.freeW || ma.freeH != mb.freeH ||
+            ma.freeScale != mb.freeScale ||
+            !std::equal(ma.box, ma.box + kFreeItems, mb.box, [](const FreeBox& x, const FreeBox& y) {
+                return x.x == y.x && x.y == y.y && x.w == y.w && x.h == y.h;
+            })) return false;
+    }
+    return true;
+}
+
+// 模块显隐可能影响托盘、媒体、窗口列表等实时内容。恢复草稿时一起更新。
+void RefreshEditPanels(const EditLayout& previous, bool ending) {
+    ConfigureLayoutMedia();
+    for (int panel : kPanelSlots) {
+        InPanel in(panel);
+        if (!s_editing) continue;
+        const ModuleSet& old = previous.modules[ModuleSideOf(s_edge)];
+        bool windowsWereShown = !(s_multiBar && old.free) || old.windows;
+        if (ending) s_editing = false;
+        auto* draft = EditingLayout();
+        s_look.iconGap = draft ? draft->iconGap : g_settings.iconGap;
+        s_look.trayStyle = draft ? draft->trayStyle : g_settings.trayStyle;
+        LoadPanelAlignment(s_monitor);
+        s_scaleStart = s_gapStart = s_boxStart = s_modStart = -1e9;
+        s_scaleLayout = false;
+        s_wheelRest = s_editWheelRest = 0;
+        ResetEditHover();
+        if (!SameModules(Mods(), old) || windowsWereShown != WindowsShown() || previous.trayStyle != s_look.trayStyle)
+            ReloadLayoutModules(windowsWereShown);
+        else
+            SyncMediaShown();
+        if (previous.scale != LayoutScale()) RescaleEditPanel();
+        else EditRelayout();
+    }
+}
+
+bool BeginEditAction() {
+    if (!EditingLayout()) return false;
+    auto& edit = *s_editSession;
+    if (edit.beforeAction) return false;
+    edit.beforeAction = edit.draft;
+    edit.actionPanel = s_cur;
+    return true;
+}
+
+void EndEditAction(bool keep) {
+    if (!s_editSession || s_editSession->actionPanel != s_cur) return;
+    auto& edit = *s_editSession;
+    EditLayout before = std::move(*edit.beforeAction);
+    edit.beforeAction.reset();
+    edit.actionPanel = -1;
+    if (SameEditLayout(edit.draft, before)) return;
+    if (keep) {
+        edit.undo.push_back(std::move(before));
+    } else {
+        EditLayout previous = std::exchange(edit.draft, std::move(before));
+        RefreshEditPanels(previous, false);
+    }
+}
+
+void CancelEditDrag() {
+    if (!s_editSession || s_editSession->actionPanel < 0) return;
+    InPanel in(s_editSession->actionPanel);
+    s_ignoreEditMouseUp = s_ignoreEditMouseUp || EditDragging();
+    s_resize = 0;
+    s_resizeFixed = LONG_MIN;
+    s_movePanel = s_moveOut = false;
+    s_moveModule = kPartNone;
+    s_scaleModule = s_gapDrag = s_movePeer = -1;
+    s_guideX = s_guideY = -1;
+    ResetEditHover();
+    ClearDropPreview();
+    if (GetCapture() == s_hwnd) ReleaseCapture();
+    EndEditAction(false);
+    LoadPanelAlignment(s_monitor);  // 挪面板在松开左键前只改了窗口位置
     EditRelayout();
-    // 两条一起开着：一起进出编辑模式（模块可以从一条拖到另一条）
-    if (OtherOpen()) {
-        InPanel other(Other());
-        if (s_editing != on) SetEditing(on);
+}
+
+void UndoEdit() {
+    auto& edit = *s_editSession;
+    if (edit.beforeAction || edit.undo.empty()) return;
+    EditLayout previous = std::exchange(edit.draft, std::move(edit.undo.back()));
+    edit.undo.pop_back();
+    RefreshEditPanels(previous, false);
+    s_editNote = Tr(L"已撤销上一步");
+    Redraw();
+}
+
+void FinishEditing(bool apply) {
+    if (!s_editSession) return;
+    CancelEditDrag();
+    bool changed = apply && !s_editSession->undo.empty();
+    if (changed) s_editSession->draft.Commit();
+    EditLayout previous = std::move(s_editSession->draft);
+    s_editSession.reset();
+    RefreshEditPanels(previous, true);
+    if (changed) {
+        SaveSettings();
+        SettingsDialog_SettingsChanged();
     }
 }
 
@@ -4490,8 +4848,9 @@ RectF EditPartRect(int part) {
         return RectF(first.icon.X - Px(2), L.sliderY, last.a1 + Px(12) - first.icon.X, L.sliderH);
     }
     if (part == kPartRadios) {
+        if (!s_radioCount) return {};
         RectF r = s_radioRects[0];
-        for (int k = 1; k < s_radioCount; ++k) RectF::Union(r, r, s_radioRects[k]);
+        for (int k = 1; k < s_radioCount && k < kRadioCount; ++k) RectF::Union(r, r, s_radioRects[k]);
         r.Inflate(Px(3), Px(3));
         return r;
     }
@@ -4528,8 +4887,9 @@ RectF SeqRect(int item) {
             return RectF(first.icon.X, L.sliderY, last.a1 + Px(10) - first.icon.X, L.sliderH);
         }
         case kPartRadios: {
+            if (!s_radioCount) return {};
             RectF r = s_radioRects[0];
-            for (int k = 1; k < s_radioCount; ++k) RectF::Union(r, r, s_radioRects[k]);
+            for (int k = 1; k < s_radioCount && k < kRadioCount; ++k) RectF::Union(r, r, s_radioRects[k]);
             return r;
         }
         default: return ModRect(item, FreeBaseRect(L, item));
@@ -4687,34 +5047,171 @@ std::wstring BoxSizeText(int item) {
     return TrF(L"%ls %d × %d", PartName(item), static_cast<int>(std::lround(b.w)), static_cast<int>(std::lround(b.h)));
 }
 
-// 编辑模式里标题上的说明：正在拖的、鼠标下的东西怎么拖
-// 拖着模块时鼠标在另一条（开着的）上面：松开就挪过去
-bool OverOtherPanel(POINT screen) {
-    if (!OtherOpen()) return false;
-    RECT r = OtherPanelRect();
-    InflateRect(&r, static_cast<int>(Px(16)), static_cast<int>(Px(16)));
-    return PtInRect(&r, screen) != FALSE;
-}
-
-// 拖着模块：鼠标在另一条上时那条画出松开会放在哪（按它在那条上的大小）
-void MarkOther(int part, POINT screen, bool on) {
-    if (!OtherOpen() || (!on && s_away.v_s_dropMark.Width <= 0)) return;
-    InPanel other(Other());
-    RectF mark;
-    if (on) {
-        int p = part == kPartLevels ? kModVolume : part;
-        const FreeBox& b = Mods().box[p];
-        float u = FreeUnit();
-        SizeF n = FreeLayout() && b.w > 0 && b.h > 0 ? SizeF(b.w, b.h) : NaturalSize(s_L, p);
-        n = SizeF(n.Width * u, n.Height * u);
-        if (n.Width <= 1 || n.Height <= 1) n = SizeF(s_L.tile, s_L.tile);  // 这条上没显示过，量不出大小
-        mark = RectF(screen.x - s_pos.x - n.Width / 2, screen.y - s_pos.y - n.Height / 2, n.Width, n.Height);
+// 阴影和面板外的提示不算接收区域。
+int PeerAt(POINT screen) {
+    for (int panel : kPanelSlots) {
+        if (!PeerOpen(panel)) continue;
+        const PanelVars& peer = s_panels[panel];
+        if (!peer.v_s_editing || peer.v_s_anim != Anim::None) continue;
+        RECT r = PeerRect(panel);
+        if (PtInRect(&r, screen)) return panel;
     }
-    if (mark.Equals(s_dropMark)) return;
-    s_dropMark = mark;
-    Redraw();
+    return -1;
 }
 
+bool ModuleSet::*const kPartEnabled[kFreeItems] = {
+    &ModuleSet::start, &ModuleSet::windows, &ModuleSet::tray, &ModuleSet::media, &ModuleSet::ime,
+    &ModuleSet::battery, &ModuleSet::clock, &ModuleSet::volume, &ModuleSet::brightness, nullptr, &ModuleSet::radios};
+
+struct DragParts {
+    int parts[2] = {kPartNone, kPartNone};
+};
+
+DragParts PartsBeingMoved(int part) {
+    if (part != kPartLevels) return {{part, kPartNone}};
+    return {{RowSlider(0) ? kModVolume : kPartNone, RowSlider(1) ? kModBright : kPartNone}};
+}
+
+struct DropSlot {
+    int item = kPartNone;
+    int before = kPartNone;  // 顺序布局中插到哪个模块之前
+    FreeBox box;
+    RectF marker;
+};
+
+struct DropPlan {
+    DropState state = DropState::None;
+    DropSlot slots[2];
+};
+
+int DropItemFor(int part) {
+    if (part == kModVolume || part == kModBright) {
+        bool capsule = part == kModVolume ? Mods().volumeCapsule : Mods().brightCapsule;
+        if (Vertical() || !capsule) return kPartLevels;
+    }
+    return part;
+}
+
+// 顺序布局允许插到两块之间，调节条和网络按钮仍排在各自所在的区域。
+RectF SequenceDropMarker(int item, POINT screen, int& before) {
+    const Layout& L = s_L;
+    bool v = Vertical();
+    float pointer = static_cast<float>(v ? screen.y - s_pos.y : screen.x - s_pos.x);
+    float end = v ? L.panelY + L.pad : L.panelX + L.pad;
+    if (item < kModuleCount) {
+        float start = end;
+        for (int m : Mods().order) {
+            if (!ModuleShown(m)) continue;
+            start = L.modPos[m];
+            if (pointer < start + L.modLen[m] / 2) {
+                before = m;
+                return v ? RectF(L.colX, (end + start) / 2 - Px(1), L.tile, Px(2))
+                         : RectF((end + start) / 2 - Px(1), L.tileY, Px(2), L.tile);
+            }
+            end = start + L.modLen[m];
+        }
+        return v ? RectF(L.colX, end + Px(2), L.tile, Px(2)) : RectF(end + Px(2), L.tileY, Px(2), L.tile);
+    }
+    if (v) {
+        end = item == kPartLevels && s_radioCount > 0 ? s_radioRects[0].Y - Px(3) : L.panelY + L.panelH - L.pad;
+        return RectF(L.colX, end, L.tile, Px(2));
+    }
+    float inset = L.pad + Px(4);
+    return RectF(L.panelX + inset, L.panelY + L.panelH - inset, L.panelW - 2 * inset, Px(2));
+}
+
+SizeF FreeDropSize(int item, int sliderCount) {
+    const FreeBox& saved = Mods().box[item];
+    if (saved.w > 0 && saved.h > 0) return SizeF(saved.w, saved.h);
+    float u = FreeUnit();
+    if (item == kPartLevels && !Vertical())
+        return SizeF(Px(sliderCount > 1 ? 360.0f : 280.0f) / u, Px(34) / u);
+    switch (item) {
+        case kModMedia: return SizeF(s_L.tile / u, s_L.tile / u);
+        case kModIme: return SizeF(Px(30) / u, Px(30) / u);
+        case kModBattery: return Vertical() ? SizeF(s_L.tile / u, Px(36) / u) : SizeF(Px(42) / u, Px(36) / u);
+        case kModClock: {
+            float w, h;
+            ClockSize(w, h);
+            return Vertical() ? SizeF(s_L.tile / u, h / u) : SizeF(w / u, s_L.tile / u);
+        }
+        default: return NaturalSize(s_L, item);
+    }
+}
+
+// 同一个落点用于拖动预览和实际放置。先验证整组，任何一项放不下都保留原布局。
+DropPlan PlanDrop(const DragParts& moving, POINT screen) {
+    DropPlan plan;
+    if (moving.parts[0] == kPartNone && moving.parts[1] == kPartNone) return plan;
+    plan.state = DropState::Ready;
+    ModuleSet layout = Mods();
+    int items[2] = {kPartNone, kPartNone}, rowCount = 0;
+    for (int i = 0; i < 2; ++i) {
+        int part = moving.parts[i];
+        if (part == kPartNone) continue;
+        bool already = part == kModStart ? StartShown() : part == kModWindows ? WindowsShown() : layout.*kPartEnabled[part];
+        if (already) {
+            plan.state = DropState::Duplicate;
+            return plan;
+        }
+        items[i] = DropItemFor(part);
+        if (items[i] == kPartLevels) ++rowCount;
+    }
+    bool present[kFreeItems];
+    std::copy_n(s_freePresent, kFreeItems, present);
+    for (int i = 0; i < 2; ++i) {
+        int item = items[i];
+        if (item == kPartNone || (i == 1 && items[0] == item)) continue;
+        DropSlot& slot = plan.slots[i];
+        slot.item = item;
+        if (!FreeLayout()) {
+            slot.marker = SequenceDropMarker(item, screen, slot.before);
+        } else if (item == kPartLevels && present[item]) {
+            // 新调节条与目标栏已有的另一根共用一个框。
+            slot.marker = FreeToActual(layout.box[item]);
+        } else {
+            float u = FreeUnit();
+            SizeF size = FreeDropSize(item, rowCount);
+            float fit = std::min(1.0f, Vertical() ? layout.freeW / size.Width : layout.freeH / size.Height);
+            size.Width *= fit;
+            size.Height *= fit;
+            FreeBox want{(screen.x - s_pos.x - s_L.freeX) / u - size.Width / 2,
+                         (screen.y - s_pos.y - s_L.freeY) / u - size.Height / 2, size.Width, size.Height};
+            want.x = std::clamp(want.x, 0.0f, std::max(0.0f, layout.freeW - want.w));
+            want.y = std::clamp(want.y, 0.0f, std::max(0.0f, layout.freeH - want.h));
+            slot.box = InCanvas(layout, want) && !Collides(layout, present, want, item) ? want
+                       : FindSpot(layout, present, want, item);
+            if (slot.box.w <= 0 || slot.box.h <= 0) {
+                plan.state = DropState::NoRoom;
+                return plan;
+            }
+            slot.marker = FreeToActual(slot.box);
+            layout.box[item] = slot.box;
+            present[item] = true;
+        }
+    }
+    return plan;
+}
+
+void ShowDropPreview(int peer, const DropPlan& plan) {
+    for (int panel : kPanelSlots) {
+        if (!PeerOpen(panel)) continue;
+        InPanel other(panel);
+        DropState state = panel == peer ? plan.state : DropState::None;
+        bool changed = state != s_dropTarget;
+        s_dropTarget = state;
+        for (int i = 0; i < 2; ++i) {
+            RectF mark = state == DropState::Ready ? plan.slots[i].marker : RectF();
+            changed = changed || !mark.Equals(s_dropMarks[i]);
+            s_dropMarks[i] = mark;
+        }
+        if (changed) Redraw();
+    }
+}
+
+void ClearDropPreview() { ShowDropPreview(-1, {}); }
+
+// 编辑模式里标题上的说明：正在拖的、鼠标下的东西怎么拖
 std::wstring EditText() {
     bool free = FreeLayout();
     const ModuleSet& mods = Mods();
@@ -4723,31 +5220,37 @@ std::wstring EditText() {
     if (s_resize) return SizeText();
     if (s_scaleModule >= 0)
         return free ? BoxSizeText(s_scaleModule) : TrF(L"%ls %d%%", PartName(s_scaleModule), VisualPercent(s_scaleModule));
-    if (s_gapDrag >= 0 || (s_wheelGap && s_editHover == kPartGap)) return TrF(L"图标间距 %d 像素", s_look.iconGap);
+    if (s_gapDrag >= 0 || (s_wheelGap && s_editHover == kPartGap)) return TrF(L"全局图标间距 %d 像素", s_look.iconGap);
     if (s_movePanel) return PlaceText();
     if (s_moveModule != kPartNone) {
-        if (s_moveOut && OverOtherPanel(s_moveCur)) return TrF(L"松开把%ls放到另一条上", PartName(s_moveModule));
-        if (s_moveOut) return TrF(L"松开隐藏%ls", PartName(s_moveModule));
+        if (s_movePeer >= 0) {
+            const PanelVars& target = s_panels[s_movePeer];
+            if (target.v_s_dropTarget == DropState::Ready) return TrF(L"松开移到%ls", EdgeLabel(target.v_s_edge));
+            if (target.v_s_dropTarget == DropState::Duplicate) return Tr(L"目标栏已有同类模块");
+            if (target.v_s_dropTarget == DropState::NoRoom) return Tr(L"目标栏没有空位");
+        }
+        if (s_moveOut) return Tr(L"松开回到原位");
         return Tr(free && s_moveNoRoom ? L"没有空位，先拖边把区域放大" : L"放到想要的位置");
     }
+    if (s_dropTarget == DropState::Ready) return Tr(L"松开接收模块");
+    if (s_dropTarget == DropState::Duplicate) return Tr(L"此栏已有同类模块");
+    if (s_dropTarget == DropState::NoRoom) return Tr(L"此栏没有空位");
     if (s_wheelScaled >= 0 && s_wheelScaled == s_hoverModule)  // 刚用滚轮改了大小
         return free ? BoxSizeText(s_wheelScaled) : TrF(L"%ls %d%%", PartName(s_wheelScaled), VisualPercent(s_wheelScaled));
-    if (s_wheelPanel && s_editHover == kPartPanel) return TrF(L"大小 %d%%", g_settings.popupScale);
+    if (s_wheelPanel && s_editHover == kPartPanel) return TrF(L"整体缩放 %d%%", LayoutScale());
     if (!s_editNote.empty()) return s_editNote;
-    if (IsHandlePart(s_editHover)) return Tr(free ? L"拖动改长宽，双击恢复，滚轮也能调" : L"拖动改大小，双击恢复，滚轮也能调");
+    if (IsHandlePart(s_editHover)) return Tr(free ? L"拖动改长宽，双击恢复，Ctrl+滚轮也能调" : L"拖动改大小，双击恢复，Ctrl+滚轮也能调");
     switch (s_editHover) {
-        case kPartGap: return Tr(L"拖动改间距，双击恢复，滚轮也能调");
-        case kPartScaleEdge: return Tr(free ? L"拖动改区域大小，双击去掉空白" : L"拖动改大小，双击恢复");
+        case kPartGap: return Tr(L"拖动改间距，双击恢复，Ctrl+滚轮也能调");
+        case kPartScaleEdge: return Tr(free ? L"拖动改区域大小，双击去掉空白" : L"拖动整体缩放，双击恢复");
         case kPartLengthEdge: return Tr(free ? L"拖动改区域大小，双击去掉空白" : L"拖动改长度，双击恢复");
-        case kPartPanel: return Tr(L"拖动挪位置，滚轮改大小，双击恢复");
-        case kPartNone: return Tr(L"编辑模式：回车完成，右键更多");
-        case kModStart:
-        case kModWindows: return Tr(s_dual ? L"拖到想放的地方，拖出面板隐藏" : L"拖到想放的地方");
-        default: return Tr(L"拖到想放的地方，拖出面板隐藏");
+        case kPartPanel: return Tr(L"拖动挪位置，Ctrl+滚轮整体缩放");
+        case kPartNone: return Tr(L"Enter 保存，Esc 取消，右键更多");
+        default: return Tr(L"拖到想放的地方");
     }
 }
 
-// 在编辑模式里按下鼠标（双击也在这里认）。边上：改大小、长度；模块上：换位置、拖出去隐藏；别处：挪面板
+// 在编辑模式里按下鼠标（双击也在这里认）。边上改尺寸，模块上换位置，空白处挪面板。
 bool EditClickTwice(POINT screen) {
     DWORD now = GetTickCount();
     bool twice = s_edgeClickAt && now - s_edgeClickAt <= GetDoubleClickTime() &&
@@ -4758,7 +5261,7 @@ bool EditClickTwice(POINT screen) {
     return twice;
 }
 
-// ---- 编辑模式：拖模块换顺序、拖出去隐藏 ----
+// ---- 编辑模式：拖模块换位置 ----
 
 // 拖着的模块在自由布局里现在在哪（跟着鼠标，没对齐、没挪进区域）
 FreeBox DraggedBox() {
@@ -4772,6 +5275,7 @@ FreeBox DraggedBox() {
 void BeginModuleDrag(int part, POINT screen) {
     s_moveModule = part;
     s_moveOut = false;
+    s_movePeer = -1;
     s_moveAt = s_moveCur = s_movePress = screen;
     s_moveStartPos = part < kModuleCount ? s_L.modPos[part] : 0;
     s_moveLand = {};
@@ -4871,14 +5375,17 @@ void DragModule(POINT screen) {
     const Layout& L = s_L;
     s_moveCur = screen;
     PointF pt(static_cast<REAL>(screen.x - s_pos.x), static_cast<REAL>(screen.y - s_pos.y));
-    RectF keep(L.panelX, L.panelY, L.panelW, L.panelH);
-    keep.Inflate(Px(16), Px(16));
-    // 开始按钮、窗口格子只有底部和侧边一起时才能拖出去（放到另一条上）
-    bool out = !keep.Contains(pt) && (!LaidActual(s_moveModule) || s_dual);
-    s_moveOut = out;
-    MarkOther(s_moveModule, screen, out && OverOtherPanel(screen));
-    // 按顺序排时在面板里挪出几像素：换成自由布局，之后拖到哪就放在哪（拖出去隐藏还是按顺序排）
-    if (!FreeLayout() && !out &&
+    s_moveOut = !RectF(L.panelX, L.panelY, L.panelW, L.panelH).Contains(pt);
+    s_movePeer = s_moveOut && (!LaidActual(s_moveModule) || s_multiBar) ? PeerAt(screen) : -1;
+    DropPlan plan;
+    if (s_movePeer >= 0) {
+        DragParts moving = PartsBeingMoved(s_moveModule);
+        InPanel target(s_movePeer);
+        plan = PlanDrop(moving, screen);
+    }
+    ShowDropPreview(s_movePeer, plan);
+    // 按顺序排时在面板里挪出几像素：换成自由布局，之后拖到哪就放在哪。
+    if (!FreeLayout() && !s_moveOut &&
         std::abs(screen.x - s_movePress.x) + std::abs(screen.y - s_movePress.y) >= static_cast<LONG>(Px(4))) {
         ConvertToFree();
         EditRelayout();
@@ -4890,7 +5397,7 @@ void DragModule(POINT screen) {
         return;
     }
     Redraw();  // 拖着的模块跟着鼠标
-    if (out || s_moveModule >= kModuleCount) return;
+    if (s_moveOut || s_moveModule >= kModuleCount) return;
     // 鼠标越过了别的模块的中线就换到它那一边（多过几个像素才算，免得面板挪了一点又换回来）
     float along = Vertical() ? pt.Y : pt.X, hysteresis = Px(6);
     std::vector<float> centers;
@@ -4903,11 +5410,12 @@ void DragModule(POINT screen) {
         }
         centers.push_back(L.modPos[m] + L.modLen[m] / 2);
     }
+    if (cur < 0) return;
     int k = 0;
     while (k < static_cast<int>(centers.size()) && centers[k] < along) ++k;
     if (k > cur && along < centers[k - 1] + hysteresis) k = cur;
     if (k < cur && along > centers[k] - hysteresis) k = cur;
-    if (k == cur || cur < 0) return;
+    if (k == cur) return;
     ModuleSnap snap = SnapModules();
     MoveModule(s_moveModule, k);
     EditRelayout();
@@ -4916,6 +5424,7 @@ void DragModule(POINT screen) {
 }
 
 void ShowPart(int part, bool on);
+void ApplyLayout(const ModuleSet& next);
 
 // 自由布局里换一样东西的框，从现在画的样子慢慢变过去
 void SetFreeBox(int item, const FreeBox& to) {
@@ -4937,7 +5446,7 @@ void ShowFreePart(int part, bool on) {
     ComputeLayout();  // 先看这次有哪些，没放过的找好地方
     if (on && s_freePresent[item]) {
         FreeBox& b = mods.box[item];
-        if (b.w > 0 && (!InCanvas(b) || Collides(b, item))) {
+        if (b.w > 0 && (!InCanvas(mods, b) || Collides(b, item))) {
             FreeBox want = b;
             want.x = std::clamp(want.x, 0.0f, std::max(0.0f, mods.freeW - want.w));
             want.y = std::clamp(want.y, 0.0f, std::max(0.0f, mods.freeH - want.h));
@@ -4949,108 +5458,84 @@ void ShowFreePart(int part, bool on) {
     }
     AnimateBoxes(boxes);
     s_scaleLayout = true;
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
     EditRelayout();
 }
 
-// 把模块拖到另一条上松开了：在另一条里显示它（自由布局时放在松开的地方，挨着别的就挑最近的空位），这一条里随后隐藏。
-// 拖的是调节条那一行的话，另一条里显示这一行放着的那几根
-void GiveToOther(int part, POINT screen) {
-    bool volume = part == kPartLevels && RowSlider(0), bright = part == kPartLevels && RowSlider(1);
-    const wchar_t* name = PartName(part);
-    InPanel other(Other());
-    if (!s_open || s_preview) return;
-    std::vector<int> parts;
-    if (part == kPartLevels) {
-        if (volume) parts.push_back(kModVolume);
-        if (bright) parts.push_back(kModBright);
-    } else {
-        parts.push_back(part);
+// 只有目标栏已接收，原栏才移除模块。两条栏的变化由同一个编辑动作记录。
+bool GiveToOther(int part, POINT screen, int panel) {
+    if (panel < 0) return false;
+    DragParts moving = PartsBeingMoved(part);
+    InPanel other(panel);
+    if (!s_open || !EditingLayout()) return false;
+    DropPlan plan = PlanDrop(moving, screen);
+    if (plan.state != DropState::Ready) return false;
+    ModuleSet next = Mods();
+    for (int p : moving.parts)
+        if (p != kPartNone) next.*kPartEnabled[p] = true;
+    for (const DropSlot& slot : plan.slots) {
+        if (next.free) {
+            if (slot.box.w > 0) next.box[slot.item] = slot.box;
+        } else if (slot.item >= 0 && slot.item < kModuleCount) {
+            auto* end = next.order + kModuleCount;
+            auto* from = std::find(next.order, end, slot.item);
+            auto* before = std::find(next.order, end, slot.before);
+            if (from < before) std::rotate(from, from + 1, before);
+            else if (before < from) std::rotate(before, from, from + 1);
+        }
     }
-    Log(L"编辑模式里把%ls拖到了另一条上", name);
-    for (int p : parts) {
-        const ModuleSet& mods = Mods();
-        bool already = p == kModStart     ? StartShown()
-                       : p == kModWindows ? WindowsShown()
-                       : p == kModTray    ? mods.tray
-                       : p == kModMedia   ? mods.media
-                       : p == kModIme     ? mods.ime
-                       : p == kModBattery ? mods.battery
-                       : p == kModClock   ? mods.clock
-                       : p == kModVolume  ? mods.volume
-                       : p == kModBright  ? mods.brightness
-                       : p == kPartRadios ? mods.radios
-                                          : true;
-        if (!already) ShowPart(p, true);  // 先放出来（自由布局时找个空位，按原来的大小）
-        // 自由布局：再把框挪到松开的地方（叠到别的上面时排版会挪到最近的空位）
-        if (!FreeLayout() || p == kModVolume || p == kModBright) continue;
-        BoxSnap boxes = SnapBoxes();
-        FreeBox& b = Mods().box[p];
-        if (b.w <= 0 || b.h <= 0) continue;
-        float u = FreeUnit();
-        b.x = (screen.x - s_pos.x - s_L.freeX) / u - b.w / 2;
-        b.y = (screen.y - s_pos.y - s_L.freeY) / u - b.h / 2;
-        AnimateBoxes(boxes);
-        s_scaleLayout = true;
-        SaveSettings();
-        EditRelayout();
-    }
+    ApplyLayout(next);
+    return true;
 }
 
-// drop：松开了鼠标（拖到外面就隐藏）；否则是被打断了，换过的顺序照样留着（自由布局时放回原处）
-void EndModuleDrag(bool drop) {
-    if (s_moveModule == kPartNone) return;
+bool EndModuleDrag() {
     int part = s_moveModule;
-    MarkOther(part, {}, false);
     bool out = s_moveOut;
-    if (FreeLayout()) {
-        // 从松开的地方慢慢落到虚线框那里（没地方放、被打断了就回到原处）
-        BoxSnap boxes = SnapBoxes();
-        boxes.b[part] = DraggedBox();
-        s_moveModule = kPartNone;  // 先清掉：放开鼠标捕获时还会再进来
-        s_moveOut = false;
-        s_guideX = s_guideY = -1;
-        if (GetCapture() == s_hwnd) ReleaseCapture();
-        if (drop && out) {
-            if (OverOtherPanel(s_moveCur)) GiveToOther(part, s_moveCur);
-            ShowPart(part, false);
-            return;
-        }
-        FreeBox to = drop && s_moveLand.w > 0 ? s_moveLand : s_moveBox0;
-        Mods().box[part] = to;
-        AnimateBoxes(boxes);
-        s_scaleLayout = true;
-        if (to.x != s_moveBox0.x || to.y != s_moveBox0.y) Log(L"编辑模式里把%ls挪到了 %.0f, %.0f", PartName(part), to.x, to.y);
-        SaveSettings();
-        SettingsDialog_SettingsChanged();
-        EditRelayout();
-        return;
-    }
+    int peer = s_movePeer;
+    bool free = FreeLayout();
+    BoxSnap boxes;
     ModuleSnap snap = SnapModules();
+    if (free) {
+        boxes = SnapBoxes();
+        boxes.b[part] = DraggedBox();
+    }
     s_moveModule = kPartNone;  // 先清掉：放开鼠标捕获时还会再进来
     s_moveOut = false;
-    SlideModules(snap);  // 松开的模块从鼠标那里滑回空位
+    s_movePeer = -1;
+    s_guideX = s_guideY = -1;
+    ClearDropPreview();
     if (GetCapture() == s_hwnd) ReleaseCapture();
-    if (drop && out) {
-        if (OverOtherPanel(s_moveCur)) GiveToOther(part, s_moveCur);
+    if (out && GiveToOther(part, s_moveCur, peer)) {
+        if (!EditingLayout() || !s_editSession->beforeAction) return false;
+        const ModuleSet& original = s_editSession->beforeAction->modules[ModuleSideOf(s_edge)];
+        if (original.free != free || !std::equal(original.order, original.order + kModuleCount, Mods().order)) {
+            Mods() = original;  // 撤掉拖动途中临时改的布局，只留下这次跨栏移动
+            EditRelayout();
+        }
         ShowPart(part, false);
-        return;
+        return true;
     }
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
-    Redraw();
+    if (free) {
+        if (!out && s_moveLand.w > 0) Mods().box[part] = s_moveLand;
+        AnimateBoxes(boxes);
+        s_scaleLayout = true;
+        EditRelayout();
+    } else {
+        SlideModules(snap);
+        Redraw();
+    }
+    return !out && (!free || s_moveLand.w > 0);
 }
 
-// 编辑模式里隐藏、显示一个模块（调节条、Wi-Fi 蓝牙）：改这条边那份设置、保存，这次弹出的也跟着变。
+// 编辑模式里隐藏、显示一个模块：只改这条边的草稿，别的模块滑到新位置。
 // 别的模块滑到新位置
 std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows);
 
 void ShowPart(int part, bool on) {
+    const wchar_t* name = PartName(part);
     ModuleSet& mods = Mods();
     if (part == kModStart || part == kModWindows) {
         // 开始按钮、窗口格子：只有底部和侧边一起时才能隐藏，要先换成自由布局（按顺序排时它们总在）
-        if (!s_dual) return;
+        if (!s_multiBar) return;
         if (!FreeLayout()) {
             ConvertToFree();
             EditRelayout();
@@ -5068,7 +5553,7 @@ void ShowPart(int part, bool on) {
             break;
         case kModMedia:
             mods.media = on;
-            Media_Configure(AnyModuleSet(&ModuleSet::media), s_panelHwnd[0]);
+            ConfigureLayoutMedia();
             s_media = on ? Media_Get() : MediaInfo();
             if (on) Media_Query();
             break;
@@ -5091,14 +5576,14 @@ void ShowPart(int part, bool on) {
         case kModWindows:
             mods.windows = on;
             s_allItems = on ? BuildTiles(EnumerateWindows(s_prevForeground, IconPx(), s_monitor)) : std::vector<Tile>();
-            s_items = s_allItems;
+            s_items = GroupTiles(s_allItems);
             s_filter.clear();
             s_lockedItemsW = 0;
             s_first = 0;
             HideThumb();
             s_sel = DefaultSelection();
             break;
-        case kPartLevels:  // 拖出去隐藏下面那一行放着的
+        case kPartLevels:  // 跨栏时移除下面那一行放着的调节条
             if (RowSlider(0)) mods.volume = false;
             if (RowSlider(1)) mods.brightness = false;
             SyncSliders(false);
@@ -5119,7 +5604,7 @@ void ShowPart(int part, bool on) {
             break;
         default: return;
     }
-    Log(L"编辑模式里%ls了%ls", on ? L"显示" : L"隐藏", PartName(part));
+    Log(L"编辑模式里%ls了%ls", on ? L"显示" : L"隐藏", name);
     SyncMediaShown();
     s_editHover = kPartNone;
     s_hoverModule = -1;
@@ -5127,8 +5612,6 @@ void ShowPart(int part, bool on) {
         ShowFreePart(part, on);
         return;
     }
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
     // 刚显示出来的模块从很小长到它的大小，别的模块跟着让开；格子放大补位的倍数变了的话，格子也慢慢变过去
     s_scaleStart = -1e9;
     FitTiles();
@@ -5145,23 +5628,23 @@ void ShowPart(int part, bool on) {
 
 // ---- 编辑模式：拖面板挪位置 ----
 
-// 位置记到所有屏幕共用的，或者这块屏幕自己的（每块屏幕分别设置时）。另一条只有一份（不分屏幕）
+// 主栏保留按屏幕存位置的能力。共用位置和辅助栏的位置则按物理边保存。
 void StorePlace() {
-    if (s_cur == 1) {
-        g_settings.secondAlign = s_align;
-        g_settings.secondOffset = s_offset;
-    } else if (g_settings.popupPerScreen) {
+    auto& draft = *EditingLayout();
+    if (s_cur == 0 && g_settings.popupPerScreen) {
         std::wstring key = MonitorKey(s_monitor);
-        ScreenPlace* p = FindScreenPlace(g_settings.screens, key);
+        ScreenPlace* p = FindScreenPlace(draft.screens, key);
         if (!p) {
-            g_settings.screens.push_back({key, g_settings.popupEdge, g_settings.popupAlign, g_settings.popupOffset});
-            p = &g_settings.screens.back();
+            draft.screens.push_back({key, s_placed, s_align, s_offset});
+        } else {
+            p->edge = s_placed;
+            p->align = s_align;
+            p->offset = s_offset;
         }
-        p->align = s_align;
-        p->offset = s_offset;
     } else {
-        g_settings.popupAlign = s_align;
-        g_settings.popupOffset = s_offset;
+        auto& bar = draft.bars[ModuleSideOf(s_edge)];
+        bar.align = s_align;
+        bar.offset = s_offset;
     }
 }
 
@@ -5206,37 +5689,38 @@ void DragPanel(POINT screen) {
     Redraw();
 }
 
-void EndPanelMove(bool drop) {
-    if (!s_movePanel) return;
+void EndPanelMove() {
     s_movePanel = false;
     if (GetCapture() == s_hwnd) ReleaseCapture();
     if (s_align != s_moveFromAlign || s_offset != s_moveFromOffset) {
-        if (!drop) {  // 被打断了：放回去
-            s_align = s_moveFromAlign;
-            s_offset = s_moveFromOffset;
-            UpdatePlacement();
-        } else {
-            StorePlace();
-            Log(L"拖动挪了迷你任务栏：%ls（%d）", PlaceText().c_str(), s_offset);
-            SaveSettings();
-            SettingsDialog_SettingsChanged();
-        }
+        StorePlace();
+        Log(L"拖动挪了迷你任务栏：%ls（%d）", PlaceText().c_str(), s_offset);
     }
     Redraw();
 }
 
-// 已经在默认位置：底边跟随系统；竖排除了自定义都是上下居中（对齐是底边的，不动它）
-bool AtDefaultPlace() { return Vertical() ? s_align != kAlignCustom : s_align == kAlignSystem; }
+SideBarPlacement ThreeBarDefaultPlacement() {
+    const Settings& defaults = ThreeBarDefaults();
+    if (Vertical()) return defaults.sideBar[s_edge - kEdgeLeft];
+    return {defaults.popupAlign, defaults.popupOffset, defaults.popupLength, defaults.popupRadius};
+}
 
-// 双击挪面板的地方：恢复默认位置（底边跟随系统，竖排上下居中）
+bool AtDefaultPlace() {
+    if (s_placed == kEdgeAll) {
+        const SideBarPlacement place = ThreeBarDefaultPlacement();
+        return s_align == place.align && s_offset == place.offset;
+    }
+    return Vertical() ? s_align != kAlignCustom : s_align == kAlignSystem;
+}
+
+// 双击挪面板的地方：恢复本栏的默认位置。
 void ResetPlace() {
     if (AtDefaultPlace()) return;
-    s_align = kAlignSystem;
-    s_offset = 500;
+    const SideBarPlacement place = s_placed == kEdgeAll ? ThreeBarDefaultPlacement() : SideBarPlacement{};
+    s_align = place.align;
+    s_offset = place.offset;
     StorePlace();
     Log(L"迷你任务栏恢复默认位置");
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
     EditRelayout();
 }
 
@@ -5281,19 +5765,23 @@ void SetModuleScale(int m, int percent) {
     });
 }
 
-// 编辑模式里改了自由布局里托盘的框：设置里的托盘样式跟着框的样子（拉长了是一行大图标，缩短了是小图标堆叠）
+// 编辑模式里改了自由布局里托盘的框：草稿里的全局托盘样式跟着框的样子。
 void SyncTrayStyle() {
     const FreeBox& b = Mods().box[kModTray];
     if (!FreeLayout() || b.w <= 0) return;
     int style = TrayBoxLong(b, Vertical()) ? kTrayRow : kTrayStacked;
-    if (style == g_settings.trayStyle) return;
-    g_settings.trayStyle = s_look.trayStyle = style;
+    int& trayStyle = EditingLayout()->trayStyle;
+    if (style == trayStyle) return;
+    trayStyle = s_look.trayStyle = style;
     Log(L"编辑模式里改了托盘的框，托盘图标换成了%ls", style == kTrayRow ? L"一行大图标" : L"小图标堆叠");
     EditRelayout();
-    if (OtherOpen()) {  // 另一条上的托盘也换
-        InPanel other(Other());
-        s_look.trayStyle = style;
-        EditRelayout();
+    for (int panel : kPanelSlots) {  // 其它面板上的托盘也换
+        if (!PeerOpen(panel)) continue;
+        InPanel other(panel);
+        if (s_editing) {
+            s_look.trayStyle = style;
+            EditRelayout();
+        }
     }
 }
 
@@ -5312,8 +5800,6 @@ void ResetFreeBox(int item) {
     SetFreeBox(item, want);
     Log(L"双击恢复了%ls的大小", PartName(item));
     if (item == kModTray) SyncTrayStyle();
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
 }
 
 // 自由布局里改框的大小：不小于最小、不出区域（anchor 那个角不动，right / top：框往右、往上长）。
@@ -5389,8 +5875,6 @@ void BeginScaleDrag(int m, POINT screen) {
         if (Mods().scale[m] != 100) {
             SetModuleScale(m, 100);
             Log(L"双击恢复了%ls的大小", PartName(m));
-            SaveSettings();
-            SettingsDialog_SettingsChanged();
         }
         return;
     }
@@ -5420,7 +5904,6 @@ void DragScale(POINT screen) {
 }
 
 void EndScaleDrag() {
-    if (s_scaleModule < 0) return;
     int m = s_scaleModule;
     s_scaleModule = -1;  // 先清掉：放开鼠标捕获时还会再进来
     if (GetCapture() == s_hwnd) ReleaseCapture();
@@ -5429,13 +5912,9 @@ void EndScaleDrag() {
         if (b.x != s_scaleBox0.x || b.y != s_scaleBox0.y || b.w != s_scaleBox0.w || b.h != s_scaleBox0.h) {
             Log(L"拖圆点改了%ls的大小：%.0f × %.0f", PartName(m), b.w, b.h);
             if (m == kModTray) SyncTrayStyle();
-            SaveSettings();
-            SettingsDialog_SettingsChanged();
         }
     } else if (Mods().scale[m] != s_scaleFromPercent) {
         Log(L"拖动改了%ls的大小：%d%%", PartName(m), Mods().scale[m]);
-        SaveSettings();
-        SettingsDialog_SettingsChanged();
     }
     Redraw();
 }
@@ -5466,15 +5945,11 @@ void WheelScale(int m, int notches) {
         if (lo > 0.01f) SetFreeBox(m, boxAt(lo));
         s_wheelScaled = s_hoverModule = m;
         if (m == kModTray) SyncTrayStyle();
-        SaveSettings();
-        SettingsDialog_SettingsChanged();
         Redraw();
         return;
     }
     SetModuleScale(m, VisualPercent(m) + 5 * notches);
     s_wheelScaled = s_hoverModule = m;
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
     Redraw();
 }
 
@@ -5484,23 +5959,17 @@ void WheelScale(int m, int notches) {
 void SetIconGap(int gap) {
     gap = std::clamp(gap, 0, kMaxIconGap);
     if (gap == s_look.iconGap) return;
-    float from = GapNow();
-    ChangeScales([&] { g_settings.iconGap = s_look.iconGap = gap; }, from);
-}
-
-void SaveIconGap() {
-    Log(L"编辑模式里改了图标间距：%d 像素", s_look.iconGap);
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
+    EditingLayout()->iconGap = gap;
+    for (int panel : kPanelSlots) {
+        InPanel in(panel);
+        if (s_editing) ChangeScales([&] { s_look.iconGap = gap; }, GapNow());
+    }
 }
 
 // 按下了格子之间的缝：开始拖着改间距（双击恢复默认）
 void BeginGapDrag(int after, POINT screen) {
     if (EditClickTwice(screen)) {
-        if (s_look.iconGap != kDefaultIconGap) {
-            SetIconGap(kDefaultIconGap);
-            SaveIconGap();
-        }
+        SetIconGap(kDefaultIconGap);
         return;
     }
     s_gapDrag = after;
@@ -5519,25 +5988,35 @@ void DragGap(POINT screen) {
 }
 
 void EndGapDrag() {
-    if (s_gapDrag < 0) return;
     s_gapDrag = -1;  // 先清掉：放开鼠标捕获时还会再进来
     if (GetCapture() == s_hwnd) ReleaseCapture();
-    if (s_look.iconGap != s_gapFromValue) SaveIconGap();
     Redraw();
 }
 
 // 滚轮在缝上：一格一个像素（往上滚变宽）
 void WheelGap(int notches) {
-    int was = s_look.iconGap;
-    SetIconGap(was + notches);
+    SetIconGap(s_look.iconGap + notches);
     s_wheelGap = true;
-    if (s_look.iconGap != was) SaveIconGap();
     Redraw();
 }
 
 // ---- 编辑模式：保存、换回、恢复布局 ----
 
 void LoadModules(bool preview);
+
+void ReloadLayoutModules(bool windowsWereShown) {
+    LoadModules(false);
+    if (WindowsShown() != windowsWereShown) {
+        s_allItems = WindowsShown() ? BuildTiles(EnumerateWindows(s_prevForeground, IconPx(), s_monitor))
+                                    : std::vector<Tile>();
+        s_items = GroupTiles(s_allItems);
+        s_filter.clear();
+        s_lockedItemsW = 0;
+        s_first = 0;
+        s_sel = DefaultSelection();
+    }
+    if (s_sel <= 0) s_sel = DefaultSelection();
+}
 
 // 一样东西现在画在屏幕上的哪里（换布局时从这里变过去）
 RectF ItemScreenRect(int item) {
@@ -5548,6 +6027,7 @@ RectF ItemScreenRect(int item) {
 
 // 换成另一份布局（保存的、默认的）：显示哪些、顺序、大小、自由布局一起换，各样东西从原来的地方变过去
 void ApplyLayout(const ModuleSet& next) {
+    bool windowsWereShown = WindowsShown();
     RectF old[kFreeItems];
     bool had[kFreeItems];
     float oldK[kModuleCount];
@@ -5557,8 +6037,8 @@ void ApplyLayout(const ModuleSet& next) {
     }
     for (int m = 0; m < kModuleCount; ++m) oldK[m] = s_L.modK[m] * (TileBased(m) ? s_tileGrow : 1.0f);
     Mods() = next;
-    Media_Configure(AnyModuleSet(&ModuleSet::media), s_panelHwnd[0]);
-    LoadModules(false);
+    ConfigureLayoutMedia();
+    ReloadLayoutModules(windowsWereShown);
     s_scaleStart = s_gapStart = s_boxStart = s_modStart = -1e9;
     s_editHover = kPartNone;
     s_hoverModule = -1;
@@ -5590,23 +6070,29 @@ void ApplyLayout(const ModuleSet& next) {
         s_modStart = NowMs();
     }
     s_scaleLayout = true;
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
     EditRelayout();
 }
 
-// 默认布局：按默认顺序排、各模块原大小
 bool DefaultLayout() {
     const ModuleSet& mods = Mods();
+    if (s_placed == kEdgeAll)
+        return PanelLength() == ThreeBarDefaultPlacement().length &&
+               ModuleSetText(mods) == ModuleSetText(ThreeBarDefaults().modules[ModuleSideOf(s_edge)]);
     if (mods.free || CustomScales()) return false;
     for (int i = 0; i < kModuleCount; ++i)
         if (mods.order[i] != i) return false;
     return true;
 }
 
-// 恢复默认布局（显示哪些不变）
+// 三边模式恢复本栏的预设，其他模式恢复模块顺序和大小。
 void ResetLayout() {
     if (DefaultLayout()) return;
+    if (s_placed == kEdgeAll) {
+        PanelLength() = ThreeBarDefaultPlacement().length;
+        ApplyLayout(ThreeBarDefaults().modules[ModuleSideOf(s_edge)]);
+        Log(L"迷你任务栏恢复默认布局");
+        return;
+    }
     ModuleSet next = Mods();
     for (int i = 0; i < kModuleCount; ++i) next.order[i] = i;
     std::fill(next.scale, next.scale + kModuleCount, 100);
@@ -5617,68 +6103,73 @@ void ResetLayout() {
     ApplyLayout(next);
 }
 
-// 保存当前布局（底部、侧边各存一份），之后可以换回来
+// 把本栏布局记到草稿里的快照槽，完成编辑时和布局一起写入设置。
 void SaveLayout() {
-    std::wstring& saved = g_settings.savedLayout[ModuleSideOf(s_edge)];
+    std::wstring& saved = EditingLayout()->saved[ModuleSideOf(s_edge)];
     saved = ModuleSetText(Mods());
-    Log(L"保存了迷你任务栏的布局：%ls", saved.c_str());
-    SaveSettings();
-    s_editNote = Tr(L"已保存当前布局");
+    s_editNote = Tr(L"已记录本栏布局");
     Redraw();
 }
 
 void RestoreLayout() {
     ModuleSet next;
-    if (!ParseModuleSetText(g_settings.savedLayout[ModuleSideOf(s_edge)], next)) return;
+    if (!ParseModuleSetText(EditingLayout()->saved[ModuleSideOf(s_edge)], next)) return;
     Log(L"迷你任务栏换回保存的布局");
     ApplyLayout(next);
 }
 
-// 滚轮在面板空白处：整个迷你任务栏一格 5%（和拖横排的上边一样）
+// Ctrl+滚轮在面板空白处：全局比例每格 5%（和拖顺序布局的粗细边一样）
 void WheelPanel(int notches) {
     s_glass.Extend(GrowArea());
     s_baseValid = false;
-    int was = g_settings.popupScale;
-    SetPopupSize(was + 5 * notches, PanelLength());
+    SetPopupSize(LayoutScale() + 5 * notches, PanelLength());
     s_wheelPanel = true;
-    if (g_settings.popupScale != was) {
-        Log(L"滚轮改了迷你任务栏的大小：%d%%", g_settings.popupScale);
-        SaveSettings();
-        SettingsDialog_SettingsChanged();
-    }
     Redraw();
 }
 
 // 编辑模式里的右键菜单：显示哪些模块、保存 / 换回 / 恢复布局、恢复位置、完成
 void ShowEditMenu(POINT client) {
-    enum { kCmdPlace = 1, kCmdDone, kCmdSave, kCmdRestore, kCmdReset, kCmdPart = 100 };
+    if (!EditingLayout()) return;
+    enum { kCmdPlace = 1, kCmdDone, kCmdCancel, kCmdUndo, kCmdSave, kCmdRestore, kCmdReset, kCmdPart = 100 };
     HMENU menu = CreatePopupMenu();
+    if (!menu) return;
     std::vector<int> parts = {kModTray, kModMedia, kModIme, kModBattery, kModClock, kModVolume, kModBright, kPartRadios};
     const ModuleSet& mods = Mods();
     std::vector<bool> shown = {mods.tray,  mods.media,  mods.ime,        mods.battery,
                                mods.clock, mods.volume, mods.brightness, mods.radios};
-    if (s_dual) {  // 底部和侧边一起：开始按钮、窗口格子也能隐藏（放到另一条上）
+    if (s_multiBar) {  // 底部和侧边一起：开始按钮、窗口格子也能隐藏（放到另一条上）
         parts.insert(parts.begin(), {kModStart, kModWindows});
         shown.insert(shown.begin(), {StartShown(), WindowsShown()});
     }
     for (size_t i = 0; i < parts.size(); ++i)
         AppendMenuW(menu, MF_STRING | (shown[i] ? MF_CHECKED : 0), kCmdPart + parts[i], PartName(parts[i]));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    bool saved = !g_settings.savedLayout[ModuleSideOf(s_edge)].empty();
-    AppendMenuW(menu, MF_STRING, kCmdSave, Tr(L"保存当前布局"));
-    AppendMenuW(menu, MF_STRING | (saved ? 0 : MF_GRAYED), kCmdRestore, Tr(L"换回保存的布局"));
-    AppendMenuW(menu, MF_STRING | (DefaultLayout() ? MF_GRAYED : 0), kCmdReset, Tr(L"恢复默认布局"));
-    AppendMenuW(menu, MF_STRING | (AtDefaultPlace() ? MF_GRAYED : 0), kCmdPlace, Tr(L"恢复默认位置"));
+    bool saved = !EditingLayout()->saved[ModuleSideOf(s_edge)].empty();
+    AppendMenuW(menu, MF_STRING, kCmdSave, Tr(L"记录本栏布局"));
+    AppendMenuW(menu, MF_STRING | (saved ? 0 : MF_GRAYED), kCmdRestore, Tr(L"换回本栏记录的布局"));
+    AppendMenuW(menu, MF_STRING | (DefaultLayout() ? MF_GRAYED : 0), kCmdReset, Tr(L"恢复本栏默认布局"));
+    AppendMenuW(menu, MF_STRING | (AtDefaultPlace() ? MF_GRAYED : 0), kCmdPlace, Tr(L"恢复本栏默认位置"));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kCmdDone, Tr(L"完成"));
+    AppendMenuW(menu, MF_STRING | (s_editSession->undo.empty() ? MF_GRAYED : 0), kCmdUndo, Tr(L"撤销上一步\tCtrl+Z"));
+    AppendMenuW(menu, MF_STRING, kCmdDone, Tr(L"保存并退出\tEnter / F2"));
+    AppendMenuW(menu, MF_STRING, kCmdCancel, Tr(L"取消本次编辑\tEsc"));
     POINT at = {client.x + s_pos.x, client.y + s_pos.y};
     s_menuOpen = true;
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | MenuAlign(), at.x, at.y, 0, s_hwnd,
                               nullptr);
     s_menuOpen = false;
     DestroyMenu(menu);
-    if (!s_open || !s_editing) return;
-    if (cmd) s_editNote.clear();
+    if (!cmd || !s_open || !s_editing) return;
+    if (cmd == kCmdDone || cmd == kCmdCancel) {
+        FinishEditing(cmd == kCmdDone);
+        return;
+    }
+    if (cmd == kCmdUndo) {
+        UndoEdit();
+        return;
+    }
+    if (!BeginEditAction()) return;
+    s_editNote.clear();
     if (cmd >= kCmdPart) {
         int part = static_cast<int>(cmd) - kCmdPart;
         for (size_t i = 0; i < parts.size(); ++i)
@@ -5691,9 +6182,8 @@ void ShowEditMenu(POINT client) {
         ResetLayout();
     } else if (cmd == kCmdPlace) {
         ResetPlace();
-    } else if (cmd == kCmdDone) {
-        SetEditing(false);
     }
+    EndEditAction(true);
 }
 
 // 自由布局里双击边：那个方向上去掉空白（区域刚好包住里面的东西）
@@ -5721,8 +6211,6 @@ void FitFreeArea(int edges) {
     mods.freeW = w;
     mods.freeH = h;
     Log(L"双击边去掉了自由布局区域的空白：%.0f × %.0f", w, h);
-    SaveSettings();
-    SettingsDialog_SettingsChanged();
     EditRelayout();
 }
 
@@ -5797,18 +6285,16 @@ void BeginResize(int edges, POINT screen) {
             s_resizeExtra = size - (v ? mods.freeH : mods.freeW) * FreeUnit();
         }
     } else if (twice) {
-        int percent = edges & ScaleEdges() ? kDefaultPopupScale : g_settings.popupScale;
+        int percent = edges & ScaleEdges() ? kDefaultPopupScale : LayoutScale();
         int length = edges & LengthEdges() ? 0 : PanelLength();
-        if (percent != g_settings.popupScale || length != PanelLength()) {
+        if (percent != LayoutScale() || length != PanelLength()) {
             SetPopupSize(percent, length);
             Log(L"双击迷你任务栏的边恢复：%ls", SizeText().c_str());
-            SaveSettings();
-            SettingsDialog_SettingsChanged();
         }
         return;
     }
     s_resize = edges;
-    s_resizeFrom = g_settings.popupScale;
+    s_resizeFrom = LayoutScale();
     s_resizeLenFrom = PanelLength();
     s_resizeDist = std::max(Px(8), ScaleDistance(screen));
     s_resizeLen = Vertical() ? s_L.panelH : s_L.panelW;
@@ -5854,7 +6340,7 @@ void DragResize(POINT screen) {
         DragFreeArea(screen);
         return;
     }
-    int percent = g_settings.popupScale, length = PanelLength();
+    int percent = LayoutScale(), length = PanelLength();
     if (s_resize & ScaleEdges()) percent = static_cast<int>(std::lround(s_resizeFrom * ScaleDistance(screen) / s_resizeDist));
     bool fit = (s_resize & LengthEdges()) != 0;
     if (fit)
@@ -5865,7 +6351,6 @@ void DragResize(POINT screen) {
 }
 
 void EndResize() {
-    if (!s_resize) return;
     s_resize = 0;  // 先清掉：放开鼠标捕获时还会再进来
     if (GetCapture() == s_hwnd) ReleaseCapture();
     const ModuleSet& mods = Mods();
@@ -5883,17 +6368,43 @@ void EndResize() {
         }
         s_resizeFixed = LONG_MIN;
         UpdatePlacement();
-        if (changed) {
-            Log(L"拖边改了自由布局的区域：%.0f × %.0f", mods.freeW, mods.freeH);
-            SaveSettings();
-            SettingsDialog_SettingsChanged();
-        }
-    } else if (g_settings.popupScale != s_resizeFrom || PanelLength() != s_resizeLenFrom) {
+        if (changed) Log(L"拖边改了自由布局的区域：%.0f × %.0f", mods.freeW, mods.freeH);
+    } else if (LayoutScale() != s_resizeFrom || PanelLength() != s_resizeLenFrom) {
         Log(L"拖边改了迷你任务栏：%ls", SizeText().c_str());
-        SaveSettings();
-        SettingsDialog_SettingsChanged();
     }
     Redraw();
+}
+
+void EditWheel(POINT screen, int delta, bool adjust) {
+    if (!EditingLayout() || s_editSession->beforeAction) return;
+    int peer = PeerAt(screen);  // Windows 可能把滚轮消息发给拿着键盘焦点的另一条
+    InPanel in(peer >= 0 ? peer : s_cur);
+    POINT pt = screen;
+    ScreenToClient(s_hwnd, &pt);
+    int part = EditPartAt(pt.x, pt.y);
+    if (part == kPartNone) return;
+    int& rest = adjust ? s_editWheelRest : s_wheelRest;
+    rest += delta;
+    int up = rest / WHEEL_DELTA;
+    rest %= WHEEL_DELTA;
+    if (!up) return;
+
+    int module = EditModuleAt(pt.x, pt.y, part);
+    if (!adjust) {
+        if (module == kModTray && TrayScrolls()) {
+            FlipTray(-up);
+        } else if (module == kModWindows && ItemCount() > s_visible) {
+            s_first = std::clamp(s_first - up, 0, ItemCount() - s_visible);
+            Redraw();
+        }
+        return;
+    }
+    if (!BeginEditAction()) return;
+    s_editNote.clear();
+    if (part == kPartGap) WheelGap(up);
+    else if (module >= 0) WheelScale(module, up);
+    else if (part == kPartPanel) WheelPanel(up);
+    EndEditAction(true);
 }
 
 // 编辑模式：面板四周一圈虚线，能拖的边中间一个小把手
@@ -5904,9 +6415,12 @@ void DrawEditFrame(Graphics& g) {
     RectF r(L.panelX + inset, L.panelY + inset, L.panelW - 2 * inset, L.panelH - 2 * inset);
     GraphicsPath path;
     AddRoundRect(path, r, std::max(0.0f, L.radius - inset));
-    Pen pen(accent, std::max(1.0f, Px(1.5f)));
+    bool target = s_dropTarget != DropState::None;
+    const Color blocked(255, 232, 72, 72);
+    Color border = !target || s_dropTarget == DropState::Ready ? accent : blocked;
+    Pen pen(border, std::max(1.0f, Px(target ? 3.0f : 1.5f)));
     REAL dash[2] = {4, 3};
-    pen.SetDashPattern(dash, 2);
+    if (!target) pen.SetDashPattern(dash, 2);
     g.DrawPath(&pen, &path);
     int edges = ResizableEdges();
     float len = Px(36), th = Px(5);
@@ -5918,13 +6432,14 @@ void DrawEditFrame(Graphics& g) {
     if (edges & kResizeBottom) bar(cx, r.Y + r.Height, true);
     if (edges & kResizeLeft) bar(r.X, cy, false);
     if (edges & kResizeRight) bar(r.X + r.Width, cy, false);
-    // 能拖的模块：细虚线框；鼠标下的、正拖着的描强调色、铺一层底，要拖出去隐藏时是红的
+    // 能拖的模块：细虚线框；无法放下时，原栏的拖动框标红。
     bool busy = EditDragging();
+    bool invalid = s_moveOut && (s_movePeer < 0 || s_panels[s_movePeer].v_s_dropTarget != DropState::Ready);
     for (int part = 0; part < kPartScaleEdge; ++part) {
         if (!EditPartShown(part)) continue;
         bool active = busy ? part == s_moveModule || part == s_scaleModule
                            : part == s_editHover || s_editHover == kPartHandle + part;
-        Color c = part == s_moveModule && s_moveOut ? Color(255, 232, 72, 72) : accent;
+        Color c = part == s_moveModule && invalid ? blocked : accent;
         RectF m = EditPartRect(part);
         Tone tone(m);
         PointF shift = ModuleShift(part);  // 跟着模块画的地方走（在滑、在拖）
@@ -5978,8 +6493,8 @@ void DrawEditFrame(Graphics& g) {
         }
     }
     // 另一条上拖着模块过来：松开会放在哪
-    if (s_dropMark.Width > 0) {
-        RectF land = s_dropMark;
+    for (const RectF& land : s_dropMarks) {
+        if (land.Width <= 0 || land.Height <= 0) continue;
         GraphicsPath lp;
         AddRoundRect(lp, land, std::min(PillRadius(), std::min(land.Width, land.Height) / 2));
         SolidBrush fill(Color(60, accent.GetR(), accent.GetG(), accent.GetB()));
@@ -6011,9 +6526,8 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
-                POINT pt;
-                GetCursorPos(&pt);
-                ScreenToClient(hwnd, &pt);
+                POINT pt{};
+                if (!GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt)) break;
                 if (s_scaleModule >= 0 || HandleAt(pt.x, pt.y) >= 0) {  // 改模块大小的圆点：沿着对角线拖
                     bool nwse = Vertical() && s_edge == kEdgeLeft;
                     SetCursor(LoadCursorW(nullptr, nwse ? IDC_SIZENWSE : IDC_SIZENESW));
@@ -6041,7 +6555,11 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_ACTIVATE:
             // 两条一起开着时在两条之间换来换去：都不收起，换过来的这一条接着用键盘
             if (IsOtherPanel(reinterpret_cast<HWND>(lParam))) {
-                if (LOWORD(wParam) == WA_INACTIVE) return 0;
+                if (LOWORD(wParam) == WA_INACTIVE) {
+                    s_keyNav = false;
+                    HideThumb();
+                    return 0;
+                }
                 if (s_open && !s_preview) {
                     EndHoverOpen();
                     SetFocus(hwnd);
@@ -6104,7 +6622,31 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_APP_SHOT:
-            OnShot(reinterpret_cast<ShotJob*>(lParam));
+            OnShot();
+            return 0;
+
+        case WM_APP_THUMB:
+            if (!ThumbAllowed() || !Thumb_IsShown(hwnd)) return 0;
+            switch (static_cast<ThumbEvent>(wParam)) {
+                case ThumbEvent::Enter:
+                    s_hover = -1;
+                    s_keyNav = false;
+                    KillTimer(hwnd, kTimerThumb);
+                    break;
+                case ThumbEvent::Leave:
+                    if (ThumbIndex() < 0) SetTimer(hwnd, kTimerThumb, kThumbHideMs, nullptr);
+                    break;
+                case ThumbEvent::Activate:
+                case ThumbEvent::Close: {
+                    HWND source = reinterpret_cast<HWND>(lParam);
+                    if (!source || std::none_of(s_items.begin(), s_items.end(), [source](const Tile& tile) {
+                            return tile.ContainsWindow(source);
+                        })) break;
+                    if (static_cast<ThumbEvent>(wParam) == ThumbEvent::Close) CloseWindows({source});
+                    else if (IsWindow(source)) ActivateWindow(source, false);
+                    break;
+                }
+            }
             return 0;
 
         case WM_TIMER:
@@ -6139,8 +6681,13 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else if (wParam == kTimerLive) {
                 LiveTick();
             } else if (wParam == kTimerThumb) {
-                if (s_thumbWant) ShowThumbNow();
-                else HideThumb();
+                KillTimer(hwnd, kTimerThumb);
+                if (ThumbIndex() > 0) {
+                    ShowThumbNow();
+                } else {
+                    POINT screen{};
+                    if (!ThumbAllowed() || !GetCursorPos(&screen) || !Thumb_ContainsPoint(hwnd, screen)) HideThumb();
+                }
             } else if (wParam == kTimerStart) {
                 WatchStart();
             } else if (wParam == kTimerTrayMenu) {
@@ -6153,13 +6700,6 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 WatchHoverLeave();
             }
             return 0;
-
-        case WM_APP_TRAY_MENU: {
-            std::unique_ptr<TrayApp> app(reinterpret_cast<TrayApp*>(lParam));
-            if (app && s_open && !s_preview) ShowTrayMenu(s_trayHot, *app, false);
-            else if (app) Log(L"托盘：迷你任务栏已经收起，不再弹 %ls 的菜单", app->name.c_str());
-            return 0;
-        }
 
         case WM_APP_APPS:
             if (s_open && !s_filter.empty()) ApplyFilter(true);  // 应用列表刚读完：把匹配的应用补上
@@ -6278,11 +6818,16 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_LBUTTONDOWN: {
-            int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam), control = ControlAt(x, y);
+            s_ignoreEditMouseUp = false;
+            int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
             if (s_editing) {  // 编辑模式里只能拖边、拖模块、挪面板
-                EditMouseDown(x, y);
+                if (s_anim == Anim::None && BeginEditAction()) {
+                    EditMouseDown(x, y);
+                    if (!EditDragging()) EndEditAction(true);  // 双击恢复或点到了空处
+                }
                 return 0;
             }
+            int control = ControlAt(x, y);
             if ((control == kVolumeTrack || control == kBrightTrack) && SliderEnabled(SliderOf(control))) {
                 s_drag = control;
                 SetCapture(hwnd);
@@ -6292,19 +6837,25 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_LBUTTONUP: {
-            if (s_resize || s_editing) {
-                EndResize();
-                EndModuleDrag(true);
-                EndPanelMove(true);
-                EndScaleDrag();
-                EndGapDrag();
-                if (s_editing) {
-                    int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
-                    s_editHover = EditPartAt(x, y);
-                    s_hoverModule = EditModuleAt(x, y, s_editHover);
-                    s_hoverGap = GapAt(x, y);
-                    Redraw();
+            if (std::exchange(s_ignoreEditMouseUp, false)) return 0;
+            if (s_editing) {
+                DWORD pos = GetMessagePos();
+                POINT screen = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
+                bool keep = true;
+                if (s_resize) EndResize();
+                else if (s_movePanel) EndPanelMove();
+                else if (s_scaleModule >= 0) EndScaleDrag();
+                else if (s_gapDrag >= 0) EndGapDrag();
+                else if (s_moveModule != kPartNone) {
+                    if (s_moveCur.x != screen.x || s_moveCur.y != screen.y) DragModule(screen);
+                    keep = EndModuleDrag();
                 }
+                EndEditAction(keep);
+                ScreenToClient(hwnd, &screen);
+                s_editHover = EditPartAt(screen.x, screen.y);
+                s_hoverModule = EditModuleAt(screen.x, screen.y, s_editHover);
+                s_hoverGap = GapAt(screen.x, screen.y);
+                Redraw();
                 return 0;
             }
             if (s_drag != kNone) {
@@ -6330,24 +6881,22 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             int hit = HitTest(x, y);
-            if (hit >= 0) ActivateIndex(hit, (wParam & MK_SHIFT) != 0);
+            if (hit >= 0) ActivateIndex(hit, (wParam & MK_SHIFT) != 0, true);
             else ActivateTray(TrayAt(x, y), false);
             return 0;
         }
 
         case WM_CAPTURECHANGED:
-            if (reinterpret_cast<HWND>(lParam) != hwnd) {
-                EndResize();
-                EndModuleDrag(false);
-                EndPanelMove(false);
-                EndScaleDrag();
-                EndGapDrag();
-            }
+            if (EditDragging() && reinterpret_cast<HWND>(lParam) != hwnd) CancelEditDrag();
             if (s_drag != kNone && reinterpret_cast<HWND>(lParam) != hwnd) {
                 s_drag = kNone;
                 Redraw();
             }
             return 0;
+
+        case WM_CANCELMODE:
+            if (EditDragging()) CancelEditDrag();
+            break;
 
         case WM_MBUTTONUP:
             if (s_editing) return 0;
@@ -6385,20 +6934,23 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_MOUSEWHEEL: {
             POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // 滚轮消息给的是屏幕坐标
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            if (s_editing) {
+                EditWheel(pt, delta, (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0);
+                return 0;
+            }
+            // 关闭 Windows 的非活动窗口滚动时，缩略图上的滚轮消息也会发到有焦点的面板。
+            if (Thumb_ContainsPoint(hwnd, pt)) {
+                Thumb_Scroll(hwnd, delta);
+                return 0;
+            }
             ScreenToClient(hwnd, &pt);
-            int control = s_editing ? kNone : ControlAt(pt.x, pt.y);
-            s_wheelRest += GET_WHEEL_DELTA_WPARAM(wParam);
+            if (s_thumbIdx > 0 && HitTest(pt.x, pt.y) == s_thumbIdx && Thumb_Scroll(hwnd, delta)) return 0;
+            int control = ControlAt(pt.x, pt.y);
+            s_wheelRest += delta;
             int up = s_wheelRest / WHEEL_DELTA;
             s_wheelRest -= up * WHEEL_DELTA;
             if (up == 0) return 0;
-            if (s_editing) {  // 编辑模式里滚轮在模块上：改它的大小（往上滚变大）；在格子之间的缝上改间距
-                int part = EditDragging() ? kPartNone : EditPartAt(pt.x, pt.y);
-                int module = part == kPartNone ? -1 : EditModuleAt(pt.x, pt.y, part);
-                if (part == kPartGap) WheelGap(up);
-                else if (module >= 0) WheelScale(module, up);
-                else if (part == kPartPanel) WheelPanel(up);
-                return 0;
-            }
             if (control != kNone) {
                 NudgeSlider(SliderOf(control), up);
             } else if (OverTray(pt.x, pt.y) && TrayScrolls()) {
@@ -6421,13 +6973,21 @@ LRESULT PanelProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             // 短按 Win 弹出、开始菜单还没出来：回车、空格是要给开始菜单的（在 WM_CHAR 里记下），别打开或最小化选中的窗口
             if (s_compact && !s_startSeen && (s_startPending || s_startMode) && (wParam == VK_RETURN || wParam == VK_SPACE))
                 return 0;
-            // F2：进出编辑模式（拖边改大小和长度）。编辑模式里回车、Esc 退出，别的键不管用
+            // 忽略长按的重复消息，避免 Esc 取消拖动后又取消会话。
+            if ((lParam & (1L << 30)) && (wParam == VK_F2 || wParam == VK_RETURN || wParam == VK_ESCAPE)) return 0;
             if (wParam == VK_F2) {
-                SetEditing(!s_editing);
+                if (s_editing) FinishEditing(true);
+                else StartEditing();
                 return 0;
             }
             if (s_editing) {
-                if (wParam == VK_RETURN || wParam == VK_ESCAPE) SetEditing(false);
+                if (wParam == VK_RETURN) FinishEditing(true);
+                else if (wParam == VK_ESCAPE) {
+                    if (s_editSession->beforeAction) CancelEditDrag();
+                    else FinishEditing(false);
+                } else if (wParam == 'Z' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                    UndoEdit();
+                }
                 return 0;
             }
             switch (wParam) {
@@ -6513,48 +7073,66 @@ bool s_forwarding = false;
 LRESULT CALLBACK PopupProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     LRESULT result;
     {
-        InPanel in(PanelOf(hwnd));
+        int panel = PanelOf(hwnd);
+        InPanel in(panel >= 0 ? panel : s_cur);
         result = PanelProc(hwnd, msg, wParam, lParam);
     }
     bool broadcast = msg == WM_APP_APPS || msg == WM_APP_MEDIA || msg == WM_APP_RADIOS || msg == WM_APP_BRIGHTNESS;
-    if (broadcast && !s_forwarding) {
-        int panel = PanelOf(hwnd);
-        HWND other = s_panelHwnd[1 - panel];
-        if (other && other != hwnd && (hwnd == s_panelHwnd[0] || hwnd == s_panelHwnd[1])) {
-            s_forwarding = true;
-            SendMessageW(other, msg, msg == WM_APP_RADIOS ? 0 : wParam, lParam);
-            s_forwarding = false;
-        }
+    if (broadcast && !s_forwarding && PanelOf(hwnd) >= 0) {
+        s_forwarding = true;
+        for (HWND other : s_panelHwnd)
+            if (other && other != hwnd) SendMessageW(other, msg, msg == WM_APP_RADIOS ? 0 : wParam, lParam);
+        s_forwarding = false;
     }
     return result;
 }
 
-// 固定的应用按任务栏顺序排在前面（已打开的换成它的各个窗口），其余窗口跟在后面
-std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows) {
+std::wstring WindowAppKey(const WindowEntry& window, const PinnedApp* pin) {
+    if (!window.aumid.empty()) return L"id:" + window.aumid;
+    if (pin && !pin->aumid.empty()) return L"id:" + pin->aumid;
+    // ApplicationFrameHost 是多个应用共用的宿主。取不到应用 ID 时，各窗口单独显示。
+    if (window.exePath.empty() || NormalizeExeName(window.exePath) == L"applicationframehost.exe") return {};
+    return L"exe:" + window.exePath;
+}
+
+// 固定应用打开后，窗口和其他打开的窗口一起按原先的窗口顺序排。
+std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows, const std::vector<PinnedApp>& pins) {
     std::vector<Tile> tiles;
-    std::vector<bool> used(windows.size(), false);
-    if (g_settings.showPinnedApps) {
-        for (const PinnedApp& pin : LoadPinnedApps(IconPx())) {
-            bool running = false;
-            for (size_t i = 0; i < windows.size(); ++i) {
-                if (used[i] || !PinMatchesWindow(pin, windows[i])) continue;
-                used[i] = running = true;
-                const WindowEntry& w = windows[i];
-                tiles.push_back({w.title, w.icon ? w.icon : pin.icon, w.hwnd, w.active, pin.launch, pin.name, pin.icon});
-            }
-            if (!running) tiles.push_back({pin.name, pin.icon, nullptr, false, pin.launch, pin.name, pin.icon});
+    tiles.reserve(pins.size() + windows.size());
+    std::vector<int> pinForWindow(windows.size(), -1);
+    for (size_t p = 0; p < pins.size(); ++p) {
+        const PinnedApp& pin = pins[p];
+        int order = static_cast<int>(p);
+        bool running = false;
+        for (size_t i = 0; i < windows.size(); ++i) {
+            if (pinForWindow[i] >= 0 || !PinMatchesWindow(pin, windows[i])) continue;
+            pinForWindow[i] = order;
+            running = true;
+        }
+        if (!running) {
+            tiles.push_back({pin.name, pin.icon, nullptr, false, pin.launch, pin.name, pin.icon, {}, order});
+            Tile& tile = tiles.back();
+            tile.search = TileSearch(tile, NormalizeExeName(pin.launch));
         }
     }
     for (size_t i = 0; i < windows.size(); ++i) {
-        if (used[i]) continue;
         const WindowEntry& w = windows[i];
-        tiles.push_back({w.title, w.icon, w.hwnd, w.active, L"", L"", nullptr});
-    }
-    for (Tile& t : tiles) {
-        std::wstring exe = t.hwnd ? WindowExeName(t.hwnd) : NormalizeExeName(t.launch);
-        t.search = ToLower(t.title + L"\n" + t.pinName + L"\n" + exe);
+        int order = pinForWindow[i];
+        if (order < 0) {
+            tiles.push_back({w.title, w.icon, w.hwnd, w.active, {}, {}, nullptr});
+        } else {
+            const PinnedApp& pin = pins[order];
+            tiles.push_back({w.title, w.icon ? w.icon : pin.icon, w.hwnd, w.active, pin.launch, pin.name, pin.icon, {}, order});
+        }
+        Tile& tile = tiles.back();
+        tile.appKey = WindowAppKey(w, order < 0 ? nullptr : &pins[order]);
+        tile.search = TileSearch(tile, NormalizeExeName(w.exePath));
     }
     return tiles;
+}
+
+std::vector<Tile> BuildTiles(const std::vector<WindowEntry>& windows) {
+    return BuildTiles(windows, g_settings.showPinnedApps ? LoadPinnedApps(IconPx()) : std::vector<PinnedApp>{});
 }
 
 }  // namespace
@@ -6566,8 +7144,8 @@ void Popup_Init() {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
-    InitAway();
-    for (int panel : {1, 0}) {  // 两条各一个窗口，最后停在主的那条上
+    InitPanelStates();
+    for (int panel = kPopupPanelCount - 1; panel >= 0; --panel) {  // 最后停在主的那条上
         Use(panel);
         s_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kClassName, L"TaskbarPopup", WS_POPUP,
                                  0, 0, 0, 0, nullptr, nullptr, g_instance, nullptr);
@@ -6602,9 +7180,12 @@ void Popup_Init() {
 }
 
 void Popup_Destroy() {
-    for (int panel : {1, 0}) {
+    s_editSession.reset();
+    for (int panel = kPopupPanelCount - 1; panel >= 0; --panel) {
         Use(panel);
-        if (s_hwnd) StopLive();  // 后台截图线程收完再关窗口
+        s_editing = false;
+        if (s_hwnd) StopLive();
+        s_liveCapture = GlassCapture{};
         s_media = MediaInfo();  // 封面是 GDI+ 位图，要在 GDI+ 关掉之前放掉
         s_coverFrom.reset();
         s_coverScaled.reset();
@@ -6636,7 +7217,7 @@ HMONITOR MonitorForPopup(HWND fg, bool preview, bool startMenu = false) {
         if (cls != L"Progman" && cls != L"WorkerW" && cls != L"Shell_TrayWnd" && cls != L"Shell_SecondaryTrayWnd")
             return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
     }
-    POINT pt;
+    POINT pt{};
     GetCursorPos(&pt);
     return MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
 }
@@ -6700,32 +7281,42 @@ void LoadModules(bool preview) {
 }
 
 // companion：跟着另一条一起弹出的（底部和侧边一起），不抢前台，点了它才拿前台
-void Open(bool preview, bool startMenu = false, bool hover = false, bool companion = false) {
+void Open(bool preview, bool startMenu, bool hover, bool companion, HMONITOR openedStartOn, int placementOverride) {
     if (!s_hwnd) return;
+    if (!preview) FinishEditing(false);
     s_preview = preview;
     EndHoverOpen();
     HWND fg = GetForegroundWindow();
-    HMONITOR mon = MonitorForPopup(fg, preview, startMenu || hover);
+    HMONITOR mon = openedStartOn ? openedStartOn : MonitorForPopup(fg, preview, startMenu || hover);
     PopupPlaceFor(mon, s_edge, s_align, s_offset);
     if (preview) {
         s_edge = s_previewEdge;
         s_align = s_previewAlign;
     }
-    // 两条一起时主的在底部、另一条在侧边；另一条（也包括只设了一条边时快捷键呼出的另一条边）用自己的位置
-    s_dual = DualEdge(s_edge) && !startMenu;
-    int placed = s_edge;
-    s_edge = PanelEdge(placed, s_cur);
-    if (s_cur == 1) {
-        s_align = g_settings.secondAlign;
-        s_offset = g_settings.secondOffset;
-    }
+    s_placed = placementOverride >= 0 ? placementOverride : s_edge;
+    s_multiBar = PopupBarCount(s_placed) > 1 && !startMenu;
+    s_edge = PopupPanelEdge(s_placed, s_cur);
     s_look = preview ? s_previewLook : LookFromSettings();
+    if (preview) {
+        if (Vertical()) {
+            const SideBarPlacement& bar = s_look.sideBar[s_edge - kEdgeLeft];
+            s_align = bar.align;
+            s_offset = bar.offset;
+        }
+    } else {
+        LoadPanelAlignment(mon);
+    }
     // 开始菜单靠左时会盖住贴在左边的那一列：这时从底边弹
     if (startMenu && s_edge == kEdgeLeft && !SystemTaskbarCentered()) s_edge = kEdgeBottom;
     KillTimer(s_hwnd, kTimerPreview);
     EndStartMode();
     s_compact = startMenu;
-    s_startPending = startMenu;
+    s_startPending = startMenu && !openedStartOn;
+    if (openedStartOn) {
+        s_startMode = s_startSeen = true;
+        s_startAt = GetTickCount();
+        SetTimer(s_hwnd, kTimerStart, kStartWatchMs, nullptr);
+    }
     if (s_keepPrevForeground) s_prevForeground = s_keepPrevForeground;
     else if (fg != s_hwnd) s_prevForeground = fg;
     s_keepPrevForeground = nullptr;
@@ -6735,18 +7326,31 @@ void Open(bool preview, bool startMenu = false, bool hover = false, bool compani
     GetMonitorInfoW(mon, &mi);
     s_bounds = Taskbar_IsShownOn(mon) ? mi.rcWork : mi.rcMonitor;
     s_scale = PopupScale(mon);
-    // 另一条已经弹在这块屏幕的底边：侧边这条在它上面那段里上下居中，不和它叠在一起
-    if (Vertical() && s_away.v_s_open && s_away.v_s_monitor == mon && s_away.v_s_edge == kEdgeBottom) {
-        RECT other = OtherPanelRect();
-        LONG top = other.top - static_cast<LONG>(Px(8)) + static_cast<LONG>(s_away.v_s_L.margin);
-        if (top > s_bounds.top + (s_bounds.bottom - s_bounds.top) / 3) s_bounds.bottom = std::min(s_bounds.bottom, top);
+    if (s_placed == kEdgeAll && Vertical()) {
+        LONG middle = s_bounds.left + (s_bounds.right - s_bounds.left) / 2;
+        if (s_edge == kEdgeLeft) s_bounds.right = middle;
+        else s_bounds.left = middle;
+    }
+    // 底栏开着时，两个侧栏都放在底栏上方。
+    if (Vertical()) {
+        for (int panel : kPanelSlots) {
+            if (panel == s_cur) continue;
+            const PanelVars& peer = s_panels[panel];
+            if (!peer.v_s_open || peer.v_s_preview != preview || peer.v_s_monitor != mon ||
+                peer.v_s_edge != kEdgeBottom)
+                continue;
+            LONG top = PeerRect(panel).top - static_cast<LONG>(Px(8)) + static_cast<LONG>(peer.v_s_L.margin);
+            if (top > s_bounds.top + (s_bounds.bottom - s_bounds.top) / 3)
+                s_bounds.bottom = std::min(s_bounds.bottom, top);
+            break;
+        }
     }
 
     s_monitor = mon;
     LoadModules(preview);
 
     s_allItems = WindowsShown() ? BuildTiles(EnumerateWindows(s_prevForeground, IconPx(), s_monitor)) : std::vector<Tile>();
-    s_items = s_allItems;
+    s_items = GroupTiles(s_allItems);
     s_filter.clear();
     s_lockedItemsW = 0;
     s_scaleStart = s_gapStart = -1e9;  // 上次没放完的模块变大小、间距变的动画不要了
@@ -6802,7 +7406,7 @@ void Open(bool preview, bool startMenu = false, bool hover = false, bool compani
             panel.top, panel.right, panel.bottom, s_bounds.left, s_bounds.top, s_bounds.right, s_bounds.bottom,
             s_items.size(), s_tray.size());
     }
-    if (preview || hover || companion) {
+    if (preview || hover || companion || openedStartOn) {
         ShowWindow(s_hwnd, SW_SHOWNOACTIVATE);
         if (hover) {
             s_hoverOpen = true;
@@ -6828,8 +7432,8 @@ bool AtPopupEdge(POINT pt, HMONITOR mon) {
     if (!GetMonitorInfoW(mon, &mi)) return false;
     int placed = kEdgeBottom, align = kAlignSystem, offset = 500;
     PopupPlaceFor(mon, placed, align, offset);
-    if (s_cur == 1 && !DualEdge(placed)) return false;
-    int edge = PanelEdge(placed, s_cur);
+    if (s_cur >= PopupBarCount(placed)) return false;
+    int edge = PopupPanelEdge(placed, s_cur);
     const RECT& m = mi.rcMonitor;
     if (edge == kEdgeLeft) return pt.x <= m.left;
     if (edge == kEdgeRight) return pt.x >= m.right - 1;
@@ -6884,10 +7488,10 @@ void WatchHoverLeave() {
         EndHoverOpen();
         return;
     }
-    POINT pt;
-    GetCursorPos(&pt);
+    POINT pt{};
+    if (!GetCursorPos(&pt)) return;
     RECT r = {s_pos.x, s_pos.y, s_pos.x + s_width, s_pos.y + s_height};
-    if (PtInRect(&r, pt) || s_menuOpen || s_drag != kNone || s_trayMode) {
+    if (PtInRect(&r, pt) || Thumb_ContainsPoint(s_hwnd, pt) || s_menuOpen || s_drag != kNone || s_trayMode) {
         s_hoverAwayAt = 0;
         return;
     }
@@ -6904,35 +7508,41 @@ void WatchHoverLeave() {
 // 主的那条刚弹出来：设的是底部和侧边一起的话，另一条在同一块屏幕上跟着弹出（不抢前台）
 // 侧边那条先弹出来、叠在了刚弹出的底部这条上：让它重新弹在底部这条上面
 void MakeRoomForBottom() {
-    RECT mine = PanelRectAt(s_L, s_pos), theirs = OtherPanelRect(), both;
-    if (!s_open || s_preview || Vertical() || !OtherOpen() || s_away.v_s_monitor != s_monitor ||
-        !IntersectRect(&both, &mine, &theirs))
-        return;
-    HWND prev = s_prevForeground;
+    if (!s_open || s_preview || Vertical()) return;
+    RECT mine = PanelRectAt(s_L, s_pos);
     HMONITOR mon = s_monitor;
-    InPanel other(Other());
-    s_keepPrevForeground = prev;
-    s_forceMonitor = mon;
-    Open(false, false, false, true);
-    s_forceMonitor = nullptr;
+    for (int panel : kPanelSlots) {
+        if (!PeerOpen(panel) || s_panels[panel].v_s_monitor != mon || s_panels[panel].v_s_edge == kEdgeBottom)
+            continue;
+        RECT theirs = PeerRect(panel), both;
+        if (!IntersectRect(&both, &mine, &theirs)) continue;
+        InPanel other(panel);
+        s_keepPrevForeground = s_prevForeground;
+        s_forceMonitor = mon;
+        Open(false, false, false, true, nullptr, s_placed);
+        s_forceMonitor = nullptr;
+    }
 }
 
-void ShowCompanion() {
-    if (s_cur != 0 || !s_open || s_preview || !s_dual) return;
+void ShowCompanions() {
+    if (s_cur != 0 || !s_open || s_preview || !s_multiBar) return;
     HWND prev = s_prevForeground;
     HMONITOR mon = s_monitor;
-    InPanel other(1);
-    s_keepPrevForeground = prev;
-    s_forceMonitor = mon;
-    Open(false, false, false, true);
-    s_forceMonitor = nullptr;
+    int placed = s_placed;
+    for (int panel = 1; panel < PopupBarCount(placed); ++panel) {
+        InPanel other(panel);
+        s_keepPrevForeground = prev;
+        s_forceMonitor = mon;
+        Open(false, false, false, true, nullptr, placed);
+        s_forceMonitor = nullptr;
+    }
 }
 
 // 主的那条（两条一起时连另一条）弹出来
 void ShowMain() {
     InPanel main(0);
     Open(false);
-    if (s_dual) ShowCompanion();
+    if (s_multiBar) ShowCompanions();
     else MakeRoomForBottom();
 }
 
@@ -6941,7 +7551,8 @@ void ShowMain() {
 void Popup_Show() { ShowMain(); }
 
 void Popup_Configure() {
-    for (int panel : {0, 1}) {
+    FinishEditing(false);
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         if (!s_hwnd) continue;
         if (g_settings.edgePopup) {
@@ -6955,14 +7566,14 @@ void Popup_Configure() {
 }
 
 void Popup_Refresh() {
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         Redraw();
     }
 }
 
 HMONITOR Popup_Monitor() {
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         if (s_open && !s_preview) return s_monitor;
     }
@@ -6978,7 +7589,7 @@ void Popup_NextScreen() {
     }
     HMONITOR from = nullptr;
     HWND prev = nullptr;
-    for (int panel : {0, 1}) {  // 开着的那条（两条都开着时是主的）在哪块屏幕上
+    for (int panel : kPanelSlots) {  // 开着的那条（两条都开着时是主的）在哪块屏幕上
         InPanel in(panel);
         if (s_open && !s_preview && !from) {
             from = s_monitor;
@@ -6990,10 +7601,11 @@ void Popup_NextScreen() {
     if (!to) return;
     Log(L"按了在下一块屏幕弹出的快捷键：弹在%ls", MonitorLabel(to).c_str());
     bool wasOpen = false;
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
-        if (!s_open) continue;
+        if (!s_hwnd || !IsWindowVisible(s_hwnd)) continue;
         wasOpen = true;
+        s_hideAlone = true;
         HideNow();
     }
     if (wasOpen) {
@@ -7003,15 +7615,17 @@ void Popup_NextScreen() {
     s_forceMonitor = to;
     Open(false);
     s_forceMonitor = nullptr;
-    ShowCompanion();
+    ShowCompanions();
 }
 
-void Popup_FitTrayBoxes(ModuleSet sets[2], int style) {
-    int cells = static_cast<int>(std::max(s_tray.size(), s_away.v_s_tray.size()));
-    for (int side = 0; side < 2; ++side) {
+void Popup_FitTrayBoxes(ModuleSet (&sets)[kSideCount], int style) {
+    int cells = static_cast<int>(s_tray.size());
+    for (int panel : kPanelSlots)
+        if (panel != s_cur) cells = std::max(cells, static_cast<int>(s_panels[panel].v_s_tray.size()));
+    for (int side = 0; side < kSideCount; ++side) {
         ModuleSet& mods = sets[side];
         FreeBox& b = mods.box[kModTray];
-        bool vertical = side == kSideEdge;  // 侧边那份是竖着排的
+        bool vertical = side != kSideBottom;
         if (!mods.free || b.w <= 0 || b.h <= 0 || TrayBoxLong(b, vertical) == (style == kTrayRow)) continue;
         float thick = vertical ? b.w : b.h, &len = vertical ? b.h : b.w, &at = vertical ? b.y : b.x;
         float& area = vertical ? mods.freeH : mods.freeW;
@@ -7059,7 +7673,7 @@ void Popup_FitTrayBoxes(ModuleSet sets[2], int style) {
 
 void Popup_DisplayChanged() {
     s_knownBrightness.clear();  // 屏幕的句柄可能换了，记着的亮度对不上
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         if (s_hwnd && s_open) HideNow();  // 位置、大小都是按原来的屏幕算的
     }
@@ -7072,7 +7686,7 @@ PopupLook LookFromSettings() {
     look.light = st.customTint ? ColorLuma(st.tintColor) > 150 : ThemeIsLight(st.theme, true);
     look.transparency = st.glassTransparency;
     look.radius = st.popupRadius;
-    look.radius2 = st.secondRadius;
+    std::copy_n(st.sideBar, kSideCount - 1, look.sideBar);
     look.iconSize = st.iconSize;
     look.iconGap = st.iconGap;
     look.showTitle = st.showTitle;
@@ -7080,8 +7694,7 @@ PopupLook LookFromSettings() {
     look.tint = st.tintColor;
     look.customAccent = st.customAccent;
     look.accent = st.accentColor;
-    look.modules[kSideBottom] = st.modules[kSideBottom];
-    look.modules[kSideEdge] = st.modules[kSideEdge];
+    std::copy_n(st.modules, kSideCount, look.modules);
     look.clockSeconds = st.clockSeconds;
     look.clockWeekday = st.clockWeekday;
     look.clockDate = st.clockDate;
@@ -7109,12 +7722,19 @@ void PreviewLookOne(const PopupLook& look) {
         return;
     }
     int side = ModuleSideOf(s_edge);
+    bool windowsWereShown = WindowsShown();
     bool reload = !SameModules(look.modules[side], s_look.modules[side]) || look.trayStyle != s_look.trayStyle;
     s_look = look;
     s_glass.SetLight(look.light);
     s_glass.SetTransparency(look.transparency);
     s_glass.SetTint(look.customTint, look.tint);
     if (reload) LoadModules(true);  // 改了显示哪些：重新定下这次显示的模块
+    if (WindowsShown() != windowsWereShown) {
+        s_allItems = WindowsShown() ? BuildTiles(EnumerateWindows(s_prevForeground, IconPx(), s_monitor))
+                                    : std::vector<Tile>();
+        s_items = GroupTiles(s_allItems);
+        s_sel = DefaultSelection();
+    }
     s_scale = PopupScale(s_monitor);  // 之前放不下屏幕缩小过的话，换了样子重新算
     FitTiles();
     FitScreen();
@@ -7138,17 +7758,24 @@ void PreviewOne(int percent, int edge, int align, bool hold) {
         s_previewEdge = edge;
         s_previewAlign = align;
         Open(true);
-    } else if (percent != s_previewPercent || align != s_previewAlign) {
+    } else {
+        const SideBarPlacement* bar = Vertical() ? &s_previewLook.sideBar[s_edge - kEdgeLeft] : nullptr;
+        int actualAlign = bar ? bar->align : align;
+        int actualOffset = bar ? bar->offset : s_offset;
+        bool changed = percent != s_previewPercent || actualAlign != s_align || actualOffset != s_offset;
         s_previewPercent = percent;
         s_previewAlign = align;
-        if (s_cur == 0) s_align = align;  // 另一条的对齐不在设置窗口里改
-        s_scale = PopupScale(s_monitor);
-        FitTiles();
-        FitScreen();
-        s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
-        UpdatePlacement();
-        s_glass.SetScale(s_scale);
-        Redraw();
+        if (changed) {
+            s_align = actualAlign;
+            s_offset = actualOffset;
+            s_scale = PopupScale(s_monitor);
+            FitTiles();
+            FitScreen();
+            s_first = std::clamp(s_first, 0, std::max(0, ItemCount() - s_visible));
+            UpdatePlacement();
+            s_glass.SetScale(s_scale);
+            Redraw();
+        }
     }
     KillTimer(s_hwnd, kTimerPreview);
     if (!hold) SetTimer(s_hwnd, kTimerPreview, kPreviewHideMs, nullptr);
@@ -7157,11 +7784,7 @@ void PreviewOne(int percent, int edge, int align, bool hold) {
 // 收起这一条（有收起动画）
 void HideOne() {
     if (!s_open) return;
-    // 编辑模式、拖着的都现在就结束：收起动画没播完又弹出时不能还在编辑
-    EndResize();
-    EndModuleDrag(false);
-    EndPanelMove(false);
-    s_editing = false;
+    if (s_editing) FinishEditing(false);
     s_editHover = kPartNone;
     s_drag = kNone;
     if (GetCapture() == s_hwnd) ReleaseCapture();
@@ -7180,17 +7803,19 @@ void HideOne() {
     if (!s_preview) Attention_Update();
 }
 
-// 另一条开着（不算预览）就把它也收起来
-void HideOther() {
-    if (!OtherOpen()) return;
-    InPanel other(Other());
-    HideOne();
+void HidePeers() {
+    for (int panel : kPanelSlots) {
+        if (!PeerOpen(panel)) continue;
+        InPanel other(panel);
+        s_hideAlone = true;
+        HideOne();
+    }
 }
 
 }  // namespace
 
 void Popup_PreviewLook(const PopupLook& look) {
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         PreviewLookOne(look);
     }
@@ -7198,26 +7823,24 @@ void Popup_PreviewLook(const PopupLook& look) {
 
 void Popup_Preview(int percent, int edge, int align, bool hold) {
     percent = std::clamp(percent, kMinPopupScale, kMaxPopupScale);
-    {
-        InPanel main(0);
-        PreviewOne(percent, edge, align, hold);
+    for (int panel : kPanelSlots) {
+        InPanel in(panel);
+        if (panel < PopupBarCount(edge)) PreviewOne(percent, edge, align, hold);
+        else if (s_open && s_preview) HideOne();
     }
-    // 设的是底部和侧边一起：侧边那条也预览；不是的话之前预览着的侧边那条收起
-    InPanel other(1);
-    if (DualEdge(edge)) PreviewOne(percent, edge, align, hold);
-    else if (s_open && s_preview) HideOne();
 }
 
 void Popup_EndPreview() {
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         if (s_preview && s_open) HideOne();
     }
 }
 
 void Popup_Hide() {
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
+        s_hideAlone = true;  // 已明确收起这一组，动画结束时不再收后来打开的面板
         HideOne();
     }
 }
@@ -7225,20 +7848,28 @@ void Popup_Hide() {
 void Popup_Edit() {
     InPanel main(0);
     if (!s_hwnd) return;
-    for (int panel : {0, 1}) {  // 设置里的预览还开着：收起来再真的弹出
+    for (int panel : kPanelSlots) {  // 设置里的预览还开着：收起来再真的弹出
         InPanel in(panel);
         if (s_preview && s_open) {
             HideNow();
             WaitForVBlank();
         }
     }
-    if (!s_open) ShowMain();
-    SetEditing(true);  // 两条都开着的话两条一起进编辑模式
+    int panel = s_open ? 0 : OpenPeer();
+    if (panel < 0) {
+        ShowMain();
+        StartEditing();
+    } else {
+        InPanel open(panel);
+        ForceForeground(s_hwnd);
+        SetFocus(s_hwnd);
+        StartEditing();
+    }
 }
 
 void Popup_Toggle() {
     bool open = false;
-    for (int panel : {0, 1}) {
+    for (int panel : kPanelSlots) {
         InPanel in(panel);
         if (s_open && !s_preview) open = true;  // 设置里的预览不算弹出着
     }
@@ -7246,48 +7877,79 @@ void Popup_Toggle() {
     else Popup_Show();
 }
 
-void Popup_ToggleEdge(bool side) {
-    // 这块屏幕上哪一条在侧边：主的那条在侧边（只设了左边或右边）时就是它，不然是另一条
+namespace {
+
+void ToggleOneEdge(int edge) {
+    InPanel main(0);
     int placed = kEdgeBottom, align = kAlignSystem, offset = 500;
-    HMONITOR mon;
-    {
-        InPanel main(0);
-        mon = MonitorForPopup(GetForegroundWindow(), false);
-    }
+    HMONITOR mon = MonitorForPopup(GetForegroundWindow(), false);
+    HWND previous = nullptr;
     PopupPlaceFor(mon, placed, align, offset);
-    bool mainSide = PanelEdge(placed, 0) != kEdgeBottom;
-    InPanel in(mainSide == side ? 0 : 1);
+    // 已有面板时沿用同一块屏幕和排列，避免鼠标跨屏后呼出同组的另一条却跑到别处。
+    int active = s_open && !s_preview ? 0 : OpenPeer();
+    if (active >= 0) {
+        InPanel open(active);
+        mon = s_monitor;
+        placed = s_placed;
+        previous = s_prevForeground;
+    }
+    if (edge < 0) {
+        edge = PopupPanelEdge(placed, 0);
+        if (edge == kEdgeBottom) edge = PopupPanelEdge(placed, 1);
+    }
+    int slot = PopupPanelForEdge(placed, edge);
+    if (slot < 0) return;
+    InPanel in(slot);
     if (!s_hwnd) return;
-    if (s_open && !s_preview) {
-        // 只收起这一条；它在前台的话把前台交给另一条，免得另一条以为点到了别处也收起
-        if (OtherOpen()) {
-            s_hideAlone = true;
-            if (GetForegroundWindow() == s_hwnd) ForceForeground(s_panelHwnd[Other()]);
-        }
+    if (s_open && !s_preview && s_edge == edge) {
+        s_hideAlone = true;
+        int peer = OpenPeer();
+        if (peer >= 0 && GetForegroundWindow() == s_hwnd) ForceForeground(s_panelHwnd[peer]);
         HideOne();
         return;
     }
-    // 另一条开着的话这一条弹在同一块屏幕上
-    if (OtherOpen()) {
-        s_forceMonitor = s_away.v_s_monitor;
-        s_keepPrevForeground = s_away.v_s_prevForeground;
-    }
-    Open(false);
+    s_forceMonitor = mon;
+    s_keepPrevForeground = previous;
+    Open(false, false, false, false, nullptr, placed);
     s_forceMonitor = nullptr;
     MakeRoomForBottom();
 }
 
+}  // namespace
+
+void Popup_ToggleEdge(PopupEdge edge) { ToggleOneEdge(edge); }
+void Popup_ToggleSide() { ToggleOneEdge(-1); }
+
 void Popup_StartMenu(DWORD vk) {
     InPanel main(0);
-    HMONITOR mon = MonitorForPopup(GetForegroundWindow(), false, true);
-    // 任务栏已经放出来了、这块屏的任务栏露着，或者开始菜单已经开着（这一下是关掉它）：照常交给系统
-    if (!s_hwnd || !Fullscreen_TaskbarHidden() || Taskbar_IsShownOn(mon) || IsStartUi(GetForegroundWindow()) ||
-        s_startMode) {
+    HWND fg = GetForegroundWindow();
+    if (s_followStart) {
+        EndStartMode();
         SendWinTap(vk);
         return;
     }
+    if (!s_hwnd || !Fullscreen_TaskbarHidden() || IsStartUi(fg) || s_startMode) {
+        SendWinTap(vk);
+        return;
+    }
+    bool multiScreen = GetSystemMetrics(SM_CMONITORS) > 1;
+    if (!multiScreen) {
+        HMONITOR mon = MonitorForPopup(fg, false, true);
+        if (!Fullscreen_TaskbarHiddenOn(mon) || Taskbar_IsShownOn(mon)) {
+            SendWinTap(vk);
+            return;
+        }
+    }
     if (s_open && !s_preview) {
         ActivateIndex(0);  // 迷你任务栏已经开着：和点它上面的开始按钮一样
+        return;
+    }
+    if (multiScreen) {
+        s_prevForeground = fg;
+        s_startAt = GetTickCount();
+        s_followStart = SetTimer(s_hwnd, kTimerStart, kStartWatchMs, nullptr) != 0;
+        if (s_followStart) Fullscreen_QuietStartMenu();
+        SendWinTap(vk);
         return;
     }
     Log(L"任务栏藏着时短按 Win：先弹出迷你任务栏，再打开开始菜单");

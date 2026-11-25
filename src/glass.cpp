@@ -10,6 +10,8 @@
 // 一点点颗粒，一圈 1 像素的细边框。
 #include "common.h"
 
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <thread>
@@ -198,7 +200,7 @@ void Process(GlassShot& out, float scale, int style) {
 
 }  // namespace
 
-bool Glass::Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassShot* same) {
+bool Glass::Shoot(const RECT& window, float scale, int style, GlassShot& out, const GlassSnapshot* same) {
     RECT area = ShotArea(window, scale);
     out.area = area;
     out.w = std::max(0L, area.right - area.left);
@@ -207,14 +209,14 @@ bool Glass::Shoot(const RECT& window, float scale, int style, GlassShot& out, co
     out.blur.clear();
     if (out.w <= 0 || out.h <= 0) {
         out.w = out.h = 0;
-        return true;
+        return same == nullptr;
     }
     if (!CaptureScreen(area, out.raw)) {
         if (same) return false;
         out.raw.assign(static_cast<size_t>(out.w) * out.h, 0xFF202024);
     }
-    if (same && EqualRect(&same->area, &area) && same->raw.size() == out.raw.size() &&
-        memcmp(same->raw.data(), out.raw.data(), out.raw.size() * sizeof(DWORD)) == 0)
+    if (same && same->pixels && EqualRect(&same->area, &area) && same->pixels->size() == out.raw.size() &&
+        memcmp(same->pixels->data(), out.raw.data(), out.raw.size() * sizeof(DWORD)) == 0)
         return false;
     Process(out, scale, style);
     return true;
@@ -230,16 +232,16 @@ void Glass::Extend(const RECT& window) {
     GlassShot shot;
     shot.area = ShotArea(window, m_scale);
     RECT inside;
-    if (!m_raw.empty() && IntersectRect(&inside, &shot.area, &m_area) && EqualRect(&inside, &shot.area)) return;
+    if (m_raw && IntersectRect(&inside, &shot.area, &m_area) && EqualRect(&inside, &shot.area)) return;
     shot.w = std::max(0L, shot.area.right - shot.area.left);
     shot.h = std::max(0L, shot.area.bottom - shot.area.top);
     if (shot.w <= 0 || shot.h <= 0) return;
     if (!CaptureScreen(shot.area, shot.raw)) shot.raw.assign(static_cast<size_t>(shot.w) * shot.h, 0xFF202024);
     RECT old;
-    if (!m_raw.empty() && IntersectRect(&old, &shot.area, &m_area)) {
+    if (m_raw && IntersectRect(&old, &shot.area, &m_area)) {
         for (LONG y = old.top; y < old.bottom; ++y)
             memcpy(&shot.raw[static_cast<size_t>(y - shot.area.top) * shot.w + (old.left - shot.area.left)],
-                   &m_raw[static_cast<size_t>(y - m_area.top) * m_w + (old.left - m_area.left)],
+                   m_raw->data() + static_cast<size_t>(y - m_area.top) * m_w + (old.left - m_area.left),
                    static_cast<size_t>(old.right - old.left) * sizeof(DWORD));
     }
     Process(shot, m_scale, m_style);
@@ -251,9 +253,50 @@ void Glass::Adopt(GlassShot&& shot, float scale) {
     m_area = shot.area;
     m_w = shot.w;
     m_h = shot.h;
-    m_raw.swap(shot.raw);
+    m_raw = shot.raw.empty() ? nullptr : std::make_shared<std::vector<DWORD>>(std::move(shot.raw));
     m_blur.swap(shot.blur);
     ++m_version;
+}
+
+struct GlassCapture::Job {
+    HWND window = nullptr;
+    UINT message = 0;
+    GlassSnapshot previous;
+    Result result{};
+    std::atomic<bool> ready{false};
+};
+
+void CALLBACK GlassCapture::Run(PTP_CALLBACK_INSTANCE, void* context) {
+    std::unique_ptr<std::shared_ptr<Job>> request(static_cast<std::shared_ptr<Job>*>(context));
+    Job& job = **request;
+    Result& result = job.result;
+    result.changed = Glass::Shoot(result.window, result.scale, result.style, result.shot, &job.previous);
+    job.previous = {};
+    if (!result.changed) result.shot = {};
+    job.ready.store(true, std::memory_order_release);
+    PostMessageW(job.window, job.message, 0, 0);
+}
+
+bool GlassCapture::Start(HWND window, UINT message, UINT generation, RECT area, float scale, const Glass& glass, bool compare) {
+    if (!window || m_job) return false;
+    auto job = std::make_shared<Job>();
+    job->window = window;
+    job->message = message;
+    if (compare) job->previous = glass.Snapshot();
+    job->result = {generation, area, scale, glass.Style()};
+    auto* request = new std::shared_ptr<Job>(job);
+    if (!TrySubmitThreadpoolCallback(Run, request, nullptr)) {
+        delete request;
+        return false;
+    }
+    m_job = std::move(job);
+    return true;
+}
+
+std::optional<GlassCapture::Result> GlassCapture::Take() {
+    if (!m_job || !m_job->ready.load(std::memory_order_acquire)) return std::nullopt;
+    auto job = std::move(m_job);
+    return std::move(job->result);
 }
 
 void Glass::Prepare(int width, int height, const Gdiplus::RectF& panel, float radius) {
@@ -351,15 +394,40 @@ void Glass::SampleBevel(float x, float y, const Texel& t, float rgb[3]) const {
 }
 
 void Glass::Render(DWORD* pixels, POINT origin, int slide, int slideX) const {
-    // 一行行互不相干，分几段交给几个线程一起画（拖动、动画时每帧都要画一整张）
-    const int h = m_texH;
-    int threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 4);
-    if (static_cast<long long>(m_texW) * h < 200000) threads = 1;
-    std::vector<std::thread> pool;
-    for (int i = 1; i < threads; ++i)
-        pool.emplace_back([=] { RenderRows(pixels, origin, slide, slideX, h * i / threads, h * (i + 1) / threads); });
-    RenderRows(pixels, origin, slide, slideX, 0, h / threads);
-    for (std::thread& t : pool) t.join();
+    // 大画布按行分段复用线程池。小画布直接画，避免排队比计算还慢。
+    constexpr int kMaxWorkers = 4;
+    static const int workers = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, kMaxWorkers);
+    const int height = m_texH;
+    if (workers == 1 || height < workers || static_cast<long long>(m_texW) * height < 200000) {
+        RenderRows(pixels, origin, slide, slideX, 0, height);
+        return;
+    }
+
+    struct Rows {
+        const Glass* glass;
+        DWORD* pixels;
+        POINT origin;
+        int slide, slideX, first, end;
+    };
+    std::array<Rows, kMaxWorkers - 1> rows{};
+    std::array<PTP_WORK, kMaxWorkers - 1> tasks{};
+    for (int i = 1; i < workers; ++i) {
+        auto& part = rows[i - 1];
+        part = {this, pixels, origin, slide, slideX, height * i / workers, height * (i + 1) / workers};
+        auto& task = tasks[i - 1];
+        task = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE, void* context, PTP_WORK) {
+            const auto& work = *static_cast<const Rows*>(context);
+            work.glass->RenderRows(work.pixels, work.origin, work.slide, work.slideX, work.first, work.end);
+        }, &part, nullptr);
+        if (task) SubmitThreadpoolWork(task);
+        else RenderRows(pixels, origin, slide, slideX, part.first, part.end);
+    }
+    RenderRows(pixels, origin, slide, slideX, 0, height / workers);
+    for (PTP_WORK task : tasks) {
+        if (!task) continue;
+        WaitForThreadpoolWorkCallbacks(task, FALSE);
+        CloseThreadpoolWork(task);
+    }
 }
 
 Glass::Tint Glass::TintNow() const {

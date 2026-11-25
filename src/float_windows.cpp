@@ -533,6 +533,7 @@ void FloatWindows_Configure(bool enabled, bool topmost) {
     if (enabled) {
         s_topmostSetting = topmost;
         HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!ready) return;
         s_thread = CreateThread(nullptr, 0, FloatThread, ready, 0, &s_threadId);
         if (s_thread) WaitForSingleObject(ready, INFINITE);
         CloseHandle(ready);

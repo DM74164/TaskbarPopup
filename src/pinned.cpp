@@ -3,19 +3,19 @@
 //   - 普通桌面程序：%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar 里的 .lnk
 //   - 应用商店应用：没有 .lnk，只以 AppUserModelID 的形式记录在注册表 Taskband\Favorites 里
 //
-// Favorites 是资源管理器内部的二进制格式，这里不完整解析，只在里面查找各个 .lnk 文件名和
-// AppUserModelID 字符串，按它们第一次出现的位置排序，得到和任务栏上一致的顺序。
+// Favorites 是资源管理器内部的二进制格式。只列出能在里面确认的快捷方式和应用，
+// 按它们在 Favorites 里的位置排序。
 #include "common.h"
 
 #include <commoncontrols.h>
 
-#include <cwctype>
 #include <map>
 
 namespace app {
 namespace {
 
 constexpr wchar_t kTaskbandKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Taskband";
+constexpr wchar_t kExplorerAppId[] = L"microsoft.windows.explorer";
 constexpr size_t kNotFound = static_cast<size_t>(-1);
 // IID_IImageList，MinGW 的 uuid 库里没有，自己定义
 constexpr IID kIidImageList = {0x46EB5926, 0x582E, 0x4017, {0x9F, 0xDF, 0xE8, 0x99, 0x8D, 0xAA, 0x09, 0x50}};
@@ -61,17 +61,37 @@ wchar_t CharAt(const std::vector<BYTE>& blob, size_t offset) {
     return static_cast<wchar_t>(blob[offset] | (blob[offset + 1] << 8));
 }
 
-// 在二进制数据里找 UTF-16 字符串（不区分大小写，不要求两字节对齐），返回第一次出现的位置。
-// wholeName：前面得是开头、NUL 或路径分隔符（“Code.lnk”不算在“Visual Studio Code.lnk”里）
-size_t FindUtf16(const std::vector<BYTE>& blob, const std::wstring& needle, bool wholeName = false) {
-    size_t n = needle.size();
-    if (n == 0 || blob.size() < n * 2) return kNotFound;
-    for (size_t o = 0; o + n * 2 <= blob.size(); ++o) {
-        size_t i = 0;
-        while (i < n && std::towlower(CharAt(blob, o + 2 * i)) == std::towlower(needle[i])) ++i;
-        if (i < n) continue;
-        wchar_t before = o >= 2 ? CharAt(blob, o - 2) : 0;
-        if (!wholeName || before == 0 || before == L'\\' || before == L'/') return o;
+bool ShortcutNameAt(const std::vector<BYTE>& blob, size_t start, size_t end, const std::wstring& name) {
+    if (end - start < (name.size() + 1) * 2 || CharAt(blob, start + name.size() * 2) != 0) return false;
+    std::wstring candidate;
+    candidate.reserve(name.size());
+    for (size_t i = 0; i < name.size(); ++i) {
+        wchar_t ch = CharAt(blob, start + i * 2);
+        if (ch == 0) return false;
+        candidate += ch;
+    }
+    int length = static_cast<int>(name.size());
+    return CompareStringOrdinal(candidate.c_str(), length, name.c_str(), length, TRUE) == CSTR_EQUAL;
+}
+
+size_t ShortcutPosition(const std::vector<BYTE>& blob, const std::wstring& name) {
+    // 外壳文件项的 0xbeef0004 扩展记录了长文件名偏移。名称前面是元数据，
+    // 不能只凭前面是不是 NUL 判断，也不能把 Code.lnk 匹配成 Visual Studio Code.lnk。
+    constexpr size_t kLongNameOffset = 16;
+    constexpr size_t kHeaderSize = kLongNameOffset + 2;
+    for (size_t i = 0; i + kHeaderSize <= blob.size(); ++i) {
+        if (CharAt(blob, i + 4) != 0x0004 || CharAt(blob, i + 6) != 0xbeef) continue;
+        size_t size = CharAt(blob, i);
+        size_t offset = CharAt(blob, i + kLongNameOffset);
+        if (size > blob.size() - i || offset < kHeaderSize || offset >= size) continue;
+        if (ShortcutNameAt(blob, i + offset, i + size, name)) return i + offset;
+    }
+
+    // 兼容存为单独文件名或带路径的完整字符串的记录。
+    for (size_t i = 0; i + (name.size() + 1) * 2 <= blob.size(); ++i) {
+        wchar_t before = i >= 2 ? CharAt(blob, i - 2) : 0;
+        if ((before == 0 || before == L'\\' || before == L'/') && ShortcutNameAt(blob, i, blob.size(), name))
+            return i;
     }
     return kNotFound;
 }
@@ -218,15 +238,16 @@ std::vector<PinnedApp> Load(const std::wstring& folder, const std::vector<BYTE>&
     };
     std::vector<Entry> entries;
 
-    // 1. 文件夹里的 .lnk
+    // 1. 固定列表里确认过的 .lnk，跳过取消固定后可能残留在文件夹中的文件
     WIN32_FIND_DATAW fd;
     HANDLE find = FindFirstFileW((folder + L"\\*.lnk").c_str(), &fd);
     if (find != INVALID_HANDLE_VALUE) {
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             Entry e;
+            e.order = ShortcutPosition(favorites, fd.cFileName);
+            if (e.order == kNotFound) continue;
             e.sortName = ToLower(fd.cFileName);
-            e.order = FindUtf16(favorites, fd.cFileName, true);
             e.app.launch = folder + L"\\" + fd.cFileName;
             ReadShortcut(e.app.launch, e.app.exePath, e.app.aumid);
             e.app.exePath = ToLower(e.app.exePath);
@@ -256,7 +277,7 @@ std::vector<PinnedApp> Load(const std::wstring& folder, const std::vector<BYTE>&
         entries.push_back(std::move(e));
     }
 
-    // 在 Favorites 里找不到位置的排到最后，按名称排
+    // 按 Favorites 里的顺序排，同一位置按名称排
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         if (a.order != b.order) return a.order < b.order;
         return a.sortName < b.sortName;
@@ -289,7 +310,18 @@ std::vector<PinnedApp> LoadPinnedApps(int iconPx) {
 // 判断一个窗口是不是这个固定应用的：两边都有 AppUserModelID 时比较 ID，否则比较程序路径
 bool PinMatchesWindow(const PinnedApp& pin, const WindowEntry& window) {
     if (!pin.aumid.empty() && !window.aumid.empty()) return pin.aumid == window.aumid;
-    return !pin.exePath.empty() && pin.exePath == window.exePath;
+    if (!pin.exePath.empty()) return pin.exePath == window.exePath;
+    // 系统的资源管理器快捷方式可能是外壳项目，只有 AppUserModelID，没有 exe 目标。
+    if (pin.aumid != kExplorerAppId || window.exePath.empty()) return false;
+    static const std::wstring explorerPath = [] {
+        wchar_t folder[MAX_PATH];
+        UINT length = GetWindowsDirectoryW(folder, ARRAYSIZE(folder));
+        if (!length || length >= ARRAYSIZE(folder)) return std::wstring{};
+        std::wstring path(folder, length);
+        if (path.back() != L'\\') path += L'\\';
+        return ToLower(path + L"explorer.exe");
+    }();
+    return window.exePath == explorerPath;
 }
 
 void LaunchApp(const std::wstring& target) { LaunchAsUser(target); }

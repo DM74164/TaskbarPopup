@@ -493,24 +493,27 @@ bool CaptureScreen(const RECT& area, std::vector<DWORD>& pixels) {
     bi.bmiHeader.biCompression = BI_RGB;
 
     HDC screen = GetDC(nullptr);
+    if (!screen) return false;
     HDC mem = CreateCompatibleDC(screen);
     void* bits = nullptr;
-    HBITMAP dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HBITMAP dib = mem ? CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
     bool ok = false;
-    if (dib) {
+    if (dib && bits) {
         HGDIOBJ old = SelectObject(mem, dib);
-        // CAPTUREBLT：分层窗口也要截进来
-        ok = BitBlt(mem, 0, 0, w, h, screen, area.left, area.top, SRCCOPY | CAPTUREBLT) != FALSE;
-        GdiFlush();
-        if (ok) {
-            const DWORD* src = static_cast<const DWORD*>(bits);
-            pixels.assign(src, src + static_cast<size_t>(w) * h);
-            for (DWORD& p : pixels) p |= 0xFF000000;  // BitBlt 不填 alpha
+        if (old && old != HGDI_ERROR) {
+            // CAPTUREBLT：分层窗口也要截进来
+            ok = BitBlt(mem, 0, 0, w, h, screen, area.left, area.top, SRCCOPY | CAPTUREBLT) != FALSE;
+            if (ok) {
+                GdiFlush();
+                const DWORD* src = static_cast<const DWORD*>(bits);
+                pixels.assign(src, src + static_cast<size_t>(w) * h);
+                for (DWORD& p : pixels) p |= 0xFF000000;  // BitBlt 不填 alpha
+            }
+            SelectObject(mem, old);
         }
-        SelectObject(mem, old);
-        DeleteObject(dib);
     }
-    DeleteDC(mem);
+    if (dib) DeleteObject(dib);
+    if (mem) DeleteDC(mem);
     ReleaseDC(nullptr, screen);
     return ok;
 }
